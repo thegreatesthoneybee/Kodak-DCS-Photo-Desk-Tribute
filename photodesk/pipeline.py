@@ -182,7 +182,8 @@ def decode(path, half_size=False, algorithm="AHD"):
             adjust_maximum_thr=0.0, highlight_mode=rawpy.HighlightMode.Clip,
             demosaic_algorithm=rawpy.DemosaicAlgorithm[algorithm],
         )
-        cam = r.postprocess(**params).astype(np.float32) * (1 / 65535)
+        cam = r.postprocess(**params).astype(np.float32)
+        cam *= np.float32(1 / 65535)
         daylight = np.array(r.daylight_whitebalance[:3], np.float64)
         if not np.all(daylight > 0):
             daylight = np.ones(3)
@@ -521,7 +522,7 @@ def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="
     lin = scene_linear(raw, settings)
     if source is None:
         lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
-    out = icc.trilinear(lut, np.power(lin, np.float32(1 / LUT_INPUT_GAMMA))).astype(np.float32, copy=False)
+    out = icc.trilinear(lut, lin, power=1 / LUT_INPUT_GAMMA)
     if quality == "better":
         out = finish(out, settings, raw.caps, raw.scale)
     out = orient(out, raw.flip, settings.rotation)
@@ -576,30 +577,38 @@ def lens_optimize(img, strength):
     return np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
 
 
+def _mix(a, b, w):
+    """a * w + b * (1 - w) (OpenCV: multithreaded, no numpy temporaries)."""
+    return cv2.addWeighted(a, float(w), b, float(1 - w), 0)
+
+
+def _clip01(img):
+    return np.clip(img, 0, 1, out=img)
+
+
 def reduce_noise(img, settings, scale=1.0):
-    ycc = cv2.cvtColor(img, cv2.COLOR_RGB2YCrCb)
+    ycc = cv2.cvtColor(np.asarray(img, np.float32), cv2.COLOR_RGB2YCrCb)
     y, cr, cb = cv2.split(ycc)
     s = settings.noise_strength / 100
     radius = max(1, round(settings.noise_radius * scale))
     t = settings.noise_type
     if t in ("basic", "advanced", "moire"):
         k = 2 * radius + 1
-        cr = cv2.GaussianBlur(cr, (k, k), 0) * s + cr * (1 - s)
-        cb = cv2.GaussianBlur(cb, (k, k), 0) * s + cb * (1 - s)
+        cr = _mix(cv2.GaussianBlur(cr, (k, k), 0), cr, s)
+        cb = _mix(cv2.GaussianBlur(cb, (k, k), 0), cb, s)
         if t != "basic":
             y = cv2.bilateralFilter(y, k, 0.01 + 0.06 * s, radius)
     if t == "moire" and settings.moire_threshold > 0:
         k = 2 * max(1, round((1 + settings.moire_threshold / 12) * scale)) + 1
         m = settings.moire_threshold / 100
-        cr = cv2.medianBlur(cr, min(k, 5)) * m + cr * (1 - m)
-        cb = cv2.medianBlur(cb, min(k, 5)) * m + cb * (1 - m)
+        cr = _mix(cv2.medianBlur(cr, min(k, 5)), cr, m)
+        cb = _mix(cv2.medianBlur(cb, min(k, 5)), cb, m)
     if t == "expert":
         d = max(3, round(5 * scale) | 1)
         y = cv2.bilateralFilter(y, d, 0.02 + 0.1 * settings.noise_luma / 100, 3)
         cr = cv2.bilateralFilter(cr, d * 2 + 1, 0.05 + 0.1 * s, 6)
         cb = cv2.bilateralFilter(cb, d * 2 + 1, 0.05 + 0.1 * s, 6)
-    out = cv2.cvtColor(cv2.merge([y, cr.astype(np.float32), cb.astype(np.float32)]), cv2.COLOR_YCrCb2RGB)
-    return np.clip(out, 0, 1).astype(np.float32, copy=False)
+    return _clip01(cv2.cvtColor(cv2.merge([y, cr, cb]), cv2.COLOR_YCrCb2RGB))
 
 
 def sharpen(img, settings, scale=1.0):
@@ -611,7 +620,7 @@ def sharpen(img, settings, scale=1.0):
     thr = settings.sharpen_threshold / 255
     detail = np.where(np.abs(detail) >= thr, detail, 0)
     ycc[..., 0] = y + (settings.sharpen_amount / 10) * detail
-    return np.clip(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB), 0, 1).astype(np.float32, copy=False)
+    return _clip01(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB))
 
 
 def orient(img, flip, rotation):

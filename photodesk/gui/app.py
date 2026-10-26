@@ -63,13 +63,18 @@ def build_menu(parent, res, items, handlers, context=R.MENU_CONTEXT):
 # ------------------------------------------------------------------ worker jobs
 def _thumb_job(path, settings, pdir, raw_file):
     if not raw_file:
-        img, _ = export.load_finished(path)
+        img, _ = export.load_finished(path, THUMB_EDGE)
         img = pipeline.resize_long_edge(img, THUMB_EDGE)
         return None, None, pipeline.apply_crop(pipeline.orient(img, 0, settings.rotation), None)
     raw = pipeline.decode(path, half_size=True)
     small = pipeline.reduced(raw, THUMB_EDGE)
     img = pipeline.render(small, settings.copy(crop=None), profile_directory=pdir, quality="faster")
     return small, raw.metadata, img
+
+
+def _finished_job(path, rotation):
+    img, _ = export.load_finished(path)
+    return pipeline.orient(img, 0, rotation)
 
 
 def _render_job(raw, settings, pdir, quality, edge, space):
@@ -240,7 +245,12 @@ class MainWindow(QMainWindow):
         ini = os.environ.get("PHOTODESK_SETTINGS")
         self.q = QSettings(ini, QSettings.IniFormat) if ini else QSettings("Kodak", "DCS Photo Desk")
         self.pdir = str(profiles.profile_dir())
+        # Interactive renders (image windows, close-ups, review) use the global pool; contact sheet
+        # thumbnails get their own pool so a large folder never queues ahead of what the user is viewing.
+        # Each render already uses every core (icc.trilinear), so a few workers are enough.
         self.pool = QThreadPool.globalInstance()
+        self.thumb_pool = QThreadPool(self)
+        self.thumb_pool.setMaxThreadCount(max(1, min(4, (os.cpu_count() or 2) // 2)))
         self.icons = ThumbIcons(res)
         self.cursors = {"click": res.cursor(148), "hand": res.cursor(191), "closeup": res.cursor(30978),
                         "crop": Qt.CrossCursor, 221: res.cursor(221), 222: res.cursor(222),
@@ -701,7 +711,7 @@ class MainWindow(QMainWindow):
         task.signals.done.connect(done)
         task.signals.failed.connect(lambda entry, msg: self.statusBar().showMessage(
             self.res.s(60000).replace("%s", entry.path.name) + f"  ({msg})"))
-        self.pool.start(task)
+        self.thumb_pool.start(task)
 
     def refresh_thumb(self, entry):
         """Re-render a thumbnail after its settings changed."""
@@ -747,15 +757,13 @@ class MainWindow(QMainWindow):
         s = settings or e.settings
         w.token += 1
         token = (w, w.token)
+        if e.is_raw and e.raw is None:
+            return
         if not e.is_raw:
-            img, _ = export.load_finished(e.path)
-            img = pipeline.orient(img, 0, s.rotation)
-            self._show_render(token, img)
-            return
-        if e.raw is None:
-            return
-        space = pipeline.resolve_space(self.opts.working_space, self.pdir)
-        task = Task(token, _render_job, e.raw, s, self.pdir, self.quality, PREVIEW_EDGE, space)
+            task = Task(token, _finished_job, e.path, s.rotation)
+        else:
+            space = pipeline.resolve_space(self.opts.working_space, self.pdir)
+            task = Task(token, _render_job, e.raw, s, self.pdir, self.quality, PREVIEW_EDGE, space)
         task.signals.done.connect(self._show_render)
         task.signals.failed.connect(lambda t, msg: D.message(self, self.res, self.res.s(60002) + "\n" + msg))
         self.statusBar().showMessage(self.res.tr("Rendering...", ("Common", "Common Strings")))
@@ -1402,7 +1410,7 @@ class MainWindow(QMainWindow):
 
         def render(entry, quality, size, callback):
             if not entry.is_raw:
-                img, _ = export.load_finished(entry.path)
+                img, _ = export.load_finished(entry.path, max(size.width(), size.height()))
                 callback(entry, to_qimage(pipeline.apply_crop(pipeline.orient(img, 0, entry.settings.rotation),
                                                               entry.settings.crop)))
                 return

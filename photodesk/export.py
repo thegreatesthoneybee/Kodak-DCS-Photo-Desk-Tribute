@@ -7,6 +7,7 @@ working-space profile, and JPEG quality (Best / Better / Good).
 """
 import dataclasses
 import datetime
+import functools
 import shutil
 from pathlib import Path
 
@@ -216,10 +217,30 @@ def is_raw(path):
         return False
 
 
-def load_finished(path):
-    """Finished (camera-processed) TIFF/JPEG as float32 RGB plus its embedded ICC profile."""
+def load_finished(path, long_edge=None):
+    """See _load_finished; full-size decodes are cached (close-up panning, previews, export)."""
+    p = Path(path)
+    st = p.stat()
+    img, icc_bytes = _load_finished_cached(str(p), st.st_mtime_ns, st.st_size, long_edge)
+    return img, icc_bytes
+
+
+@functools.lru_cache(maxsize=4)
+def _load_finished_cached(path, mtime_ns, size, long_edge):
+    img, icc_bytes = _load_finished(path, long_edge)
+    img.flags.writeable = False         # shared between callers
+    return img, icc_bytes
+
+
+def _load_finished(path, long_edge=None):
+    """Finished (camera-processed) TIFF/JPEG as float32 RGB plus its embedded ICC profile.
+
+    long_edge: decode at a reduced size of at least that many pixels (JPEG DCT scaling), for
+    thumbnails and previews."""
     im = Image.open(path)
     icc_bytes = im.info.get("icc_profile")
+    if long_edge:
+        im.draft("RGB", (long_edge, long_edge))
     arr = np.asarray(im.convert("RGB"), np.float32) / 255
     return arr, icc_bytes
 
