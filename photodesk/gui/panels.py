@@ -93,6 +93,7 @@ class ImageControlsPanel(QWidget):
         b[1173].activated.connect(lambda _: self._emit("balance", balance=b[1173].currentData()))
         b[1174].activated.connect(lambda _: self._emit("lighting", lighting=b[1174].currentData()))
         b[1175].activated.connect(lambda _: self._emit("look", look=b[1175].currentData()))
+        self.looks = []
         self.set_entry(None)
 
     def _emit(self, kind, **fields):
@@ -122,10 +123,15 @@ class ImageControlsPanel(QWidget):
         combo.setCurrentIndex(len(CROP_ITEMS) if key == "other" else CROP_ITEMS.index(key))
 
     def set_looks(self, looks):
+        """looks: [(file name, description)] of every installed Look."""
+        self.looks = list(looks)
+        self._fill_looks(self.looks)
+
+    def _fill_looks(self, looks):
         c = self.b[1175]
         c.clear()
-        for name, label in looks:
-            c.addItem(label, name)
+        for name, desc in looks:
+            c.addItem(pipeline.look_label(desc), name)
 
     def set_tool(self, cmd):
         for c, btn in self.tools.items():
@@ -170,6 +176,7 @@ class ImageControlsPanel(QWidget):
             b[cid].setText(str(v))
         b[1215].setText(str(s.lens_optimization) if caps.lens_optimization else "0")
         b[33197].setEnabled(raw_ok and caps.lens_optimization)
+        self._fill_looks(caps.looks(self.looks))      # older cameras support only some Looks
         b[1175].setCurrentIndex(max(0, b[1175].findData(s.look)))
         b[1226].setText(res.s(NOISE_LABEL[s.noise_type]))
         t = s.noise_type

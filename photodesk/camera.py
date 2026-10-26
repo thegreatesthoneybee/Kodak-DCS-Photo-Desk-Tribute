@@ -27,6 +27,7 @@ class Capabilities:
     pro_back: bool         # DCS Pro Back: +-1 EV, no Custom balance, no Auto Scene Balance
     pro_slr: bool          # DCS Pro 14n/14nx/SLR: Advanced/Moire/Expert noise reduction
     lens_optimization: bool
+    look_set: tuple = None  # restricted Looks of older cameras (None: every installed Look)
 
     @property
     def exposure_range(self):
@@ -37,6 +38,13 @@ class Capabilities:
         if self.pro_slr:
             return ("none", "advanced", "moire", "expert")
         return ("none", "basic", "advanced", "moire")
+
+    def looks(self, available):
+        """Looks this camera supports, from [(file name, description)] (help: Setting the Image Look)."""
+        allowed = self.look_set
+        if allowed is None:
+            return list(available)
+        return [(n, d) for n, d in available if d.replace("Kodak DCS ", "").replace(" Look", "") in allowed]
 
     @property
     def white_point(self):
@@ -54,7 +62,13 @@ def capabilities(model):
     pro_slr = any(k in m for k in ("slr/", "pro 14", "pro14"))
     dcs = pro_back or pro_slr or "dcs" in m
     lens = any(k in m for k in ("14nx", "slr/n", "slr/c"))
-    return Capabilities(dcs, pro_back, pro_slr, lens)
+    look_set = None
+    basic = ("Portrait", "Portrait Grayscale", "Product", "Product Grayscale")
+    if "620x" in m:
+        look_set = basic + ("Portrait Reduced", "Product Reduced")
+    elif any(k in m for k in ("315", "330", "520", "560", "620", "660")):
+        look_set = basic
+    return Capabilities(dcs, pro_back, pro_slr, lens, look_set)
 
 
 def read_make_model(path):

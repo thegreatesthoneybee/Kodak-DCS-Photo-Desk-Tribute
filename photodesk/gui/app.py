@@ -463,7 +463,7 @@ class MainWindow(QMainWindow):
     def _panels(self):
         res = self.res
         self.controls = ImageControlsPanel(res, self.acts)
-        self.controls.set_looks([(n, pipeline.look_label(d)) for n, d in self.looks])
+        self.controls.set_looks(self.looks)
         self.controls.command.connect(lambda c: self.acts[c].trigger())
         self.controls.edit.connect(lambda kind, f: self.edit(kind, **f))
         self.controls.crop_mode.connect(self.set_crop_mode)
@@ -589,6 +589,8 @@ class MainWindow(QMainWindow):
                 act.setEnabled(bool(on))
         if self.look_menu is not None:
             self.look_menu.setEnabled(raw)
+            for name, act in self.look_acts.items():
+                act.setEnabled(raw and all(name in dict(e.caps.looks(self.looks)) for e in sel))
         s = self.active_sheet()
         undo_id = s.sheet.undo_text_id() if s else 62091
         redo_id = s.sheet.redo_text_id() if s else 62092

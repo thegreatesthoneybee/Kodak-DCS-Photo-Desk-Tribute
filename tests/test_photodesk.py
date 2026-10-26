@@ -37,6 +37,14 @@ def raw():
     return pipeline.decode(SAMPLE, half_size=True)
 
 
+def test_camera_looks():
+    looks = [("P.icm", "Kodak DCS Portrait Look"), ("PG.icm", "Kodak DCS Portrait Grayscale Look"),
+             ("PR.icm", "Kodak DCS Portrait Reduced Look"), ("W.icm", "Kodak DCS Wedding Look")]
+    assert [n for n, _ in camera.capabilities("DCS660M").looks(looks)] == ["P.icm", "PG.icm"]
+    assert [n for n, _ in camera.capabilities("DCS620x").looks(looks)] == ["P.icm", "PG.icm", "PR.icm"]
+    assert camera.capabilities("DCS Pro SLR/n").looks(looks) == looks
+
+
 def test_custom_looks_in_system_folders(profile_dir, tmp_path, monkeypatch):
     import shutil
     shutil.copy(profile_dir / "DCSSepia1.icm", tmp_path / "MyCustomLook.icm")
