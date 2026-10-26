@@ -76,11 +76,7 @@ class Translator:
         hit = self.loose.get(_loose(text))
         if hit is None:
             return text
-        hit = hit.split("\t")[0]
-        if sep:
-            hit += sep + accel
-        if text.rstrip().endswith("...") and not hit.rstrip().endswith(("...", "…")):
-            hit += "..."
-        elif text.rstrip().endswith(":") and not hit.rstrip().endswith(":"):
-            hit += ":"
-        return hit
+        # Give the translation the source's trailing "..." / ":" (or none).
+        hit = re.sub(r"[\s.:…]+$", "", hit.split("\t")[0])
+        tail = re.search(r"(\.\.\.|…|:)?\s*$", head).group(1) or ""
+        return hit + tail + sep + accel

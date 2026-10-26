@@ -1,7 +1,9 @@
-"""Mapping from DCS camera models to Kodak source-correction profile families."""
+"""DCS camera models: TIFF Make/Model reading, source-correction profiles and capabilities."""
+import dataclasses
 import struct
 
-ILLUMINANTS = ("Daylight", "Flash", "Tungsten", "Fluorescent")
+# Order of the Image > Lighting menu.
+ILLUMINANTS = ("Daylight", "Tungsten", "Fluorescent", "Flash")
 
 # (substring of TIFF Model tag, profile file pattern); first match wins.
 _FAMILIES = (
@@ -17,11 +19,37 @@ _FAMILIES = (
     ("760", "DCS760C{}Source.icm"),
 )
 
-_TONE_CURVES = (
-    ("SLR/c", "DCSProSLRcToneCurve.icm"),
-    ("SLR/n", "DCSProSLRnToneCurve.icm"),
-    ("Pro 14", "DCSPro14ToneCurve.icm"),
-)
+
+@dataclasses.dataclass(frozen=True)
+class Capabilities:
+    """Processing options Photo Desk offers for a camera model."""
+    dcs: bool              # DCS raw file (all processing options); False for other cameras
+    pro_back: bool         # DCS Pro Back: +-1 EV, no Custom balance, no Auto Scene Balance
+    pro_slr: bool          # DCS Pro 14n/14nx/SLR: Advanced/Moire/Expert noise reduction
+    lens_optimization: bool
+
+    @property
+    def exposure_range(self):
+        return 1.0 if self.pro_back else 2.0
+
+    @property
+    def noise_types(self):
+        if self.pro_slr:
+            return ("none", "advanced", "moire", "expert")
+        return ("none", "basic", "advanced", "moire")
+
+    @property
+    def balances(self):
+        return ("preset", "click", "auto") if self.pro_back else ("preset", "click", "custom", "auto")
+
+
+def capabilities(model):
+    m = (model or "").lower()
+    pro_back = "proback" in m or "pro back" in m
+    pro_slr = any(k in m for k in ("slr/", "pro 14", "pro14"))
+    dcs = pro_back or pro_slr or "dcs" in m
+    lens = any(k in m for k in ("14nx", "slr/n", "slr/c"))
+    return Capabilities(dcs, pro_back, pro_slr, lens)
 
 
 def read_make_model(path):
@@ -53,11 +81,4 @@ def source_profile(model, illuminant):
     for key, pattern in _FAMILIES:
         if key.lower() in model.lower():
             return pattern.format(illuminant)
-    return None
-
-
-def tone_curve_profile(model):
-    for key, name in _TONE_CURVES:
-        if key.lower() in model.lower():
-            return name
     return None

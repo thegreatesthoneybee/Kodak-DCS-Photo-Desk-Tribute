@@ -1,95 +1,108 @@
-"""Writing processed images to JPEG / TIFF with embedded ICC profile and EXIF."""
+"""Saving images as Photo Desk does: Standard TIFF, Standard JPEG and As Is.
+
+Output options follow the original Preferences dialog: RGB working space,
+export size (percentage / fill frame / fit to frame), resolution, TIFF image
+data (Linear Mode or Render To RGB Working Space), 8/16 bit, embedding the
+working-space profile, and JPEG quality (Best / Better / Good).
+"""
+import dataclasses
 import datetime
-import struct
+import shutil
 from pathlib import Path
 
+import cv2
 import numpy as np
 import tifffile
 from PIL import Image
 
-from . import pipeline
+from . import iptc, pipeline, profiles
 
-FORMATS = ("JPEG", "TIFF 8-bit", "TIFF 16-bit")
-_EXT = {"JPEG": ".jpg", "TIFF 8-bit": ".tif", "TIFF 16-bit": ".tif"}
-
-
-# ------------------------------------------------------------- ICC writing
-def _s15(v):
-    return struct.pack(">i", int(round(v * 65536)))
+JPEG_QUALITY = {"best": 95, "better": 85, "good": 70}
+FILE_TYPES = ("tiff", "jpeg", "asis")
+_EXT = {"tiff": ".tif", "jpeg": ".jpg"}
 
 
-def _tag_xyz(xyz):
-    return b"XYZ \x00\x00\x00\x00" + b"".join(_s15(v) for v in xyz)
+@dataclasses.dataclass
+class OutputOptions:
+    working_space: str = pipeline.DEFAULT_WORKING_SPACE   # profile file name or path
+    resize: bool = False
+    scale_style: str = "percent"          # percent | fill | fit_trim | fit_fill
+    percent: int = 100                    # 10..400
+    width: int = 3000                     # pixels, 50..18000
+    height: int = 2000
+    resolution: float = 300.0             # 1..4000
+    resolution_unit: str = "in"           # in | cm
+    tiff_linear: bool = False
+    tiff_16bit: bool = False
+    render_gps: bool = False
+    embed_tiff_profile: bool = True
+    jpeg_quality: str = "best"
+    embed_jpeg_profile: bool = True
+
+    def to_json(self):
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_json(cls, d):
+        known = {f.name for f in dataclasses.fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
-def _tag_text(s):
-    return b"text\x00\x00\x00\x00" + s.encode("ascii") + b"\x00"
+# ------------------------------------------------------------------ sizing
+def export_size(w, h, opts):
+    """Return (scaled w, h, canvas w, h) for the export size options."""
+    if not opts.resize:
+        return w, h, w, h
+    if opts.scale_style == "percent":
+        p = min(max(opts.percent, 10), 400) / 100
+        nw, nh = max(1, round(w * p)), max(1, round(h * p))
+        return nw, nh, nw, nh
+    fw, fh = opts.width, opts.height
+    if opts.scale_style == "fill":
+        s = max(fw / w, fh / h)
+        return max(1, round(w * s)), max(1, round(h * s)), fw, fh
+    s = min(fw / w, fh / h)
+    nw, nh = max(1, round(w * s)), max(1, round(h * s))
+    return (nw, nh, nw, nh) if opts.scale_style == "fit_trim" else (nw, nh, fw, fh)
 
 
-def _tag_desc(s):
-    a = s.encode("ascii") + b"\x00"
-    return (b"desc\x00\x00\x00\x00" + struct.pack(">I", len(a)) + a
-            + b"\x00" * 8 + b"\x00" * 3 + b"\x00" * 67)
+def apply_size(img, opts):
+    h, w = img.shape[:2]
+    nw, nh, cw, ch = export_size(w, h, opts)
+    if (nw, nh) != (w, h):
+        interp = cv2.INTER_AREA if nw < w else cv2.INTER_CUBIC
+        img = cv2.resize(img, (nw, nh), interpolation=interp)
+    if (cw, ch) == (nw, nh):
+        return img
+    canvas = np.ones((ch, cw, 3), img.dtype)
+    if cw <= nw and ch <= nh:          # fill frame: centre and crop
+        x, y = (nw - cw) // 2, (nh - ch) // 2
+        return np.ascontiguousarray(img[y:y + ch, x:x + cw])
+    x, y = (cw - nw) // 2, (ch - nh) // 2  # fit frame, fill extra space with white
+    canvas[y:y + nh, x:x + nw] = img
+    return canvas
 
 
-def _tag_curve(kind):
-    if kind[0] == "gamma":
-        return b"curv\x00\x00\x00\x00" + struct.pack(">IH", 1, int(round(kind[1] * 256)))
-    x = np.linspace(0, 1, 1024)
-    y = kind[1](x)
-    return b"curv\x00\x00\x00\x00" + struct.pack(">I", 1024) + (np.round(y * 65535).astype(">u2")).tobytes()
-
-
-def _srgb_eotf(x):
-    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
-
-
-def _prophoto_eotf(x):
-    return np.where(x < 16 / 512, x / 16, x ** 1.8)
-
-
-_TRC = {
-    "sRGB": ("table", _srgb_eotf),
-    "Adobe RGB (1998)": ("gamma", 563 / 256),
-    "ProPhoto RGB": ("table", _prophoto_eotf),
-}
-
-
-def icc_profile(space):
-    """Build an ICC v2 matrix/TRC display profile for an output space (D50 PCS)."""
-    matrix, _ = pipeline.OUTPUT_SPACES[space]
-    primaries = np.linalg.inv(matrix)  # columns = XYZ(D50) of R, G, B
-    curve = _tag_curve(_TRC[space])
-    tags = [
-        (b"desc", _tag_desc(space)),
-        (b"cprt", _tag_text("No copyright, use freely")),
-        (b"wtpt", _tag_xyz((0.9642, 1.0, 0.8249))),
-        (b"rXYZ", _tag_xyz(primaries[:, 0])),
-        (b"gXYZ", _tag_xyz(primaries[:, 1])),
-        (b"bXYZ", _tag_xyz(primaries[:, 2])),
-        (b"rTRC", curve), (b"gTRC", curve), (b"bTRC", curve),
-    ]
-    offset = 128 + 4 + 12 * len(tags)
-    table, body, placed = b"", b"", {}
-    for sig, data in tags:
-        if data not in placed:
-            placed[data] = offset + len(body)
-            body += data + b"\x00" * (-len(data) % 4)
-        table += sig + struct.pack(">II", placed[data], len(data))
-    size = offset + len(body)
-    header = struct.pack(">I4sI4s4s4s", size, b"none", 0x02100000, b"mntr", b"RGB ", b"XYZ ")
-    header += b"\x00" * 12 + b"acsp" + b"\x00" * 24 + struct.pack(">I", 0)
-    header += _s15(0.9642) + _s15(1.0) + _s15(0.8249) + b"\x00" * 48
-    assert len(header) == 128
-    return header + struct.pack(">I", len(tags)) + table + body
+def _dpi(opts):
+    return opts.resolution * (2.54 if opts.resolution_unit == "cm" else 1.0)
 
 
 # ------------------------------------------------------------------ export
-def output_path(raw_path, out_dir, fmt):
-    return Path(out_dir) / (Path(raw_path).stem + _EXT[fmt])
+def output_path(raw_path, out_dir, file_type, name=None):
+    ext = _EXT.get(file_type, Path(raw_path).suffix)
+    return Path(out_dir) / ((name or Path(raw_path).stem) + ext)
 
 
-def _exif(meta):
+def sequence_names(base, digits, start, count):
+    """Rename Setup: base name with a zero-padded sequence number at '*' or the end."""
+    names = []
+    for i in range(count):
+        num = str(start + i).zfill(digits)
+        names.append(base.replace("*", num) if "*" in base else base + num)
+    return names
+
+
+def _exif(meta, dpi):
     exif = Image.Exif()
     if meta.get("make"):
         exif[0x010F] = meta["make"]
@@ -116,33 +129,74 @@ def _exif(meta):
     return exif
 
 
-def save(img, path, fmt, space, metadata, quality=92, long_edge=None):
-    """img: float32 HxWx3 in [0, 1] encoded in `space`."""
-    img = pipeline.resize_long_edge(img, long_edge)
+def save(img, path, file_type, opts, metadata, settings=None, space_bytes=None):
+    """img: float32 HxWx3 in [0, 1]; space_bytes: ICC profile to embed (None for linear)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    icc = icc_profile(space)
-    if fmt == "JPEG":
+    img = apply_size(img, opts)
+    dpi = _dpi(opts)
+    iptc_blob = iptc.encode(settings.iptc) if settings and settings.iptc else None
+    if file_type == "jpeg":
         im = Image.fromarray(np.round(img * 255).astype(np.uint8), "RGB")
-        im.save(path, "JPEG", quality=quality, subsampling=0, icc_profile=icc, exif=_exif(metadata))
-    elif fmt in ("TIFF 8-bit", "TIFF 16-bit"):
-        if fmt == "TIFF 8-bit":
-            data = np.round(img * 255).astype(np.uint8)
-        else:
-            data = np.round(img * 65535).astype(np.uint16)
-        tifffile.imwrite(
-            path, data, photometric="rgb", compression="zlib", software="PhotoDesk",
-            extratags=[(34675, "B", len(icc), icc, True)],
-            metadata=None,
-        )
+        kw = dict(quality=JPEG_QUALITY[opts.jpeg_quality], subsampling=0 if opts.jpeg_quality == "best" else 2,
+                  dpi=(dpi, dpi), exif=_exif(metadata, dpi))
+        if space_bytes and opts.embed_jpeg_profile:
+            kw["icc_profile"] = space_bytes
+        im.save(path, "JPEG", **kw)
+        if iptc_blob:
+            iptc.insert_into_jpeg(path, iptc_blob)
+    elif file_type == "tiff":
+        data = (np.round(img * 65535).astype(np.uint16) if opts.tiff_16bit
+                else np.round(img * 255).astype(np.uint8))
+        extratags = []
+        if space_bytes and opts.embed_tiff_profile:
+            extratags.append((34675, "B", len(space_bytes), space_bytes, True))
+        if iptc_blob:
+            # IPTC-NAA (33723) is stored as LONG for Photoshop compatibility.
+            padded = iptc_blob + b"\0" * (-len(iptc_blob) % 4)
+            extratags.append((33723, "B", len(padded), padded, True))
+        if settings and settings.annotation:
+            extratags.append((270, "s", 0, settings.annotation, True))
+        tifffile.imwrite(path, data, photometric="rgb", software="PhotoDesk",
+                         resolution=(dpi / (2.54 if opts.resolution_unit == "cm" else 1),) * 2,
+                         resolutionunit="CENTIMETER" if opts.resolution_unit == "cm" else "INCH",
+                         extratags=extratags, metadata=None)
     else:
-        raise ValueError(f"unknown format {fmt}")
+        raise ValueError(f"unknown file type {file_type}")
     return path
 
 
-def process_file(raw_path, out_dir, fmt="JPEG", space="sRGB", quality=92, long_edge=None,
-                 settings=None, profile_directory=None):
+def save_as_is(raw_path, dest, settings):
+    """As Is: copy the DCS file with its settings (Photo Desk keeps them inside the file)."""
+    dest = Path(dest)
+    src = Path(raw_path)
+    if dest.resolve() != src.resolve():
+        shutil.copy2(src, dest)
+    pipeline.save_settings(dest, settings)
+    return dest
+
+
+def process_file(raw_path, dest, file_type="jpeg", opts=None, settings=None, profile_directory=None):
+    """Render one raw file and save it to dest (a file path)."""
+    opts = opts or OutputOptions()
+    pdir = Path(profile_directory or profiles.profile_dir())
+    settings = settings or pipeline.load_settings(raw_path)
+    if file_type == "asis":
+        return save_as_is(raw_path, dest, settings)
     raw = pipeline.decode(raw_path)
-    settings = settings or pipeline.load_settings(raw_path, raw.make)
-    img = pipeline.render(raw, settings, space, profile_directory)
-    return save(img, output_path(raw_path, out_dir, fmt), fmt, space, raw.metadata, quality, long_edge)
+    linear = file_type == "tiff" and opts.tiff_linear and raw.caps.dcs
+    space = pipeline.resolve_space(opts.working_space, pdir)
+    img = pipeline.render(raw, settings, space, pdir, linear=linear)
+    if file_type == "tiff" and opts.render_gps and raw.metadata.get("gps"):
+        img = render_gps(img, raw.metadata["gps"])
+    space_bytes = None if linear else Path(space).read_bytes()
+    return save(img, dest, file_type, opts, raw.metadata, settings, space_bytes)
+
+
+def render_gps(img, text):
+    """Burn GPS text into the upper-left corner (Render GPS Information In TIFF Files)."""
+    out = np.ascontiguousarray(img.copy())
+    scale = max(0.5, img.shape[1] / 2000)
+    cv2.putText(out, text, (int(10 * scale), int(30 * scale)), cv2.FONT_HERSHEY_SIMPLEX, scale,
+                (1.0, 1.0, 1.0), max(1, int(2 * scale)), cv2.LINE_AA)
+    return out

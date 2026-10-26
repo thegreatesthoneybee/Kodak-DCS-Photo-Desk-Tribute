@@ -65,6 +65,20 @@ def install_from_installer(installer_path, dest=None):
     return dest, sorted(profiles)
 
 
+def system_color_dirs_profiles():
+    """ICC profiles installed in the operating system's colour folders."""
+    if sys.platform == "win32":
+        dirs = [Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/spool/drivers/color"]
+    elif sys.platform == "darwin":
+        dirs = [Path("/System/Library/ColorSync/Profiles"), Path("/Library/ColorSync/Profiles"),
+                Path.home() / "Library/ColorSync/Profiles"]
+    else:
+        dirs = [Path("/usr/share/color/icc"), Path.home() / ".local/share/icc"]
+    for d in dirs:
+        if d.is_dir():
+            yield from (p for p in d.iterdir() if p.suffix.lower() in (".icc", ".icm"))
+
+
 def ui_dir(dest=None):
     return (Path(dest) if dest else profile_dir()) / "ui"
 

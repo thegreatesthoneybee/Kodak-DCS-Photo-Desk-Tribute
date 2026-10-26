@@ -4,12 +4,13 @@ import concurrent.futures
 import sys
 from pathlib import Path
 
-from . import camera, export, pipeline, profiles
+from . import export, pipeline, profiles
 
 RAW_SUFFIXES = {".dcr", ".kdc", ".dc2", ".k25", ".tif"}
+FILE_TYPES = {"jpeg": "jpeg", "jpg": "jpeg", "tiff": "tiff", "tif": "tiff"}
 
 
-def _collect(paths):
+def collect(paths):
     for p in map(Path, paths):
         if p.is_dir():
             yield from sorted(f for f in p.iterdir() if f.suffix.lower() in RAW_SUFFIXES and f.is_file())
@@ -19,35 +20,43 @@ def _collect(paths):
 
 def _convert(job):
     src, args = job
-    make, _ = camera.read_make_model(src)
-    settings = pipeline.load_settings(src, make)
+    settings = pipeline.load_settings(src)
     if args.look:
         settings.look = args.look
-    if args.illuminant:
-        settings.illuminant = args.illuminant
-    if args.wb:
-        settings.wb_mode = args.wb
-    return export.process_file(src, args.out, args.format, args.space, args.quality, args.long_edge, settings)
+    if args.lighting:
+        settings.lighting = args.lighting
+    if args.balance:
+        settings.balance = args.balance
+    opts = export.OutputOptions(working_space=args.space, tiff_16bit=args.bits == 16,
+                                tiff_linear=args.linear, jpeg_quality=args.quality)
+    if args.long_edge:
+        opts.resize, opts.scale_style, opts.width, opts.height = True, "fit_trim", args.long_edge, args.long_edge
+    file_type = FILE_TYPES[args.format]
+    dest = export.output_path(src, args.out, file_type)
+    return export.process_file(src, dest, file_type, opts, settings)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="photodesk")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    ip = sub.add_parser("install-profiles", help="extract Kodak ICC profiles from Photo_Desk_V_4_3_0.exe")
+    ip = sub.add_parser("install-profiles", help="extract Kodak profiles and UI resources from Photo_Desk_V_4_3_0.exe")
     ip.add_argument("installer")
     ip.add_argument("--dest")
 
-    cp = sub.add_parser("convert", help="convert raw files")
+    cp = sub.add_parser("convert", help="convert raw files (Standard TIFF / Standard JPEG)")
     cp.add_argument("inputs", nargs="+")
     cp.add_argument("-o", "--out", required=True)
-    cp.add_argument("-f", "--format", choices=export.FORMATS, default="JPEG")
-    cp.add_argument("-s", "--space", choices=list(pipeline.OUTPUT_SPACES), default="sRGB")
-    cp.add_argument("-q", "--quality", type=int, default=92)
+    cp.add_argument("-f", "--format", choices=sorted(FILE_TYPES), default="jpeg")
+    cp.add_argument("-s", "--space", default=pipeline.DEFAULT_WORKING_SPACE,
+                    help="RGB working space profile (file name in the profile folder or a path)")
+    cp.add_argument("-q", "--quality", choices=list(export.JPEG_QUALITY), default="best")
+    cp.add_argument("--bits", type=int, choices=(8, 16), default=8)
+    cp.add_argument("--linear", action="store_true", help="TIFF Linear Mode")
     cp.add_argument("--long-edge", type=int)
     cp.add_argument("--look", help="look profile file name, e.g. DCSPortraitLook.icm")
-    cp.add_argument("--illuminant", choices=["Daylight", "Flash", "Tungsten", "Fluorescent"])
-    cp.add_argument("--wb", choices=["as_shot", "daylight", "auto"])
+    cp.add_argument("--lighting", choices=pipeline.LIGHTINGS)
+    cp.add_argument("--balance", choices=["preset", "custom", "auto"])
     cp.add_argument("-j", "--jobs", type=int, default=2)
 
     sub.add_parser("looks", help="list installed look profiles")
@@ -66,7 +75,7 @@ def main(argv=None):
         print("Kodak profiles not installed; run: photodesk install-profiles Photo_Desk_V_4_3_0.exe",
               file=sys.stderr)
         return 2
-    files = list(_collect(args.inputs))
+    files = list(collect(args.inputs))
     failed = 0
     with concurrent.futures.ProcessPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         futures = {pool.submit(_convert, (f, args)): f for f in files}
