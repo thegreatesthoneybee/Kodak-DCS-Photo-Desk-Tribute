@@ -107,6 +107,7 @@ pyinstaller packaging/photodesk.spec
 
 `vendor/original/Photo_Desk_V_4_3_0.exe`와 `raw/*.DCR` 파일이 있을 때만 전체 테스트가 실행됩니다.
 `.github/workflows/build.yml`이 Windows x64와 macOS arm64(`macos-14` 러너)를 빌드합니다.
+Mac에서 직접 빌드하는 방법은 [docs/BUILD_MACOS.md](docs/BUILD_MACOS.md)를 보세요.
 
 ## 원본과 다른 점
 
