@@ -382,8 +382,11 @@ class MainWindow(QMainWindow):
                 else:
                     menu.addMenu(self._submenu(it[1], it[2]))
             elif it[1] == 57616:
-                self.recent_menu = QMenu(res.tr(it[2], MENU_CONTEXTS), menu)
-                menu.addMenu(self.recent_menu)
+                # MFC ID_FILE_MRU_FILE1: the placeholder item is replaced inline by "&1 path" entries.
+                self.recent_menu = menu
+                self.recent_anchor = menu.addSeparator()
+                self.recent_anchor.setVisible(False)
+                self.recent_acts = []
                 self._fill_recent()
             else:
                 menu.addAction(self.acts[it[1]])
@@ -404,14 +407,21 @@ class MainWindow(QMainWindow):
     def _fill_recent(self):
         if self.recent_menu is None:
             return
-        self.recent_menu.clear()
+        for act in self.recent_acts:
+            self.recent_menu.removeAction(act)
         recent = self.q.value("Recent File List", []) or []
         if isinstance(recent, str):
             recent = [recent]
+        self.recent_acts = []
+        if not recent:
+            self.acts[57616].setEnabled(False)
+            self.recent_acts.append(self.acts[57616])
         for i, path in enumerate(recent[:4]):
-            act = self.recent_menu.addAction(f"&{i + 1} {path}")
+            act = QAction(f"&{i + 1} {path}", self.recent_menu)
             act.triggered.connect(lambda _=False, p=path: self.open_path(p))
-        self.recent_menu.setEnabled(bool(recent))
+            self.recent_acts.append(act)
+        for act in self.recent_acts:
+            self.recent_menu.insertAction(self.recent_anchor, act)
 
     def _add_recent(self, path):
         recent = self.q.value("Recent File List", []) or []
