@@ -151,6 +151,7 @@ class ImageWindow(QMdiSubWindow):
         self.view.clicked.connect(self._clicked)
         self.view.crop_changed.connect(lambda c: main.set_crop([self.entry], c))
         self.view.hover.connect(main.show_pixel)
+        self.view.crop_size.connect(main.show_size)
         self.view.zoom_changed.connect(lambda z: main.show_zoom(z) if main.mdi.activeSubWindow() is self else None)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(lambda pos: main.context_menu(195, self.view.mapToGlobal(pos)))
@@ -488,8 +489,7 @@ class MainWindow(QMainWindow):
             self.st_count.setText("")
         iw = self.active_image()
         if iw:
-            fw, fh = iw.view.full_size
-            self.st_size.setText(self.res.s(59151).replace("%d", str(fw), 1).replace("%d", str(fh), 1))
+            self.show_size(None)
             self.show_zoom(iw.view.zoom)
         elif sw:
             self.st_size.setText("")
@@ -1252,6 +1252,16 @@ class MainWindow(QMainWindow):
             if dlg.exec() == D.QDialog.Accepted:
                 iw.view.set_zoom(dlg.zoom)
 
+    def show_size(self, crop_px=None):
+        """Width/height pane: the crop rectangle in Crop mode, otherwise the image size."""
+        iw = self.active_image()
+        if iw is None:
+            return
+        if crop_px is None and self.tool == "crop":
+            crop_px = iw.view.crop_pixels()
+        w, h = crop_px if crop_px else iw.view.full_size
+        self.st_size.setText(self.res.s(59151).replace("%d", str(w), 1).replace("%d", str(h), 1))
+
     def show_zoom(self, z):
         self.st_zoom.setText(self.res.s(59150).replace("%d%%", f"{z}%"))
         for cmd, zz in ZOOMS.items():
@@ -1351,6 +1361,7 @@ class MainWindow(QMainWindow):
                                          else Qt.ArrowCursor)
             for w in sw.images:
                 w.view.set_tool(tool)
+        self.show_size()
 
     def _crop_ratio(self):
         if self.crop_mode == "other":

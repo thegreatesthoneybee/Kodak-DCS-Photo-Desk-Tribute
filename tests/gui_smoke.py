@@ -84,6 +84,12 @@ def main(folder, shot):
     wait(app, lambda: iw.view.image is not None, 180)
     w.set_crop([entry], (0.1, 0.1, 0.6, 0.6))
     assert entry.settings.crop == (0.1, 0.1, 0.6, 0.6)
+    w.mdi.setActiveSubWindow(iw)
+    wait(app, lambda: iw.view.crop == entry.settings.crop, 180)
+    w.set_tool("crop")                         # status bar shows the crop size in Crop mode
+    cw, ch = iw.view.crop_pixels()
+    assert w.st_size.text().count(str(cw)) and w.st_size.text().count(str(ch)), w.st_size.text()
+    w.set_tool("select")
     w.toggle_dock(w.hist_dock)
     app.processEvents()
     # Save As (Standard JPEG) through the export path used by File > Save As.

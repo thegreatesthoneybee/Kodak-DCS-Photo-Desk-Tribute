@@ -350,6 +350,7 @@ class ImageView(QScrollArea):
     crop_changed = Signal(object)                # new crop rect or None
     hover = Signal(object)                       # (x px, y px, (r, g, b)) or None
     zoom_changed = Signal(int)
+    crop_size = Signal(object)                   # (w, h) px of the crop rectangle while it changes
 
     def __init__(self, cursors=None):
         super().__init__()
@@ -515,7 +516,15 @@ class ImageView(QScrollArea):
                     self.crop = self._constrain(ax, ay, bx, by)
                 else:
                     self.crop = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        self.crop_size.emit(self.crop_pixels())
         self.canvas.update()
+
+    def crop_pixels(self):
+        """(width, height) of the crop rectangle in full-resolution pixels, or None."""
+        if not self.crop:
+            return None
+        x0, y0, x1, y1 = self.crop
+        return round((x1 - x0) * self.full_size[0]), round((y1 - y0) * self.full_size[1])
 
     def _constrain(self, ax, ay, bx, by):
         if self.ratio:
