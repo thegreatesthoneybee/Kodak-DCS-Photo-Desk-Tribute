@@ -15,6 +15,9 @@ PROFILE_GROUPS = ("Standard ICC Profiles", "Custom Looks ICC Profiles")
 # layouts, menus, toolbar, bitmaps and cursors; the .u16 file holds the
 # official translations of every UI string.
 UI_FILES = ("PhotoDsk.exe", "PhotoDeskUIStrings.u16")
+# Help Topics: the original HTML help of each language (installer file groups "Help Files - <name>").
+HELP_GROUPS = ("English", "French", "German", "Italian", "Japanese", "Korean", "Portuguese",
+               "Simplified Chinese", "Spanish", "Traditional Chinese")
 
 
 def data_dir():
@@ -49,6 +52,10 @@ def extract_profiles(installer_bytes):
         profiles.update(inner.extract_group(group))
     program = inner.extract_group("Program Files")
     ui = {k: v for k, v in program.items() if k in UI_FILES}
+    for group in HELP_GROUPS:
+        for name, data in inner.extract_group("Help Files - " + group).items():
+            if name.lower().endswith(".chm"):
+                ui[f"help/{group}/{name}"] = data
     return {k: v for k, v in profiles.items() if k.lower().endswith(".icm")}, ui
 
 
@@ -61,6 +68,7 @@ def install_from_installer(installer_path, dest=None):
     ui_dest = dest / "ui"
     ui_dest.mkdir(exist_ok=True)
     for name, data in ui.items():
+        (ui_dest / name).parent.mkdir(parents=True, exist_ok=True)
         (ui_dest / name).write_bytes(data)
     return dest, sorted(profiles)
 
@@ -81,6 +89,16 @@ def system_color_dirs_profiles():
 
 def ui_dir(dest=None):
     return (Path(dest) if dest else profile_dir()) / "ui"
+
+
+def help_file(language, dest=None):
+    """PHOTODSK.chm for a UI language name (falls back to English)."""
+    group = {"Chinese": "Simplified Chinese", "Portugese": "Portuguese"}.get(language, language)
+    for g in (group, "English"):
+        p = ui_dir(dest) / "help" / g / "PHOTODSK.chm"
+        if p.is_file():
+            return p
+    return None
 
 
 def is_installed(dest=None):
