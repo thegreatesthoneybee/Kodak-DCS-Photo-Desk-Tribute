@@ -196,7 +196,7 @@ class ImageControlsPanel(QWidget):
 class ImageInfoPanel(QWidget):
     """Dialog template 153: IPTC button, sounds, annotation, camera settings."""
     command = Signal(int)
-    annotation = Signal(str)
+    annotation = Signal(object, str)   # (entry, text): annotations apply to the focused image only
     play = Signal(object)     # list of sound paths
     stop = Signal()
 
@@ -222,7 +222,7 @@ class ImageInfoPanel(QWidget):
         if obj is self.note and ev.type() == ev.Type.FocusOut and self._entry is not None:
             text = self.note.toPlainText()[:500]
             if text != self._entry.settings.annotation:
-                self.annotation.emit(text)
+                self.annotation.emit(self._entry, text)
         return False
 
     def _play(self):

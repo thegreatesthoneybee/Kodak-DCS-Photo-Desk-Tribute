@@ -454,7 +454,7 @@ class MainWindow(QMainWindow):
         self.controls.set_crop_mode(self.crop_mode, self.crop_other)
         self.info = ImageInfoPanel(res)
         self.info.command.connect(lambda c: self.acts[c].trigger())
-        self.info.annotation.connect(lambda t: self.edit("annotation", annotation=t))
+        self.info.annotation.connect(lambda e, t: self.edit("annotation", entries=[e], annotation=t))
         self.info.play.connect(self._play)
         self.info.stop.connect(self.stop_sounds)
         self.hist = HistogramPanel(res)

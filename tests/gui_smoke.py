@@ -8,8 +8,8 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QFontDatabase  # noqa: E402
+from PySide6.QtCore import QEvent, Qt, QTimer  # noqa: E402
+from PySide6.QtGui import QFocusEvent, QFontDatabase  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from photodesk.gui import res as R  # noqa: E402
@@ -141,6 +141,20 @@ def main(folder, shot):
     # A file written into the folder by another program shows up on its own (folder watcher).
     shutil.copy(paths[0], drop_dir / "external.jpg")
     wait(app, lambda: sw2.view.count() == 3, 30)
+    # Annotation goes to the focused (yellow) thumbnail only, even with several selected.
+    w.mdi.setActiveSubWindow(sw2)
+    app.processEvents()
+    sw2.view.selectAll()
+    sw2.view.setCurrentRow(1, sw2.view.selectionModel().SelectionFlag.Select)
+    app.processEvents()
+    focused = w.focused()
+    assert len(w.selection()) == 3 and focused is not None
+    w.info.note.setPlainText("note")
+    w.info.eventFilter(w.info.note, QFocusEvent(QEvent.FocusOut))
+    assert [e.settings.annotation for e in sw2.sheet.entries].count("note") == 1
+    assert focused.settings.annotation == "note"
+    for e in sw2.sheet.entries:
+        e.dirty = False
     w.mdi.setActiveSubWindow(sw)
     w.mdi.tileSubWindows()
     app.processEvents()
