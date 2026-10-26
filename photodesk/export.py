@@ -183,6 +183,8 @@ def process_file(raw_path, dest, file_type="jpeg", opts=None, settings=None, pro
     settings = settings or pipeline.load_settings(raw_path)
     if file_type == "asis":
         return save_as_is(raw_path, dest, settings)
+    if not is_raw(raw_path):
+        return process_finished(raw_path, dest, file_type, opts, settings)
     raw = pipeline.decode(raw_path)
     linear = file_type == "tiff" and opts.tiff_linear and raw.caps.dcs
     space = pipeline.resolve_space(opts.working_space, pdir)
@@ -191,6 +193,31 @@ def process_file(raw_path, dest, file_type="jpeg", opts=None, settings=None, pro
         img = render_gps(img, raw.metadata["gps"])
     space_bytes = None if linear else Path(space).read_bytes()
     return save(img, dest, file_type, opts, raw.metadata, settings, space_bytes)
+
+
+def is_raw(path):
+    try:
+        import rawpy
+        with rawpy.imread(str(path)):
+            return True
+    except Exception:  # finished TIFF/JPEG files are not raw
+        return False
+
+
+def load_finished(path):
+    """Finished (camera-processed) TIFF/JPEG as float32 RGB plus its embedded ICC profile."""
+    im = Image.open(path)
+    icc_bytes = im.info.get("icc_profile")
+    arr = np.asarray(im.convert("RGB"), np.float32) / 255
+    return arr, icc_bytes
+
+
+def process_finished(path, dest, file_type, opts, settings):
+    """Finished files only support rotation and crop (as in Photo Desk)."""
+    img, icc_bytes = load_finished(path)
+    img = pipeline.apply_crop(pipeline.orient(img, 0, settings.rotation), settings.crop)
+    meta = {"software": "PhotoDesk"}
+    return save(img, dest, file_type, opts, meta, settings, icc_bytes)
 
 
 def render_gps(img, text):

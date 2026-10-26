@@ -239,3 +239,35 @@ def test_export_formats(tmp_path, profile_dir):
     assert 34675 not in tifffile.TiffFile(lin).pages[0].tags
     asis = export.process_file(SAMPLE, tmp_path / "d.DCR", "asis", None, s, profile_dir)
     assert asis.read_bytes() == SAMPLE.read_bytes() and pipeline.load_settings(asis).annotation == "hello"
+    # Finished files: only rotation and crop apply.
+    fin = export.process_file(jpg, tmp_path / "e.jpg", "jpeg", export.OutputOptions(),
+                              pipeline.Settings(rotation=1, crop=(0, 0, 0.5, 1)), profile_dir)
+    assert Image.open(fin).size == (400, 800)
+
+
+def test_sheet_undo_redo_rename_paste(tmp_path):
+    from PIL import Image
+    from photodesk.gui.model import Sheet
+    for n in ("b.jpg", "a.jpg"):
+        Image.new("RGB", (8, 8)).save(tmp_path / n)
+    sheet = Sheet(tmp_path)
+    a, b = sheet.entries
+    assert a.path.name == "a.jpg" and not a.is_raw
+    sheet.set_fields([a, b], "tag", tagged=True)
+    sheet.set_fields([a], "rotate", rotation=1)
+    assert sheet.undo_text_id() == 62103
+    sheet.undo()
+    assert a.settings.rotation == 0 and a.settings.tagged
+    assert sheet.redo_text_id() == 62104
+    sheet.redo()
+    assert a.settings.rotation == 1
+    sheet.paste([b], a.settings, ("rotation",))
+    assert b.settings.rotation == 1
+    sheet.save([a])
+    sheet.rename([a, b], ["x01", "x02"])
+    assert {e.path.name for e in sheet.entries} == {"x01.jpg", "x02.jpg"}
+    assert pipeline.sidecar_path(tmp_path / "x01.jpg").is_file()
+    sheet.undo()
+    assert {e.path.name for e in sheet.entries} == {"a.jpg", "b.jpg"}
+    gone = sheet.delete([b], lambda p: p.unlink() or True)
+    assert gone == [b] and not (tmp_path / "b.jpg").exists()

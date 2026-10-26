@@ -16,7 +16,7 @@ from PySide6.QtCore import QDate, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDateEdit, QGroupBox, QLabel, QLineEdit, QListWidget,
-    QProgressBar, QPushButton, QRadioButton, QSlider, QTextEdit, QToolButton, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QRadioButton, QSizePolicy, QSlider, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import profiles, ui_strings
@@ -196,8 +196,8 @@ class UpDown(QWidget):
             b = QToolButton(self)
             b.setArrowType(arrow)
             b.setAutoRepeat(True)
-            b.setFixedHeight(1)
-            b.setSizePolicy(b.sizePolicy().horizontalPolicy(), b.sizePolicy().Expanding)
+            b.setMinimumHeight(1)
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             b.clicked.connect(lambda _=False, s=step: self.stepped.emit(s))
             lay.addWidget(b)
 

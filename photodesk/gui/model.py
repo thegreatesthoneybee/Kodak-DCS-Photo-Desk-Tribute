@@ -39,13 +39,19 @@ class Entry:
     make: str = ""
     model: str = ""
     thumb: object = None          # QImage once rendered
-    raw: object = None            # decoded RawImage (half size) while cached
+    raw: object = None            # decoded RawImage (half size) while an image window is open
+    small: object = None          # reduced RawImage used for thumbnails
+    meta: dict = None             # camera metadata once decoded
     dirty: bool = False           # settings changed since last Save
+
+    _raw_kind: bool = None
 
     @property
     def is_raw(self):
-        return self.path.suffix.lower() in RAW_SUFFIXES or (
-            self.path.suffix.lower() in (".tif", ".tiff") and camera.capabilities(self.model).dcs)
+        """DCS raw (all processing options) as opposed to a finished TIFF/JPEG file."""
+        if self._raw_kind is None:
+            self._raw_kind = is_raw_file(self.path)
+        return self._raw_kind
 
     @property
     def caps(self):
@@ -71,6 +77,20 @@ class Entry:
         if self.is_raw:
             return "R"
         return "T" if s in (".tif", ".tiff") else "J"
+
+
+def is_raw_file(path):
+    s = Path(path).suffix.lower()
+    if s in RAW_SUFFIXES:
+        return True
+    if s not in (".tif", ".tiff"):
+        return False
+    import rawpy
+    try:
+        with rawpy.imread(str(path)):
+            return True
+    except Exception:  # LibRaw rejects finished (non-raw) TIFF files
+        return False
 
 
 def is_image(p):

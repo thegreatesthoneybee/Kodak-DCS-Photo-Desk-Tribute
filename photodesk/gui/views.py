@@ -30,18 +30,33 @@ class Task(QRunnable):
         done = Signal(object, object)
         failed = Signal(object, str)
 
+    # Python wrappers of running tasks; without this reference the signals object can be
+    # collected before the queued result is delivered.
+    _alive = set()
+
     def __init__(self, token, fn, *args):
         super().__init__()
+        self.setAutoDelete(False)
         self.token, self.fn, self.args = token, fn, args
         self.signals = Task._Signals()
+        Task._alive.add(self)
+        self.signals.done.connect(self._release)
+        self.signals.failed.connect(self._release)
+
+    def _release(self, *_):
+        Task._alive.discard(self)
 
     def run(self):
         try:
             result = self.fn(*self.args)
         except Exception as e:  # reported to the UI through the failed signal
-            self.signals.failed.emit(self.token, f"{type(e).__name__}: {e}")
+            outcome = (self.signals.failed, f"{type(e).__name__}: {e}")
         else:
-            self.signals.done.emit(self.token, result)
+            outcome = (self.signals.done, result)
+        try:
+            outcome[0].emit(self.token, outcome[1])
+        except RuntimeError:     # the application quit while the task was running
+            Task._alive.discard(self)
 
 
 # ----------------------------------------------------------------- contact sheet
