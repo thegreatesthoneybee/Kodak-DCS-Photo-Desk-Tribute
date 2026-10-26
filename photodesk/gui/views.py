@@ -1,8 +1,8 @@
 """Contact sheet, full image rendering, close-up and histogram widgets."""
 import numpy as np
 from PySide6.QtCore import QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QListWidget, QListWidgetItem, QScrollArea, QStyle, QStyledItemDelegate, QWidget
+from PySide6.QtGui import QColor, QDrag, QImage, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QApplication, QListWidget, QListWidgetItem, QScrollArea, QStyle, QStyledItemDelegate, QWidget
 
 from .. import pipeline
 
@@ -88,9 +88,13 @@ class ThumbDelegate(QStyledItemDelegate):
         r = option.rect.adjusted(2, 2, -2, -2)
         selected = option.state & QStyle.State_Selected
         p.save()
-        p.fillRect(r, QColor(10, 36, 106) if selected else QColor(192, 192, 192))
+        p.fillRect(r, QColor(192, 192, 192))
+        # The selected thumbnail with the focus is outlined in yellow, other selected ones in red.
         focus = index.row() == v.currentRow()
-        pen = QPen(QColor(255, 255, 0) if focus and selected else QColor(128, 128, 128), 3 if focus else 1)
+        if selected:
+            pen = QPen(QColor(255, 255, 0) if focus else QColor(255, 0, 0), 3)
+        else:
+            pen = QPen(QColor(128, 128, 128), 1)
         p.setPen(pen)
         p.drawRect(r.adjusted(1, 1, -1, -1))
         info = v.show_info and v.zoom >= 50
@@ -145,9 +149,12 @@ class ThumbDelegate(QStyledItemDelegate):
 class ContactSheetView(QListWidget):
     """Thumbnails of a folder; zoom 25/50/100/200 %, optional thumbnail info.
 
-    Thumbnails drag out as files; files dropped on the sheet emit ``files_dropped(paths, global pos)``.
+    Thumbnails drag out as files (left or right button); files dropped on the sheet emit
+    ``files_dropped(paths, global pos, mode)`` where mode is "copy", "move" or "menu" (right-button drag):
+    a plain left drag moves within a drive and copies across drives, Ctrl copies, Shift moves.
     """
-    files_dropped = Signal(list, QPoint)
+    files_dropped = Signal(list, QPoint, str)
+    _right_drag = False          # set while a right-button drag started by any contact sheet is running
 
     def __init__(self, icons):
         super().__init__()
@@ -166,6 +173,29 @@ class ContactSheetView(QListWidget):
         self.setAcceptDrops(True)
         self.setDragDropMode(QListWidget.DragDrop)
         self.setDefaultDropAction(Qt.CopyAction)
+
+    def mousePressEvent(self, e):
+        self._right_start = e.position().toPoint() if e.button() == Qt.RightButton else None
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        start = getattr(self, "_right_start", None)
+        if start is not None and e.buttons() & Qt.RightButton and self.selectedItems() and \
+                (e.position().toPoint() - start).manhattanLength() >= QApplication.startDragDistance():
+            self._right_start = None
+            drag = QDrag(self)
+            drag.setMimeData(self.mimeData(self.selectedItems()))
+            ContactSheetView._right_drag = True
+            try:
+                drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
+            finally:
+                ContactSheetView._right_drag = False
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._right_start = None
+        super().mouseReleaseEvent(e)
 
     def mimeData(self, items):
         md = QMimeData()
@@ -200,9 +230,18 @@ class ContactSheetView(QListWidget):
         if not paths:
             e.ignore()
             return
-        e.setDropAction(Qt.IgnoreAction)        # the files are transferred by the drop menu, not by Qt
+        e.setDropAction(Qt.IgnoreAction)        # the files are transferred by the sheet, not by Qt
         e.accept()
-        self.files_dropped.emit(paths, self.viewport().mapToGlobal(e.position().toPoint()))
+        mods = e.modifiers()
+        if ContactSheetView._right_drag or e.buttons() & Qt.RightButton:
+            mode = "menu"
+        elif mods & Qt.ControlModifier:
+            mode = "copy"
+        elif mods & Qt.ShiftModifier:
+            mode = "move"
+        else:
+            mode = "auto"
+        self.files_dropped.emit(paths, self.viewport().mapToGlobal(e.position().toPoint()), mode)
 
     def cell_size(self):
         edge = THUMB_100 * self.zoom // 100

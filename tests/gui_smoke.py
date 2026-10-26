@@ -119,10 +119,18 @@ def main(folder, shot):
     QTimer.singleShot(50, pick)
     md = QMimeData()
     md.setUrls([QUrl.fromLocalFile(str(paths[0]))])
-    sw2.view.dropEvent(QDropEvent(QPointF(10, 10), Qt.CopyAction, md, Qt.LeftButton, Qt.NoModifier))
+    sw2.view.dropEvent(QDropEvent(QPointF(10, 10), Qt.CopyAction, md, Qt.RightButton, Qt.NoModifier))
     assert shown and shown[0][0] == "&Copy Here", shown
     assert (drop_dir / Path(paths[0]).name).exists() and Path(paths[0]).exists()
     assert sw2.view.count() == 1
+    # Shift + left drag moves without a menu.
+    moved_src = Path(out) / "moved.jpg"
+    shutil.copy(paths[0], moved_src)
+    md2 = QMimeData()
+    md2.setUrls([QUrl.fromLocalFile(str(moved_src))])
+    sw2.view.dropEvent(QDropEvent(QPointF(10, 10), Qt.MoveAction, md2, Qt.LeftButton, Qt.ShiftModifier))
+    assert not moved_src.exists() and (drop_dir / "moved.jpg").exists() and sw2.view.count() == 2
+    wait(app, lambda: all(e.thumb is not None for e in sw2.sheet.entries))
     w.mdi.setActiveSubWindow(sw)
     w.mdi.tileSubWindows()
     app.processEvents()

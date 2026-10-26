@@ -108,7 +108,7 @@ class SheetWindow(QMdiSubWindow):
         self.view.customContextMenuRequested.connect(
             lambda pos: main.context_menu(194, self.view.viewport().mapToGlobal(pos)))
         self.view.viewport().installEventFilter(self)
-        self.view.files_dropped.connect(lambda paths, pos: main.drop_files(self, paths, pos))
+        self.view.files_dropped.connect(lambda paths, pos, mode: main.drop_files(self, paths, pos, mode))
         self.images = []
 
     def eventFilter(self, obj, ev):
@@ -927,23 +927,31 @@ class MainWindow(QMainWindow):
         sw.view.populate(sw.sheet.entries)
         self.selection_changed()
 
-    def drop_files(self, sw, paths, global_pos):
-        """Files dropped on a contact sheet: drop menu 169 (Copy Here / Move Here / Cancel)."""
+    def drop_files(self, sw, paths, global_pos, mode="menu"):
+        """Files dropped on a contact sheet. mode: copy / move / auto (move on the same drive, copy
+        across drives) / menu (right-button drag: drop menu 169 Copy Here / Move Here / Cancel)."""
         paths = [p for p in paths if is_image(Path(p))]
         if not paths:
             return
-        items = self.res.menu(169)[0][2]
-        menu = QMenu(self)
-        chosen = {}
-        for it in items:
-            if it[0] == "sep":
-                menu.addSeparator()
-            elif it[0] == "item":
-                chosen[menu.addAction(self.res.tr(it[2], ("Drop Menu", "Common")))] = it[1]
-        act = menu.exec(global_pos)
-        cmd = chosen.get(act)
-        if cmd not in (32863, 32862):
-            return
+        if mode == "menu":
+            menu = QMenu(self)
+            chosen = {}
+            for it in self.res.menu(169)[0][2]:
+                if it[0] == "sep":
+                    menu.addSeparator()
+                elif it[0] == "item":
+                    chosen[menu.addAction(self.res.tr(it[2], ("Drop Menu", "Common")))] = it[1]
+            cmd = chosen.get(menu.exec(global_pos))
+            if cmd not in (32863, 32862):
+                return
+        elif mode == "auto":
+            same = os.path.splitdrive(str(Path(paths[0]).resolve()))[0].lower() == \
+                os.path.splitdrive(str(sw.sheet.folder.resolve()))[0].lower()
+            if sys.platform != "win32":
+                same = os.stat(paths[0]).st_dev == os.stat(sw.sheet.folder).st_dev
+            cmd = 32862 if same else 32863
+        else:
+            cmd = 32862 if mode == "move" else 32863
         replace_all = False
 
         def replace(dest):
