@@ -1449,9 +1449,9 @@ class MainWindow(QMainWindow):
         except pipeline.ClickBalanceError as err:
             D.message(self, self.res, self.res.tr(str(err), ("Pop-Up Message",)))
             return
-        entries = [e for e in self.selection() if e.is_raw] or [entry]
-        if entry not in entries:
-            entries = [entry]
+        # Applied to the selected images captured on the same camera (same serial number) as the
+        # clicked image, which may itself be an unselected reference (gray card) shot.
+        entries = [e for e in self.selection() if e.is_raw and e.serial == entry.serial] or [entry]
         self.edit("click_balance", entries, balance="click", click_wb=wb)
 
     def show_closeup(self, entry, x, y):
