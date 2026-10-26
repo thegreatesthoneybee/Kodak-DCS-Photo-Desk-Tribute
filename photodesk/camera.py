@@ -39,6 +39,11 @@ class Capabilities:
         return ("none", "basic", "advanced", "moire")
 
     @property
+    def white_point(self):
+        """White Point (Kelvin) control: DCS Pro 14n, Pro SLR/n and Pro SLR/c images only."""
+        return self.pro_slr
+
+    @property
     def balances(self):
         return ("preset", "click", "auto") if self.pro_back else ("preset", "click", "custom", "auto")
 

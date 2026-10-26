@@ -76,6 +76,14 @@ def main(folder, outdir):
             w.mdi.setActiveSubWindow(w.sheets[0])
         if w.sheets and not w.sheets[0].view.selectedItems():
             w.sheets[0].view.item(0).setSelected(True)
+    # Dialogs whose commands are disabled for the sample camera (White Point is Pro 14n/SLR only).
+    assert not w.acts[33152].isEnabled()
+    before = len(errors)
+    w.white_point_dialog()
+    for _ in range(20):
+        app.processEvents()
+    if len(errors) > before:
+        errors[-1] = f"white point dialog:\n{errors[-1]}"
     w.grab().save(os.path.join(outdir, "main.png"))
     for ent in sw.sheet.entries:
         ent.dirty = False

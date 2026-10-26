@@ -159,6 +159,8 @@ class ImageControlsPanel(QWidget):
         combo.setCurrentIndex(max(0, combo.findData(s.balance)))
         self.wp.setValue(s.white_point // 100)
         b[1041].setText(f"{s.white_point}° K")
+        # The colour temperature scale is only for Pro 14n/SLR images with the Preset or Auto method.
+        self.wp.setEnabled(raw_ok and caps.white_point and s.balance in ("preset", "auto"))
         combo = b[1174]
         combo.clear()
         for lt in pipeline.LIGHTINGS:
