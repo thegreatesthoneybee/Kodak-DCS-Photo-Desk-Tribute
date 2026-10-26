@@ -96,6 +96,34 @@ def main(folder, shot):
         dest.unlink()
     paths = w._export([entry], [dest], "jpeg")
     assert paths and Path(paths[0]).stat().st_size > 10000, paths
+    # Drop the exported JPEG onto a second contact sheet; the drop menu offers Copy Here first.
+    from PySide6.QtCore import QMimeData, QPointF, QUrl
+    from PySide6.QtGui import QDropEvent
+    from PySide6.QtWidgets import QMenu
+    import shutil
+    drop_dir = Path(out) / "drop"
+    shutil.rmtree(drop_dir, ignore_errors=True)
+    drop_dir.mkdir()
+    sw2 = w.open_folder(drop_dir)
+    shown = []
+
+    def pick():
+        m = app.activePopupWidget()
+        if not isinstance(m, QMenu):
+            QTimer.singleShot(50, pick)
+            return
+        shown.append([x.text() for x in m.actions()])
+        from PySide6.QtTest import QTest
+        m.setActiveAction(m.actions()[0])
+        QTest.keyClick(m, Qt.Key_Return)
+    QTimer.singleShot(50, pick)
+    md = QMimeData()
+    md.setUrls([QUrl.fromLocalFile(str(paths[0]))])
+    sw2.view.dropEvent(QDropEvent(QPointF(10, 10), Qt.CopyAction, md, Qt.LeftButton, Qt.NoModifier))
+    assert shown and shown[0][0] == "&Copy Here", shown
+    assert (drop_dir / Path(paths[0]).name).exists() and Path(paths[0]).exists()
+    assert sw2.view.count() == 1
+    w.mdi.setActiveSubWindow(sw)
     w.mdi.tileSubWindows()
     app.processEvents()
     w.grab().save(shot)

@@ -2,6 +2,7 @@
 import dataclasses
 import datetime
 import os
+import shutil
 from pathlib import Path
 
 from .. import camera, pipeline
@@ -218,6 +219,30 @@ class Sheet:
                 gone.append(e)
         self.entries = [e for e in self.entries if e not in gone]
         return gone
+
+    def transfer(self, paths, move, replace):
+        """Copy or move image files (with their sounds and settings) into this folder.
+
+        replace(dest) decides whether an existing file is overwritten. Returns the new paths.
+        """
+        done = []
+        for src in map(Path, paths):
+            dest = self.folder / src.name
+            if src.parent.resolve() == self.folder.resolve():
+                continue
+            if dest.exists() and not replace(dest):
+                continue
+            sounds = sorted(src.parent.glob(src.stem + "*.wav")) + sorted(src.parent.glob(src.stem + "*.WAV"))
+            sc = pipeline.sidecar_path(src)
+            for f in [src] + sounds + ([sc] if sc.is_file() else []):
+                target = self.folder / f.name
+                if move:
+                    shutil.move(str(f), str(target))
+                else:
+                    shutil.copy2(f, target)
+            done.append(dest)
+        self.refresh()
+        return done
 
     def refresh(self):
         """Pick up files added to or removed from the folder."""

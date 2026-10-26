@@ -271,3 +271,26 @@ def test_sheet_undo_redo_rename_paste(tmp_path):
     assert {e.path.name for e in sheet.entries} == {"a.jpg", "b.jpg"}
     gone = sheet.delete([b], lambda p: p.unlink() or True)
     assert gone == [b] and not (tmp_path / "b.jpg").exists()
+
+
+def test_sheet_drop_copy_move(tmp_path):
+    from PIL import Image
+    from photodesk.gui.model import Sheet
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir(), dst.mkdir()
+    for n in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (8, 8)).save(src / n)
+    (src / "a01.wav").write_bytes(b"RIFF")
+    Image.new("RGB", (8, 8), "red").save(dst / "b.jpg")
+    s = Sheet(src)
+    s.set_fields(s.entries[:1], "tag", tagged=True)
+    s.save(s.entries[:1])
+    sheet = Sheet(dst)
+    asked = []
+    copied = sheet.transfer([src / "a.jpg", src / "b.jpg"], False, lambda d: asked.append(d.name) or False)
+    assert [p.name for p in copied] == ["a.jpg"] and asked == ["b.jpg"]
+    assert (src / "a.jpg").exists() and (dst / "a01.wav").exists()
+    assert sheet.find(dst / "a.jpg").settings.tagged
+    moved = sheet.transfer([src / "b.jpg"], True, lambda d: True)
+    assert [p.name for p in moved] == ["b.jpg"] and not (src / "b.jpg").exists()
+    assert [e.path.name for e in sheet.entries] == ["a.jpg", "b.jpg"]

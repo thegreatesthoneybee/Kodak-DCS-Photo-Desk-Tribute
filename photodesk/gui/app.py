@@ -108,6 +108,7 @@ class SheetWindow(QMdiSubWindow):
         self.view.customContextMenuRequested.connect(
             lambda pos: main.context_menu(194, self.view.viewport().mapToGlobal(pos)))
         self.view.viewport().installEventFilter(self)
+        self.view.files_dropped.connect(lambda paths, pos: main.drop_files(self, paths, pos))
         self.images = []
 
     def eventFilter(self, obj, ev):
@@ -924,6 +925,47 @@ class MainWindow(QMainWindow):
         if len(gone) < len(entries):
             D.message(self, self.res, self.res.s(60038).replace("%s", str(sw.sheet.folder)))
         sw.view.populate(sw.sheet.entries)
+        self.selection_changed()
+
+    def drop_files(self, sw, paths, global_pos):
+        """Files dropped on a contact sheet: drop menu 169 (Copy Here / Move Here / Cancel)."""
+        paths = [p for p in paths if is_image(Path(p))]
+        if not paths:
+            return
+        items = self.res.menu(169)[0][2]
+        menu = QMenu(self)
+        chosen = {}
+        for it in items:
+            if it[0] == "sep":
+                menu.addSeparator()
+            elif it[0] == "item":
+                chosen[menu.addAction(self.res.tr(it[2], ("Drop Menu", "Common")))] = it[1]
+        act = menu.exec(global_pos)
+        cmd = chosen.get(act)
+        if cmd not in (32863, 32862):
+            return
+        replace_all = False
+
+        def replace(dest):
+            nonlocal replace_all
+            if replace_all:
+                return True
+            r = D.YesToAllDialog(self.res, self, self.res.s(59954).replace("%s", dest.name)).exec()
+            replace_all = r == D.YesToAllDialog.YES_ALL
+            return r in (D.OK, D.YesToAllDialog.YES_ALL)
+
+        try:
+            sw.sheet.transfer(paths, cmd == 32862, replace)
+        except OSError as err:
+            D.message(self, self.res, str(err))
+        for other in self.sheets:
+            if other is not sw and cmd == 32862:
+                other.sheet.refresh()
+                other.view.populate(other.sheet.entries)
+        sw.view.populate(sw.sheet.entries)
+        for e in sw.sheet.entries:
+            if e.thumb is None:
+                self._load_thumb(sw, e)
         self.selection_changed()
 
     # ---------------------------------------------------------- printing

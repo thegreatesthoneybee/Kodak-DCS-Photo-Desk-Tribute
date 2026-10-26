@@ -1,6 +1,6 @@
 """Contact sheet, full image rendering, close-up and histogram widgets."""
 import numpy as np
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt, Signal
+from PySide6.QtCore import QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QListWidget, QListWidgetItem, QScrollArea, QStyle, QStyledItemDelegate, QWidget
 
@@ -143,7 +143,11 @@ class ThumbDelegate(QStyledItemDelegate):
 
 
 class ContactSheetView(QListWidget):
-    """Thumbnails of a folder; zoom 25/50/100/200 %, optional thumbnail info."""
+    """Thumbnails of a folder; zoom 25/50/100/200 %, optional thumbnail info.
+
+    Thumbnails drag out as files; files dropped on the sheet emit ``files_dropped(paths, global pos)``.
+    """
+    files_dropped = Signal(list, QPoint)
 
     def __init__(self, icons):
         super().__init__()
@@ -158,6 +162,47 @@ class ContactSheetView(QListWidget):
         self.setSpacing(2)
         self.setStyleSheet("QListWidget { background: rgb(128,128,128); }")
         self.setItemDelegate(ThumbDelegate(self))
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QListWidget.DragDrop)
+        self.setDefaultDropAction(Qt.CopyAction)
+
+    def mimeData(self, items):
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(str(i.data(Qt.UserRole).path)) for i in items])
+        return md
+
+    def mimeTypes(self):
+        return ["text/uri-list"]
+
+    def supportedDropActions(self):
+        return Qt.CopyAction | Qt.MoveAction
+
+    def _dropped_paths(self, e):
+        if e.source() is self or not e.mimeData().hasUrls():
+            return []
+        return [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+
+    def dragEnterEvent(self, e):
+        if self._dropped_paths(e):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragMoveEvent(self, e):
+        if self._dropped_paths(e):
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        paths = self._dropped_paths(e)
+        if not paths:
+            e.ignore()
+            return
+        e.setDropAction(Qt.IgnoreAction)        # the files are transferred by the drop menu, not by Qt
+        e.accept()
+        self.files_dropped.emit(paths, self.viewport().mapToGlobal(e.position().toPoint()))
 
     def cell_size(self):
         edge = THUMB_100 * self.zoom // 100
