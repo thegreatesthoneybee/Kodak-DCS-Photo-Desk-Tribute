@@ -27,6 +27,7 @@ from .views import ContactSheetView, ImageView, Task, ThumbIcons, qimage_array, 
 PREVIEW_EDGE = 1400            # long edge of the "faster" full-image preview
 THUMB_EDGE = 256
 ZOOMS = {32842: 25, 32853: 50, 32852: 100, 32841: 200}
+SHEET_ZOOMS = (50, 100, 200)      # contact sheets: 50/100/200 % (25 % is for full image renderings)
 TOOLS = {32847: "select", 32848: "crop", 32846: "click", 33178: "closeup", 33177: "hand"}
 BALANCE_CMD = {32812: "preset", 32816: "click", 32814: "custom", 32815: "auto"}
 LIGHTING_CMD = dict(zip((32787, 32788, 32789, 32790), pipeline.LIGHTINGS))
@@ -94,7 +95,8 @@ class SheetWindow(QMdiSubWindow):
         super().__init__()
         self.main, self.sheet = main, sheet
         self.view = ContactSheetView(main.icons)
-        self.view.set_zoom(main.q.value("LastThumbnailViewSize", 100, int))
+        z = main.q.value("LastThumbnailViewSize", 100, int)
+        self.view.set_zoom(z if z in SHEET_ZOOMS else 100)
         self.view.set_show_info(main.q.value("Thumbnail Info State", True, bool))
         self.setWidget(self.view)
         self.setWindowTitle(str(sheet.folder))
@@ -564,8 +566,9 @@ class MainWindow(QMainWindow):
         }
         for cmd in list(LIGHTING_CMD) + [32812]:
             enable[cmd] = raw
-        for cmd in ZOOMS:
-            enable[cmd] = sheet
+        image = self.active_image() is not None
+        for cmd, z in ZOOMS.items():
+            enable[cmd] = image or (sheet and z in SHEET_ZOOMS)
         for cmd, on in enable.items():
             act = self.acts.get(cmd)
             if act is not None and act.data() != "unimplemented":
@@ -1255,9 +1258,11 @@ class MainWindow(QMainWindow):
         iw = self.active_image()
         if iw:
             iw.view.set_zoom(z)
-        elif self.active_sheet():
+        elif self.active_sheet() and z in SHEET_ZOOMS:
             self.active_sheet().view.set_zoom(z)
             self.q.setValue("LastThumbnailViewSize", z)
+        else:
+            return
         self.show_zoom(z)
 
     def zoom_step(self, d):
@@ -1270,9 +1275,8 @@ class MainWindow(QMainWindow):
                 self.set_zoom(nxt[0] if d > 0 else nxt[-1])
         elif self.active_sheet():
             cur = self.active_sheet().view.zoom
-            order = [25, 50, 100, 200]
-            i = min(max(0, order.index(cur) + d if cur in order else 2), 3)
-            self.set_zoom(order[i])
+            i = min(max(0, SHEET_ZOOMS.index(cur) + d if cur in SHEET_ZOOMS else 1), len(SHEET_ZOOMS) - 1)
+            self.set_zoom(SHEET_ZOOMS[i])
 
     def zoom_fit(self):
         iw = self.active_image()

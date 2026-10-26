@@ -136,7 +136,8 @@ class ThumbDelegate(QStyledItemDelegate):
             p.drawPixmap(x, y, ic.exposure)
             p.drawText(QRect(x + 17, y, 30, 15), Qt.AlignVCenter, f"{s.exposure:.1f}")
         x = r.right() - 4
-        for pm, on in ((ic.sound, bool(e.sounds)), (ic.lock, e.read_only), (ic.tag, s.tagged)):
+        # Finished files show only the File Type, Tag and Read-Only icons (help: Thumbnail Information).
+        for pm, on in ((ic.sound, e.is_raw and bool(e.sounds)), (ic.lock, e.read_only), (ic.tag, s.tagged)):
             if on:
                 x -= 17
                 p.drawPixmap(x, y, pm)
