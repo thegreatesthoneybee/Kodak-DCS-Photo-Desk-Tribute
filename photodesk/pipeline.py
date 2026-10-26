@@ -79,7 +79,8 @@ class Settings:
     lens_optimization: int = 0          # 0..99
     noise_type: str = "none"
     noise_radius: int = 3               # 1..10
-    noise_strength: int = 50            # 0..100 %
+    noise_strength: int = 50            # 0..100 % (Expert: Strength)
+    noise_luma: int = 50                # 0..100 % (Expert: Luma Strength)
     moire_threshold: int = 50           # 0..100
     sharpen_amount: float = 6.0         # 0..20
     sharpen_radius: float = 1.0         # 0.0..10.0
@@ -163,6 +164,7 @@ class RawImage:
     xyz_from_cam: np.ndarray    # camera->XYZ(D65) for the fallback path
     flip: int                   # LibRaw orientation code
     metadata: dict
+    scale: float = 1.0          # camera_rgb resolution relative to the full sensor image
 
     @property
     def caps(self):
@@ -173,6 +175,7 @@ def decode(path, half_size=False, algorithm="AHD"):
     path = Path(path)
     make, model = camera.read_make_model(path)
     with rawpy.imread(str(path)) as r:
+        full_w, full_h = r.sizes.width, r.sizes.height   # before postprocess, which halves them
         params = dict(
             output_color=rawpy.ColorSpace.raw, gamma=(1, 1), no_auto_bright=True,
             output_bps=16, user_wb=[1, 1, 1, 1], user_flip=0, half_size=half_size,
@@ -194,8 +197,19 @@ def decode(path, half_size=False, algorithm="AHD"):
             "aperture": o.aperture, "focal_length": o.focal_length,
             "timestamp": o.timestamp.isoformat() if o.timestamp else None, "artist": o.artist,
         }
+    metadata["width"], metadata["height"] = full_w, full_h
     return RawImage(path, make, model, cam, wb / wb[1], daylight / daylight[1], rgb_xyz,
-                    camera_to_xyz(rgb_xyz), flip, metadata)
+                    camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h))
+
+
+def reduced(raw, long_edge):
+    """Copy of raw with camera_rgb downsampled (for thumbnails and fast previews)."""
+    h, w = raw.camera_rgb.shape[:2]
+    s = long_edge / max(h, w)
+    if s >= 1:
+        return raw
+    cam = cv2.resize(raw.camera_rgb, (max(1, round(w * s)), max(1, round(h * s))), interpolation=cv2.INTER_AREA)
+    return dataclasses.replace(raw, camera_rgb=cam, scale=raw.scale * cam.shape[1] / w)
 
 
 def camera_to_xyz(rgb_xyz):
@@ -481,14 +495,23 @@ def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="
         lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
     out = icc.trilinear(lut, np.power(lin, np.float32(1 / LUT_INPUT_GAMMA))).astype(np.float32, copy=False)
     if quality == "better":
-        scale = raw.camera_rgb.shape[1] / max(1, _full_width(raw))
-        out = finish(out, settings, raw.caps, scale)
+        out = finish(out, settings, raw.caps, raw.scale)
     out = orient(out, raw.flip, settings.rotation)
     return apply_crop(out, settings.crop)
 
 
-def _full_width(raw):
-    return raw.metadata.get("width") or raw.camera_rgb.shape[1]
+def render_region(raw, settings, rect, space=DISPLAY_SPACE, profile_directory=None, margin=16):
+    """Render the normalised rect (x0, y0, x1, y1) of the oriented, uncropped image at full quality."""
+    turns = ({0: 0, 3: 2, 5: 3, 6: 1}.get(raw.flip, 0) + settings.rotation) % 4
+    x0, y0, x1, y1 = rotate_crop(rect, (4 - turns) % 4)
+    h, w = raw.camera_rgb.shape[:2]
+    px0, py0 = max(0, int(x0 * w) - margin), max(0, int(y0 * h) - margin)
+    px1, py1 = min(w, int(np.ceil(x1 * w)) + margin), min(h, int(np.ceil(y1 * h)) + margin)
+    sub = dataclasses.replace(raw, camera_rgb=np.ascontiguousarray(raw.camera_rgb[py0:py1, px0:px1]))
+    img = render(sub, settings.copy(crop=None), space, profile_directory)
+    sh, sw = py1 - py0, px1 - px0
+    inner = ((x0 * w - px0) / sw, (y0 * h - py0) / sh, (x1 * w - px0) / sw, (y1 * h - py0) / sh)
+    return apply_crop(img, rotate_crop(inner, turns))
 
 
 def finish(img, settings, caps=None, scale=1.0):
@@ -544,7 +567,7 @@ def reduce_noise(img, settings, scale=1.0):
         cb = cv2.medianBlur(cb, min(k, 5)) * m + cb * (1 - m)
     if t == "expert":
         d = max(3, round(5 * scale) | 1)
-        y = cv2.bilateralFilter(y, d, 0.02 + 0.1 * s, 3)
+        y = cv2.bilateralFilter(y, d, 0.02 + 0.1 * settings.noise_luma / 100, 3)
         cr = cv2.bilateralFilter(cr, d * 2 + 1, 0.05 + 0.1 * s, 6)
         cb = cv2.bilateralFilter(cb, d * 2 + 1, 0.05 + 0.1 * s, 6)
     out = cv2.cvtColor(cv2.merge([y, cr.astype(np.float32), cb.astype(np.float32)]), cv2.COLOR_YCrCb2RGB)

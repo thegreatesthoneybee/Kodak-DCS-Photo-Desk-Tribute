@@ -51,6 +51,7 @@ class Translator:
     def __init__(self, table_bytes=None, language="English"):
         self.language = language
         self.exact, self.loose = {}, {}
+        self.by_context = {}   # location -> (exact, loose)
         if not table_bytes or language == "English":
             return
         col = 3 + LANGUAGES.index(language)
@@ -62,18 +63,27 @@ class Translator:
             eng, other = _unquote(row[3]), _unquote(row[col])
             if not eng or not other:
                 continue
-            self.exact.setdefault(eng, other)
-            self.loose.setdefault(_loose(eng), other)
+            location = _unquote(row[0]).strip().lower()
+            exact, loose = self.by_context.setdefault(location, ({}, {}))
+            for table in (self.exact, exact):
+                table.setdefault(eng, other)
+            for table in (self.loose, loose):
+                table.setdefault(_loose(eng), other)
 
-    def __call__(self, text):
+    def __call__(self, text, context=()):
+        """Translate English text; context lists table LOCATIONs to prefer (e.g. 'Image Menu')."""
         if not text or not self.exact:
             return text
-        if text in self.exact:
-            return self.exact[text]
+        if isinstance(context, str):
+            context = (context,)
+        tables = [self.by_context.get(c.lower(), ({}, {})) for c in context] + [(self.exact, self.loose)]
         head, sep, accel = text.partition("\t")
-        if head in self.exact:
-            return self.exact[head].split("\t")[0] + sep + accel
-        hit = self.loose.get(_loose(text))
+        for exact, _ in tables:
+            if text in exact:
+                return exact[text]
+            if head in exact:
+                return exact[head].split("\t")[0] + sep + accel
+        hit = next((loose[_loose(text)] for _, loose in tables if _loose(text) in loose), None)
         if hit is None:
             return text
         # Give the translation the source's trailing "..." / ":" (or none).
