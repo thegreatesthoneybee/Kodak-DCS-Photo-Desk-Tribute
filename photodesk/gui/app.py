@@ -209,6 +209,7 @@ class ImageWindow(QMdiSubWindow):
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(lambda pos: main.context_menu(195, self.view.mapToGlobal(pos)))
         self.token = 0
+        self.latest = [0]               # newest render token, read by render tasks to skip stale work
         self.rgb = None
         sheet_win.images.append(self)
 
@@ -251,6 +252,10 @@ class MainWindow(QMainWindow):
         self.pool = QThreadPool.globalInstance()
         self.thumb_pool = QThreadPool(self)
         self.thumb_pool.setMaxThreadCount(max(1, min(4, (os.cpu_count() or 2) // 2)))
+        # Image window previews: one worker, so while a slider moves only the newest render runs
+        # (queued older ones are skipped as stale); each render uses every core itself.
+        self.render_pool = QThreadPool(self)
+        self.render_pool.setMaxThreadCount(1)
         self.icons = ThumbIcons(res)
         self.cursors = {"click": res.cursor(148), "hand": res.cursor(191), "closeup": res.cursor(30978),
                         "crop": Qt.CrossCursor, 221: res.cursor(221), 222: res.cursor(222),
@@ -719,8 +724,10 @@ class MainWindow(QMainWindow):
             if entry in sw.sheet.entries:
                 if entry.small is not None:
                     entry.thumb_gen += 1
-                    task = Task((entry, entry.thumb_gen, sw), pipeline.render, entry.small,
-                                entry.settings.copy(crop=None), pipeline.DISPLAY_SPACE, self.pdir, "faster")
+                    gen = entry.thumb_gen
+                    task = Task((entry, gen, sw), pipeline.render, entry.small,
+                                entry.settings.copy(crop=None), pipeline.DISPLAY_SPACE, self.pdir, "faster",
+                                stale=lambda e=entry, g=gen: e.thumb_gen != g)
                     task.signals.done.connect(self._thumb_rendered)
                     self.thumb_pool.start(task, 1)          # ahead of first-time thumbnail loads
                 elif not entry.is_raw and entry.thumb is not None:
@@ -775,11 +782,14 @@ class MainWindow(QMainWindow):
             task = Task(token, _finished_job, e.path, s.rotation)
         else:
             space = pipeline.resolve_space(self.opts.working_space, self.pdir)
-            task = Task(token, _render_job, e.raw, s, self.pdir, self.quality, PREVIEW_EDGE, space)
+            latest = w.latest            # plain list shared with the worker (no Qt object access off-thread)
+            latest[0] = w.token
+            task = Task(token, _render_job, e.raw, s, self.pdir, self.quality, PREVIEW_EDGE, space,
+                        stale=lambda: latest[0] != token[1])
         task.signals.done.connect(self._show_render)
         task.signals.failed.connect(lambda t, msg: D.message(self, self.res, self.res.s(60002) + "\n" + msg))
         self.statusBar().showMessage(self.res.tr("Rendering...", ("Common", "Common Strings")))
-        self.pool.start(task)
+        self.render_pool.start(task)
 
     def _show_render(self, token, img):
         w, n = token

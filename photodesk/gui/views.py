@@ -35,10 +35,12 @@ class Task(QRunnable):
     # collected before the queued result is delivered.
     _alive = set()
 
-    def __init__(self, token, fn, *args):
+    def __init__(self, token, fn, *args, stale=None):
+        """stale(): checked when the task starts; True skips the work (a newer request superseded it,
+        e.g. while a slider is dragged)."""
         super().__init__()
         self.setAutoDelete(False)
-        self.token, self.fn, self.args = token, fn, args
+        self.token, self.fn, self.args, self.stale = token, fn, args, stale
         self.signals = Task._Signals()
         Task._alive.add(self)
         self.signals.done.connect(self._release)
@@ -48,6 +50,9 @@ class Task(QRunnable):
         Task._alive.discard(self)
 
     def run(self):
+        if self.stale is not None and self.stale():
+            Task._alive.discard(self)
+            return
         try:
             result = self.fn(*self.args)
         except Exception as e:  # reported to the UI through the failed signal
