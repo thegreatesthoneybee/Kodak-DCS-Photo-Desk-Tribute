@@ -1,6 +1,7 @@
 """Command line interface: profile installation and batch conversion."""
 import argparse
 import concurrent.futures
+import os
 import sys
 from pathlib import Path
 
@@ -57,7 +58,9 @@ def main(argv=None):
     cp.add_argument("--look", help="look profile file name, e.g. DCSPortraitLook.icm")
     cp.add_argument("--lighting", choices=pipeline.LIGHTINGS)
     cp.add_argument("--balance", choices=["preset", "custom", "auto"])
-    cp.add_argument("-j", "--jobs", type=int, default=2)
+    # Each render already uses every core; a few files in flight overlap the single-threaded raw
+    # decoding and file encoding (8 files: 1 job 23 s, 2 jobs 16 s, 4 jobs 13 s on 20 threads).
+    cp.add_argument("-j", "--jobs", type=int, default=min(4, os.cpu_count() or 1))
 
     sub.add_parser("looks", help="list installed look profiles")
 
