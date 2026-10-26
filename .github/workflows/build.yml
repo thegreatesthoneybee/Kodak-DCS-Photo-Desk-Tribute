@@ -1,0 +1,51 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: PhotoDesk-windows-x64
+          - os: macos-14            # Apple Silicon (M1) runner
+            artifact: PhotoDesk-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .[dev]
+      # Tests needing the Kodak installer / sample raw skip when those files are absent.
+      - run: python -m pytest -q
+      - run: pyinstaller --noconfirm packaging/photodesk.spec
+      - name: Smoke-test frozen CLI
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            BIN=dist/PhotoDesk.app/Contents/MacOS/PhotoDesk
+            file "$BIN" | grep arm64
+          else
+            BIN=dist/PhotoDesk/PhotoDesk.exe
+          fi
+          # No profiles are installed on CI, so 'convert' must exit with code 2 (not crash).
+          set +e
+          "$BIN" convert nonexistent.DCR -o out
+          test $? -eq 2
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - dist/PhotoDesk.app
+          ditto -c -k --keepParent dist/PhotoDesk.app ${{ matrix.artifact }}.zip
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/PhotoDesk -DestinationPath ${{ matrix.artifact }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip

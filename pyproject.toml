@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "photodesk"
+version = "0.1.0"
+description = "Cross-platform Kodak DCS raw processor using the DCS Photo Desk 4.3 colour profiles"
+requires-python = ">=3.10"
+dependencies = [
+    "rawpy>=0.27",
+    "numpy>=2.0",
+    "opencv-python-headless>=4.10",
+    "pillow>=10",
+    "tifffile>=2024.1",
+    "PySide6-Essentials>=6.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6.10"]
+
+[project.scripts]
+photodesk-cli = "photodesk.cli:main"
+
+[project.gui-scripts]
+photodesk = "photodesk.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["photodesk*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,10 @@
+# Kodak's copyrighted installer and anything unpacked from it are never committed.
+vendor/
+raw/
+build/
+dist/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+*.photodesk.json
+.gjc/

@@ -1,0 +1,83 @@
+"""Command line interface: profile installation and batch conversion."""
+import argparse
+import concurrent.futures
+import sys
+from pathlib import Path
+
+from . import camera, export, pipeline, profiles
+
+RAW_SUFFIXES = {".dcr", ".kdc", ".dc2", ".k25", ".tif"}
+
+
+def _collect(paths):
+    for p in map(Path, paths):
+        if p.is_dir():
+            yield from sorted(f for f in p.iterdir() if f.suffix.lower() in RAW_SUFFIXES and f.is_file())
+        else:
+            yield p
+
+
+def _convert(job):
+    src, args = job
+    make, _ = camera.read_make_model(src)
+    settings = pipeline.load_settings(src, make)
+    if args.look:
+        settings.look = args.look
+    if args.illuminant:
+        settings.illuminant = args.illuminant
+    if args.wb:
+        settings.wb_mode = args.wb
+    return export.process_file(src, args.out, args.format, args.space, args.quality, args.long_edge, settings)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="photodesk")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    ip = sub.add_parser("install-profiles", help="extract Kodak ICC profiles from Photo_Desk_V_4_3_0.exe")
+    ip.add_argument("installer")
+    ip.add_argument("--dest")
+
+    cp = sub.add_parser("convert", help="convert raw files")
+    cp.add_argument("inputs", nargs="+")
+    cp.add_argument("-o", "--out", required=True)
+    cp.add_argument("-f", "--format", choices=export.FORMATS, default="JPEG")
+    cp.add_argument("-s", "--space", choices=list(pipeline.OUTPUT_SPACES), default="sRGB")
+    cp.add_argument("-q", "--quality", type=int, default=92)
+    cp.add_argument("--long-edge", type=int)
+    cp.add_argument("--look", help="look profile file name, e.g. DCSPortraitLook.icm")
+    cp.add_argument("--illuminant", choices=["Daylight", "Flash", "Tungsten", "Fluorescent"])
+    cp.add_argument("--wb", choices=["as_shot", "daylight", "auto"])
+    cp.add_argument("-j", "--jobs", type=int, default=2)
+
+    sub.add_parser("looks", help="list installed look profiles")
+
+    args = ap.parse_args(argv)
+    if args.cmd == "install-profiles":
+        dest, names = profiles.install_from_installer(args.installer, args.dest)
+        print(f"installed {len(names)} profiles to {dest}")
+        return 0
+    if args.cmd == "looks":
+        for name, desc in pipeline.available_looks():
+            print(f"{name}\t{desc}")
+        return 0
+
+    if not profiles.is_installed():
+        print("Kodak profiles not installed; run: photodesk install-profiles Photo_Desk_V_4_3_0.exe",
+              file=sys.stderr)
+        return 2
+    files = list(_collect(args.inputs))
+    failed = 0
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        futures = {pool.submit(_convert, (f, args)): f for f in files}
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                print(f"{futures[fut]} -> {fut.result()}")
+            except Exception as e:  # report and continue with remaining files
+                failed += 1
+                print(f"{futures[fut]}: {e}", file=sys.stderr)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
