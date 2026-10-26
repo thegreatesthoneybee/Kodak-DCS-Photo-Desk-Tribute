@@ -263,7 +263,8 @@ def test_sheet_undo_redo_rename_paste(tmp_path):
     assert a.settings.rotation == 1
     sheet.paste([b], a.settings, ("rotation",))
     assert b.settings.rotation == 1
-    sheet.save([a])
+    assert sheet.save([a]) == [] and not pipeline.sidecar_path(a.path).is_file()   # finished file: not saved
+    pipeline.save_settings(a.path, a.settings)
     sheet.rename([a, b], ["x01", "x02"])
     assert {e.path.name for e in sheet.entries} == {"x01.jpg", "x02.jpg"}
     assert pipeline.sidecar_path(tmp_path / "x01.jpg").is_file()
@@ -284,7 +285,7 @@ def test_sheet_drop_copy_move(tmp_path):
     Image.new("RGB", (8, 8), "red").save(dst / "b.jpg")
     s = Sheet(src)
     s.set_fields(s.entries[:1], "tag", tagged=True)
-    s.save(s.entries[:1])
+    pipeline.save_settings(s.entries[0].path, s.entries[0].settings)
     sheet = Sheet(dst)
     asked = []
     copied = sheet.transfer([src / "a.jpg", src / "b.jpg"], False, lambda d: asked.append(d.name) or False)

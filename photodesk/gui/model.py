@@ -176,9 +176,19 @@ class Sheet:
 
     # ------------------------------------------------------------ files
     def save(self, entries):
+        """Save settings of DCS raw images. Changes to finished files are never saved this way (only
+        Save As to Standard TIFF/JPEG keeps them), and read-only images cannot be saved in place;
+        returns the read-only DCS entries that still need Save As."""
+        need_save_as = []
         for e in entries:
+            if not e.is_raw:
+                continue
+            if e.read_only:
+                need_save_as.append(e)
+                continue
             pipeline.save_settings(e.path, e.settings)
             e.dirty = False
+        return need_save_as
 
     def dirty(self):
         return [e for e in self.entries if e.dirty]

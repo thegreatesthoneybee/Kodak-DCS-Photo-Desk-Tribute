@@ -705,6 +705,7 @@ class MainWindow(QMainWindow):
     def confirm_save(self, entries):
         """Ask to save changed settings before closing (Yes / Yes to All / No); False cancels."""
         save_all = False
+        read_only = []
         for e in entries:
             if not save_all:
                 dlg = D.YesToAllDialog(self.res, self, self.res.s(62151).replace("%s", e.path.name))
@@ -714,20 +715,29 @@ class MainWindow(QMainWindow):
                 elif r != D.OK:
                     e.dirty = False
                     continue
-            pipeline.save_settings(e.path, e.settings)
-            e.dirty = False
+            if e.is_raw and e.read_only:
+                read_only.append(e)
+            elif e.is_raw:
+                pipeline.save_settings(e.path, e.settings)
+            e.dirty = False                 # finished files: changes are dropped (Save As keeps them)
+        if read_only:                       # e.g. on a CD: the Save As dialog box appears
+            self._save_as_entries(read_only, True)
         return True
 
     def save(self):
         sw = self.active_sheet()
         if sw:
-            sw.sheet.save(self.selection() or sw.sheet.entries)
+            read_only = sw.sheet.save(self.selection() or sw.sheet.entries)
+            if read_only:
+                self._save_as_entries(read_only, True)
             self.statusBar().showMessage(self.res.tr("Saved", ("Common", "Common Strings")), 3000)
 
     def save_as(self, selected):
         entries = self.selection()
-        if not entries:
-            return
+        if entries:
+            self._save_as_entries(entries, selected)
+
+    def _save_as_entries(self, entries, selected):
         res = self.res
         title = res.s(62014 if selected or len(entries) > 1 else 62013)
         types = res.s(62008).split("|")
