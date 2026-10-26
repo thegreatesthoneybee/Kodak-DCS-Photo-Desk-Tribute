@@ -232,6 +232,7 @@ class MainWindow(QMainWindow):
         self.closeups = []
         self.player = None
         self.looks = pipeline.available_looks(self.pdir) if profiles.is_installed() else []
+        self.icons.look_labels = {name: pipeline.look_label(desc) for name, desc in self.looks}
         self.setWindowTitle(res.tr("DCS Photo Desk", ("About Box", "Common")))
         self.setWindowIcon(res.app_icon())
         self.mdi = QMdiArea()

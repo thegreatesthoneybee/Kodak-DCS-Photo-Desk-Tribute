@@ -2,7 +2,8 @@
 import numpy as np
 from PySide6.QtCore import QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDrag, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QListWidget, QListWidgetItem, QScrollArea, QStyle, QStyledItemDelegate, QWidget
+from PySide6.QtWidgets import (QApplication, QListWidget, QListWidgetItem, QScrollArea, QStyle, QStyledItemDelegate,
+                               QToolTip, QWidget)
 
 from .. import pipeline
 
@@ -64,6 +65,8 @@ class ThumbIcons:
     """Thumbnail info icons from the original bitmaps."""
 
     def __init__(self, res):
+        self.res = res
+        self.look_labels = {}         # look file name -> Look menu label, filled by the main window
         s = res.strip
         self.balance = {b: s(136, 16, i) for i, b in enumerate(pipeline.BALANCES)}
         self.lighting = {l: s(135, 16, i) for i, l in enumerate(pipeline.LIGHTINGS)}
@@ -74,10 +77,46 @@ class ThumbIcons:
         self.file = {"E": res.bitmap(226), "T": res.bitmap(227), "J": res.bitmap(228), "R": res.bitmap(229)}
 
 
+    def tips(self, e):
+        """Tooltip text of each thumbnail info icon (original strings 62016-62043)."""
+        s, st = self.res.s, e.settings
+        out = {"balance": s(62020 + pipeline.BALANCES.index(st.balance)),
+               "lighting": s(62016 + pipeline.LIGHTINGS.index(st.lighting)),
+               "exposure": s(62034), "sound": s(62035), "lock": s(62036), "tag": s(62037),
+               "file": s({"R": 50011, "T": 50012, "J": 50013, "E": 50014}[e.file_type])}
+        if st.white_point != pipeline.WHITE_POINT_DEFAULT and e.caps.white_point:
+            out["balance"] += s(62043).replace("%d", str(st.white_point))
+        out["look"] = self.look_labels.get(st.look, "")
+        if st.sharpen_amount > 0:
+            out["sharpen"] = (s(62040).replace("^", f"{st.sharpen_amount:.1f}")
+                              .replace("%", f"{st.sharpen_radius:.1f}").replace("#", str(st.sharpen_threshold)))
+        nt = st.noise_type
+        if nt == "expert":
+            out["noise"] = s(62123).replace("%d%%", f"{st.noise_strength}%")
+        elif nt == "moire" and not e.caps.pro_slr:
+            out["noise"] = s(62029).replace("^", str(st.moire_threshold))
+        elif nt in ("basic", "advanced", "moire"):
+            fmt = s({"basic": 62047, "advanced": 62041, "moire": 62042}[nt])
+            out["noise"] = fmt.replace("%d%%", f"{st.noise_strength}%").replace("%d", str(st.noise_radius), 1)
+        return out
+
+
 class ThumbDelegate(QStyledItemDelegate):
     def __init__(self, sheet_view):
         super().__init__(sheet_view)
         self.view = sheet_view
+        self.icon_rects = {}          # row -> [(QRect, icon key)] of the last paint, for tooltips
+
+    def helpEvent(self, event, view, option, index):
+        if event.type() == event.Type.ToolTip and index.isValid():
+            entry = index.data(Qt.UserRole)
+            for rect, key in self.icon_rects.get(index.row(), ()):
+                if rect.contains(event.pos()):
+                    tip = self.view.icons.tips(entry).get(key)
+                    if tip:
+                        QToolTip.showText(event.globalPos(), tip, view)
+                        return True
+        return super().helpEvent(event, view, option, index)
 
     def sizeHint(self, option, index):
         return self.view.cell_size()
@@ -112,39 +151,46 @@ class ThumbDelegate(QStyledItemDelegate):
                 p.drawRect(QRectF(x + c[0] * pm.width(), y + c[1] * pm.height(),
                                   (c[2] - c[0]) * pm.width(), (c[3] - c[1]) * pm.height()))
         if info:
-            self._info(p, r, entry, index.row() + 1, selected)
+            self.icon_rects[index.row()] = self._info(p, r, entry, index.row() + 1, selected)
         p.restore()
 
     def _info(self, p, r, e, number, selected):
         ic = self.view.icons
         s = e.settings
         x, y = r.left() + 4, r.top() + 1
+        rects = []
         icons = []
         if e.is_raw:
-            icons.append(ic.balance[s.balance])
-            icons.append(ic.lighting[s.lighting])
-            icons.append(ic.look_portrait if "Portrait" in s.look else ic.look_product)
+            icons.append((ic.balance[s.balance], "balance"))
+            icons.append((ic.lighting[s.lighting], "lighting"))
+            icons.append((ic.look_portrait if "Portrait" in s.look else ic.look_product, "look"))
             if s.noise_type != "none":
-                icons.append(ic.noise)
+                icons.append((ic.noise, "noise"))
             if s.sharpen_amount > 0:
-                icons.append(ic.sharpen)
-        for pm in icons:
+                icons.append((ic.sharpen, "sharpen"))
+        for pm, key in icons:
             p.drawPixmap(x, y, pm)
+            rects.append((QRect(x, y, 16, 16), key))
             x += 17
         p.setPen(QColor(255, 255, 255) if selected else QColor(0, 0, 0))
         if e.is_raw:
             p.drawPixmap(x, y, ic.exposure)
+            rects.append((QRect(x, y, 47, 16), "exposure"))
             p.drawText(QRect(x + 17, y, 30, 15), Qt.AlignVCenter, f"{s.exposure:.1f}")
         x = r.right() - 4
         # Finished files show only the File Type, Tag and Read-Only icons (help: Thumbnail Information).
-        for pm, on in ((ic.sound, e.is_raw and bool(e.sounds)), (ic.lock, e.read_only), (ic.tag, s.tagged)):
+        for pm, on, key in ((ic.sound, e.is_raw and bool(e.sounds), "sound"), (ic.lock, e.read_only, "lock"),
+                            (ic.tag, s.tagged, "tag")):
             if on:
                 x -= 17
                 p.drawPixmap(x, y, pm)
+                rects.append((QRect(x, y, 16, 16), key))
         by = r.bottom() - INFO_H + 1
         p.drawText(QRect(r.left() + 4, by, 30, 15), Qt.AlignVCenter, str(number))
         p.drawText(QRect(r.left() + 30, by, r.width() - 60, 15), Qt.AlignCenter, e.path.name)
         p.drawPixmap(r.right() - 20, by, ic.file[e.file_type])
+        rects.append((QRect(r.right() - 20, by, 16, 16), "file"))
+        return rects
 
 
 class ContactSheetView(QListWidget):
