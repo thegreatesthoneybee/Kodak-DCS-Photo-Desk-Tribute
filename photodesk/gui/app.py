@@ -240,6 +240,7 @@ class MainWindow(QMainWindow):
         self._toolbar()
         self._panels()
         self._status()
+        self._editor_label()
         self.update_commands()
         self.restoreGeometry(self.q.value("MainFrame Position", b""))
         self.restoreState(self.q.value("ControlBar States", b""))
@@ -904,8 +905,14 @@ class MainWindow(QMainWindow):
         if path:
             self.q.setValue("TIFF Open With", path)
             self.q.setValue("JPEG Open With", path)
-            self.acts[33108].setText(R.strip_accel(self.res.s(59516).replace("%s", Path(path).stem, 1)
-                                                   .replace("%s", "", 1))[0])
+            self._editor_label()
+
+    def _editor_label(self):
+        """File menu and toolbar show the chosen editor: "Send to <editor>"."""
+        editor = self.q.value("TIFF Open With", "")
+        if editor:
+            text = self.res.s(59516).replace("%s", Path(editor).stem, 1).replace("%s", "", 1)
+            self.acts[33108].setText(R.strip_accel(text)[0].rstrip("\t"))
 
     def send_to_editor(self):
         editor = self.q.value("TIFF Open With", "")
@@ -922,8 +929,13 @@ class MainWindow(QMainWindow):
             D.message(self, self.res, self.res.s(59519))
             return
         entries = self.selection()
-        dests = [export.output_path(e.path, folder, "tiff") for e in entries]
-        self._export(entries, dests, "tiff", open_with=editor)
+        for e in entries:                     # finished JPEG/TIFF files open unmodified
+            if not e.is_raw:
+                launch(self.q.value("JPEG Open With", editor) if e.file_type == "J" else editor, e.path)
+        raws = [e for e in entries if e.is_raw]
+        if raws:
+            dests = [export.output_path(e.path, folder, "tiff") for e in raws]
+            self._export(raws, dests, "tiff", open_with=editor)
 
     def camera_manager(self):
         """Run KODAK PROFESSIONAL DCS Camera Manager if it is installed (a separate Kodak program)."""
