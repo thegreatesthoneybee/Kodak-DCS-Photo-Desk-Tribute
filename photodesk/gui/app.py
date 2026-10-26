@@ -1196,9 +1196,21 @@ class MainWindow(QMainWindow):
     def toggle_dock(self, dock):
         dock.setVisible(not dock.isVisible())
         if dock.isVisible():
+            self._place_floating(dock)
             dock.raise_()
             if dock is self.hist_dock:
                 self._update_histogram()
+
+    def _place_floating(self, dock):
+        """A floating panel with no remembered position goes inside the frame's top-right, not the screen origin."""
+        if dock.isFloating() and dock.isVisible() and not self.frameGeometry().intersects(dock.frameGeometry()):
+            g = self.geometry()
+            dock.move(g.right() - dock.width() - 20, g.top() + 80)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        for d in (self.controls_dock, self.info_dock, self.hist_dock):
+            self._place_floating(d)
 
     def toggle_thumb_info(self):
         on = self.acts[32840].isChecked()
