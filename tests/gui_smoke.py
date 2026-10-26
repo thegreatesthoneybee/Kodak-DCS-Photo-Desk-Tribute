@@ -64,8 +64,10 @@ def main(folder, shot):
     app.processEvents()
     assert w.controls.b[1173].currentData() == "preset"
     # Edit through the panel and the menu, then undo/redo.
+    before = entry.thumb
     w.acts[32788].trigger()                    # Lighting > Tungsten
     assert entry.settings.lighting == "Tungsten"
+    wait(app, lambda: entry.thumb is not before)   # thumbnail re-rendered in the background
     undo_text = w.acts[57643].text()
     w.acts[57643].trigger()
     assert entry.settings.lighting == "Daylight"

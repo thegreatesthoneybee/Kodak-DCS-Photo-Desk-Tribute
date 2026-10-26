@@ -41,6 +41,7 @@ class Entry:
     make: str = ""
     model: str = ""
     thumb: object = None          # QImage once rendered
+    thumb_gen: int = 0            # bumped per thumbnail re-render request; older results are dropped
     raw: object = None            # decoded RawImage (half size) while an image window is open
     small: object = None          # reduced RawImage used for thumbnails
     meta: dict = None             # camera metadata once decoded

@@ -714,16 +714,28 @@ class MainWindow(QMainWindow):
         self.thumb_pool.start(task)
 
     def refresh_thumb(self, entry):
-        """Re-render a thumbnail after its settings changed."""
+        """Re-render a thumbnail after its settings changed (in the background; the newest edit wins)."""
         for sw in self.sheets:
             if entry in sw.sheet.entries:
                 if entry.small is not None:
-                    img = pipeline.render(entry.small, entry.settings.copy(crop=None), profile_directory=self.pdir,
-                                          quality="faster")
-                    entry.thumb = to_qimage(img)
+                    entry.thumb_gen += 1
+                    task = Task((entry, entry.thumb_gen, sw), pipeline.render, entry.small,
+                                entry.settings.copy(crop=None), pipeline.DISPLAY_SPACE, self.pdir, "faster")
+                    task.signals.done.connect(self._thumb_rendered)
+                    self.thumb_pool.start(task, 1)          # ahead of first-time thumbnail loads
                 elif not entry.is_raw and entry.thumb is not None:
                     self._load_thumb(sw, entry)
                 sw.view.refresh_entry(entry)
+
+    def _thumb_rendered(self, token, img):
+        entry, gen, sw = token
+        if gen != entry.thumb_gen:
+            return
+        entry.thumb = to_qimage(img)
+        if sw in self.sheets:
+            sw.view.refresh_entry(entry)
+        if entry is self.focused():
+            self._update_histogram()
 
     def open_selected(self):
         sw = self.active_sheet()
