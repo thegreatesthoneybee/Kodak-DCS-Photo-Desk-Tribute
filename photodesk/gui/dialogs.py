@@ -1,5 +1,6 @@
 """Photo Desk dialogs, laid out from the original dialog templates."""
 import datetime
+import os
 
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QPixmap
@@ -579,9 +580,8 @@ class RenameDialog(TemplateDialog):
             return None, s(60017)
         if len(base) > 200:
             return None, s(60016)
-        if len(self.entries) == 1:
-            stem = base.rsplit(".", 1)[0] if "." in base else base
-            return [stem], None
+        if len(self.entries) == 1:          # one file: the name is typed with its extension
+            return [base], None
         if base.count("*") > 1:
             return None, s(60044)
         digits, start = self.b[1162].text().strip(), self.b[1163].text().strip()
@@ -611,7 +611,14 @@ class RenameDialog(TemplateDialog):
         if err:
             message(self, self.res, err)
             return
-        self.names = names
+        if len(self.entries) == 1:
+            new_ext = os.path.splitext(names[0])[1].lower()
+            if new_ext != self.entries[0].path.suffix.lower() and message(
+                    self, self.res, self.res.s(60051), "question",
+                    QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+                return
+        # Full file names: several files keep their own extensions.
+        self.names = names if len(self.entries) == 1 else [n + e.path.suffix for n, e in zip(names, self.entries)]
         if len(self.entries) > 1:
             self.q.setValue("Save As Basename", self.b[1159].text().strip())
             self.q.setValue("Save As Num Digits", int(self.b[1162].text()))

@@ -211,31 +211,47 @@ class Sheet:
     def dirty(self):
         return [e for e in self.entries if e.dirty]
 
-    def rename(self, entries, names, record=True):
-        """Rename entries to names (without extension); moves sidecars and sounds too."""
-        moves = []
+    def rename(self, entries, names, on_error=None, record=True):
+        """Rename entries to the file names given; moves sidecars and sounds too.
+
+        A file whose new name already exists ("exists"), or that cannot be renamed ("denied" or
+        "failed"), is skipped; on_error(entry, kind) returns False to stop renaming the rest.
+        Returns the entries actually renamed.
+        """
+        done, old_names, new_names = [], [], []
         for e, name in zip(entries, names):
-            dest = e.path.with_name(name + e.path.suffix)
-            if dest.exists() and dest != e.path:
-                raise FileExistsError(str(dest))
-            moves.append((e, dest))
-        old_names = [e.path.stem for e in entries]
-        for e, dest in moves:
             old = e.path
+            dest = old.with_name(name)
             if dest == old:
                 continue
-            for snd in e.sounds:
+            kind = None
+            if dest.exists() and dest.name.lower() != old.name.lower():
+                kind = "exists"
+            else:
+                try:
+                    old.rename(dest)
+                except PermissionError:
+                    kind = "denied"
+                except OSError:
+                    kind = "failed"
+            if kind:
+                if on_error is not None and not on_error(e, kind):
+                    break
+                continue
+            for snd in sorted(old.parent.glob(old.stem + "*.wav")) + sorted(old.parent.glob(old.stem + "*.WAV")):
                 snd.rename(snd.with_name(dest.stem + snd.name[len(old.stem):]))
             sc = pipeline.sidecar_path(old)
-            old.rename(dest)
             if sc.is_file():
                 sc.rename(pipeline.sidecar_path(dest))
             e.path = dest
+            done.append(e)
+            old_names.append(old.name)
+            new_names.append(dest.name)
         self.sort_by(self.sort)
-        if record:
-            entries = list(entries)
-            self._push("rename", lambda: self.rename(entries, old_names, False) or entries,
-                       lambda: self.rename(entries, names, False) or entries)
+        if record and done:
+            self._push("rename", lambda: self.rename(done, old_names, record=False) or done,
+                       lambda: self.rename(done, new_names, record=False) or done)
+        return done
 
     def delete(self, entries, trash):
         """trash(path) moves a file to the recycle bin; returns entries actually removed."""

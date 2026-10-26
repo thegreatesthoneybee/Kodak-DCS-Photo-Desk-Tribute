@@ -322,11 +322,19 @@ def test_sheet_undo_redo_rename_paste(tmp_path):
     assert b.settings.crop == (0, 0, 0.5, 0.5) and b.settings.look != src.look   # finished: crop only
     assert sheet.save([a]) == [] and not pipeline.sidecar_path(a.path).is_file()   # finished file: not saved
     pipeline.save_settings(a.path, a.settings)
-    sheet.rename([a, b], ["x01", "x02"])
+    sheet.rename([a, b], ["x01.jpg", "x02.jpg"])
     assert {e.path.name for e in sheet.entries} == {"x01.jpg", "x02.jpg"}
     assert pipeline.sidecar_path(tmp_path / "x01.jpg").is_file()
     sheet.undo()
     assert {e.path.name for e in sheet.entries} == {"a.jpg", "b.jpg"}
+    # An existing name is skipped; on_error decides whether to rename the rest.
+    Image.new("RGB", (8, 8)).save(tmp_path / "y01.jpg")
+    errors = []
+    done = sheet.rename([a, b], ["y01.jpg", "y02.jpg"], lambda e, kind: errors.append((e.path.name, kind)) or True)
+    assert errors == [("a.jpg", "exists")] and done == [b] and b.path.name == "y02.jpg"
+    sheet.undo()
+    assert b.path.name == "b.jpg"
+    (tmp_path / "y01.jpg").unlink()
     gone = sheet.delete([b], lambda p: p.unlink() or True)
     assert gone == [b] and not (tmp_path / "b.jpg").exists()
 

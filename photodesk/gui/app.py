@@ -979,11 +979,17 @@ class MainWindow(QMainWindow):
         dlg = D.RenameDialog(self.res, self, entries, self.q)
         if dlg.exec() != D.QDialog.Accepted:
             return
-        try:
-            sw.sheet.rename(entries, dlg.names)
-        except OSError as err:
-            D.message(self, self.res, self.res.s(60049) + f"\n{err}")
-            return
+        many = len(entries) > 1
+
+        def on_error(e, kind):
+            sid = {"exists": 60052, "denied": 60050, "failed": 60049}[kind]
+            if not many:
+                D.message(self, self.res, self.res.s(sid))
+                return False
+            sid = {60052: 60053, 60050: 60054, 60049: 60055}[sid]
+            return D.message(self, self.res, self.res.s(sid), "question",
+                             QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
+        sw.sheet.rename(entries, dlg.names, on_error)
         sw.view.populate(sw.sheet.entries)
         for w in sw.images:
             w.setWindowTitle(w.entry.path.name)
@@ -1012,6 +1018,9 @@ class MainWindow(QMainWindow):
         across drives) / menu (right-button drag: drop menu 169 Copy Here / Move Here / Cancel)."""
         paths = [p for p in paths if is_image(Path(p))]
         if not paths:
+            return
+        if not os.access(sw.sheet.folder, os.W_OK):     # e.g. a folder on a CD
+            D.message(self, self.res, self.res.s(60037))
             return
         if mode == "menu":
             menu = QMenu(self)
