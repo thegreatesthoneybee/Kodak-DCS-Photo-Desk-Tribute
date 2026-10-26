@@ -155,6 +155,17 @@ def main(folder, shot):
     assert focused.settings.annotation == "note"
     for e in sw2.sheet.entries:
         e.dirty = False
+    # Scrolling Hand on a contact sheet scrolls instead of selecting.
+    from PySide6.QtGui import QMouseEvent
+    w.set_tool("hand")
+    sw2.view.clearSelection()
+    vp = sw2.view.viewport()
+    for typ, y in ((QEvent.MouseButtonPress, 50), (QEvent.MouseMove, 10), (QEvent.MouseButtonRelease, 10)):
+        app.sendEvent(vp, QMouseEvent(typ, QPointF(20, y), QPointF(20, y), Qt.LeftButton,
+                                      Qt.LeftButton if typ != QEvent.MouseButtonRelease else Qt.NoButton,
+                                      Qt.NoModifier))
+    assert not sw2.view.selectedItems()
+    w.set_tool("select")
     w.mdi.setActiveSubWindow(sw)
     w.mdi.tileSubWindows()
     app.processEvents()

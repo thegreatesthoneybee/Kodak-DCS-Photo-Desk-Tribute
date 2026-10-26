@@ -145,7 +145,19 @@ class SheetWindow(QMdiSubWindow):
         self.main.selection_changed()
 
     def eventFilter(self, obj, ev):
-        if ev.type() == ev.Type.MouseButtonPress and ev.button() == Qt.LeftButton:
+        t = ev.type()
+        if self.main.tool == "hand":            # Scrolling Hand: drag the contact sheet
+            bar = self.view.verticalScrollBar()
+            if t == ev.Type.MouseButtonPress and ev.button() == Qt.LeftButton:
+                self._hand = (ev.position().y(), bar.value())
+                return True
+            if t == ev.Type.MouseMove and getattr(self, "_hand", None):
+                bar.setValue(int(self._hand[1] - (ev.position().y() - self._hand[0])))
+                return True
+            if t == ev.Type.MouseButtonRelease and getattr(self, "_hand", None):
+                self._hand = None
+                return True
+        if t == ev.Type.MouseButtonPress and ev.button() == Qt.LeftButton:
             tool = self.main.tool
             if tool in ("click", "closeup"):
                 hit = self.view.thumb_at(ev.position().toPoint())
@@ -1406,7 +1418,7 @@ class MainWindow(QMainWindow):
         self.acts[TOOL_CMD[tool]].setChecked(True)
         self.controls.set_tool(TOOL_CMD[tool])
         for sw in self.sheets:
-            sw.view.viewport().setCursor(self.cursors.get(tool, Qt.ArrowCursor) if tool in ("click", "closeup")
+            sw.view.viewport().setCursor(self.cursors.get(tool, Qt.ArrowCursor) if tool in ("click", "closeup", "hand")
                                          else Qt.ArrowCursor)
             for w in sw.images:
                 w.view.set_tool(tool)
