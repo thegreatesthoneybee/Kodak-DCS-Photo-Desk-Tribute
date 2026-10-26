@@ -28,6 +28,9 @@ class Capabilities:
     pro_slr: bool          # DCS Pro 14n/14nx/SLR: Advanced/Moire/Expert noise reduction
     lens_optimization: bool
     look_set: tuple = None  # restricted Looks of older cameras (None: every installed Look)
+    # Other DCS cameras (help: Reducing Noise): Basic for the 300/500/600/700 series and Pro Backs,
+    # Advanced for all but the DCS 315, Advanced with Moire Reduction for the 700 series and Pro Backs.
+    other_noise_types: tuple = ("none", "basic", "advanced", "moire")
 
     @property
     def exposure_range(self):
@@ -37,7 +40,8 @@ class Capabilities:
     def noise_types(self):
         if self.pro_slr:
             return ("none", "advanced", "moire", "expert")
-        return ("none", "basic", "advanced", "moire")
+        return self.other_noise_types
+
 
     def looks(self, available):
         """Looks this camera supports, from [(file name, description)] (help: Setting the Image Look)."""
@@ -68,7 +72,12 @@ def capabilities(model):
         look_set = basic + ("Portrait Reduced", "Product Reduced")
     elif any(k in m for k in ("315", "330", "520", "560", "620", "660")):
         look_set = basic
-    return Capabilities(dcs, pro_back, pro_slr, lens, look_set)
+    noise = ["none", "basic", "advanced", "moire"]
+    if "315" in m:
+        noise.remove("advanced")
+    if not (pro_back or any(k in m for k in ("720", "760"))):
+        noise.remove("moire")
+    return Capabilities(dcs, pro_back, pro_slr, lens, look_set, tuple(noise))
 
 
 def read_make_model(path):

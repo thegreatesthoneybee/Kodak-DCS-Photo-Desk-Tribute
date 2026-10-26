@@ -43,6 +43,11 @@ def test_camera_looks():
     assert [n for n, _ in camera.capabilities("DCS660M").looks(looks)] == ["P.icm", "PG.icm"]
     assert [n for n, _ in camera.capabilities("DCS620x").looks(looks)] == ["P.icm", "PG.icm", "PR.icm"]
     assert camera.capabilities("DCS Pro SLR/n").looks(looks) == looks
+    assert camera.capabilities("DCS315").noise_types == ("none", "basic")
+    assert camera.capabilities("DCS560").noise_types == ("none", "basic", "advanced")
+    assert camera.capabilities("DCS760C").noise_types == ("none", "basic", "advanced", "moire")
+    assert camera.capabilities("ProBack645").noise_types == ("none", "basic", "advanced", "moire")
+    assert camera.capabilities("DCS Pro SLR/n").noise_types == ("none", "advanced", "moire", "expert")
 
 
 def test_custom_looks_in_system_folders(profile_dir, tmp_path, monkeypatch):
