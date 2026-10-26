@@ -314,6 +314,9 @@ def test_sheet_undo_redo_rename_paste(tmp_path):
     assert a.settings.rotation == 1
     sheet.paste([b], a.settings, ("rotation",))
     assert b.settings.rotation == 1
+    src = pipeline.Settings(look="DCSPortraitLook.icm", crop=(0, 0, 0.5, 0.5))
+    sheet.paste([b], src, ("look", "crop"))
+    assert b.settings.crop == (0, 0, 0.5, 0.5) and b.settings.look != src.look   # finished: crop only
     assert sheet.save([a]) == [] and not pipeline.sidecar_path(a.path).is_file()   # finished file: not saved
     pipeline.save_settings(a.path, a.settings)
     sheet.rename([a, b], ["x01", "x02"])
@@ -323,6 +326,23 @@ def test_sheet_undo_redo_rename_paste(tmp_path):
     assert {e.path.name for e in sheet.entries} == {"a.jpg", "b.jpg"}
     gone = sheet.delete([b], lambda p: p.unlink() or True)
     assert gone == [b] and not (tmp_path / "b.jpg").exists()
+
+
+@need_sample
+def test_paste_click_balance_same_camera_only(tmp_path):
+    import shutil
+    from photodesk.gui.model import Sheet
+    shutil.copy(SAMPLE, tmp_path / "a.DCR")
+    shutil.copy(SAMPLE, tmp_path / "b.DCR")
+    sheet = Sheet(tmp_path)
+    a, b = sheet.entries
+    assert a.serial == "PB645M-00152"
+    src = pipeline.Settings(balance="click", click_wb=(1.2, 1.0, 1.4), exposure=0.5)
+    fields = ("balance", "click_wb", "exposure")
+    sheet.paste([a], src, fields, source_serial="OTHER-1")
+    assert a.settings.exposure == 0.5 and a.settings.balance != "click"
+    sheet.paste([b], src, fields, source_serial=a.serial)
+    assert b.settings.balance == "click" and b.settings.click_wb == (1.2, 1.0, 1.4)
 
 
 def test_sheet_drop_copy_move(tmp_path):

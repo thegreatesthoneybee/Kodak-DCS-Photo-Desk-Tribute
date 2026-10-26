@@ -54,14 +54,24 @@ def capabilities(model):
 
 def read_make_model(path):
     """Return (make, model) from the first TIFF IFD of a DCR file."""
+    vals = _ifd0_strings(path, (0x10F, 0x110))
+    return vals.get(0x10F, ""), vals.get(0x110, "")
+
+
+def read_serial(path):
+    """Camera serial number (TIFF tag 0x827D, Copyright, which DCS cameras use for it)."""
+    return _ifd0_strings(path, (0x827D,)).get(0x827D, "")
+
+
+def _ifd0_strings(path, tags):
     with open(path, "rb") as f:
         head = f.read(1 << 16)
     if head[:4] not in (b"MM\x00*", b"II*\x00"):
-        return "", ""
+        return {}
     bo = ">" if head[:2] == b"MM" else "<"
     off, = struct.unpack_from(bo + "I", head, 4)
     if off + 2 > len(head):
-        return "", ""
+        return {}
     n, = struct.unpack_from(bo + "H", head, off)
     vals = {}
     for i in range(n):
@@ -69,10 +79,10 @@ def read_make_model(path):
         if p + 12 > len(head):
             break
         tag, typ, cnt, val = struct.unpack_from(bo + "HHII", head, p)
-        if tag in (0x10F, 0x110) and typ == 2:
+        if tag in tags and typ == 2:
             raw = head[val:val + cnt] if cnt > 4 else head[p + 8:p + 8 + cnt]
             vals[tag] = raw.split(b"\x00")[0].decode("latin1").strip()
-    return vals.get(0x10F, ""), vals.get(0x110, "")
+    return vals
 
 
 def read_gps(path):

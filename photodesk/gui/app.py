@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 from .. import __version__, camera, export, pipeline, profiles, wbfile
 from . import dialogs as D
 from . import res as R
-from .model import PASTE_GROUPS, Sheet, is_image
+from .model import PASTE_GROUPS, Sheet, is_image, paste_into
 from .panels import CROP_ITEMS, CloseUpWindow, HistogramPanel, ImageControlsPanel, ImageInfoPanel
 from .views import ContactSheetView, ImageView, Task, ThumbIcons, qimage_array, to_qimage
 
@@ -221,6 +221,7 @@ class MainWindow(QMainWindow):
         self.tool = "select"
         self.quality = self.q.value("Review Render Mode", "better")
         self.clipboard = None
+        self.clipboard_serial = ""
         self.crop_mode = self.q.value("Crop Mode", "freeform")
         self.crop_other = (self.q.value("Constrained Crop Width X 10000", 40000, int) / 10000,
                            self.q.value("Constrained Crop Height X 10000", 60000, int) / 10000)
@@ -1153,14 +1154,15 @@ class MainWindow(QMainWindow):
         e = self.focused()
         if e:
             self.clipboard = e.settings.copy()
+            self.clipboard_serial = e.serial
             self.update_commands()
 
     def paste_settings(self):
         sw = self.active_sheet()
         if sw and self.clipboard:
             fields = tuple(f for cid, fs in PASTE_GROUPS.items() if cid not in (1350, 1351) for f in fs)
-            self.after_edit(sw.sheet.paste([e for e in self.selection() if e.is_raw] or self.selection(),
-                                           self.clipboard, fields, "paste_special"))
+            self.after_edit(sw.sheet.paste(self.selection(), self.clipboard, fields, "paste_special",
+                                           self.clipboard_serial))
 
     def paste_special(self):
         sw = self.active_sheet()
@@ -1174,8 +1176,7 @@ class MainWindow(QMainWindow):
                 e.settings = originals[id(e)]
                 if fields:
                     s = e.settings.copy()
-                    for f in fields:
-                        setattr(s, f, getattr(self.clipboard, f))
+                    paste_into(e, s, self.clipboard, fields, self.clipboard_serial)
                     e.settings = s
             self._preview_refresh(entries)
         dlg = D.PasteSpecialDialog(self.res, self, PASTE_GROUPS, preview)
@@ -1184,7 +1185,7 @@ class MainWindow(QMainWindow):
         for e in entries:
             e.settings = originals[id(e)]
         if ok and fields:
-            self.after_edit(sw.sheet.paste(entries, self.clipboard, fields))
+            self.after_edit(sw.sheet.paste(entries, self.clipboard, fields, source_serial=self.clipboard_serial))
         else:
             self._preview_refresh(entries)
 

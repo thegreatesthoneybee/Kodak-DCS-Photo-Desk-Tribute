@@ -31,6 +31,7 @@ PASTE_GROUPS = {
     1348: ("sharpen_amount", "sharpen_radius", "sharpen_threshold"), 1350: ("iptc",), 1351: ("tagged",),
 }
 ALL_FIELDS = tuple(f for g in PASTE_GROUPS.values() for f in g)
+FINISHED_FIELDS = ("crop", "rotation", "iptc", "tagged")
 
 
 @dataclasses.dataclass
@@ -46,6 +47,13 @@ class Entry:
     dirty: bool = False           # settings changed since last Save
 
     _raw_kind: bool = None
+    _serial: str = None
+
+    @property
+    def serial(self):
+        if self._serial is None:
+            self._serial = camera.read_serial(self.path)
+        return self._serial
 
     @property
     def is_raw(self):
@@ -98,6 +106,15 @@ def is_image(p):
     return p.is_file() and p.suffix.lower() in RAW_SUFFIXES | FINISHED_SUFFIXES
 
 
+def paste_into(entry, settings, source, fields, source_serial):
+    for f in fields:
+        if not entry.is_raw and f not in FINISHED_FIELDS:
+            continue
+        if f in ("click_wb", "balance") and source.balance == "click" and entry.serial != source_serial:
+            continue
+        setattr(settings, f, getattr(source, f))
+
+
 class Sheet:
     """A folder opened as a contact sheet."""
 
@@ -147,11 +164,12 @@ class Sheet:
     def set_fields(self, entries, kind, **fields):
         return self.apply(entries, kind, lambda e, s: [setattr(s, k, v) for k, v in fields.items()])
 
-    def paste(self, entries, source, fields, kind="paste_special"):
-        def change(e, s):
-            for f in fields:
-                setattr(s, f, getattr(source, f))
-        return self.apply(entries, kind, change)
+    def paste(self, entries, source, fields, kind="paste_special", source_serial=None):
+        """Paste settings copied from an image whose camera serial number is source_serial.
+
+        Finished files only take the settings they support (crop, rotation, IPTC, tag).
+        Click balance is only pasted onto images from the same camera (same serial number)."""
+        return self.apply(entries, kind, lambda e, s: paste_into(e, s, source, fields, source_serial))
 
     def undo(self):
         """Undo the last edit; returns the affected entries."""
