@@ -10,7 +10,7 @@ a = Analysis(
     ["../photodesk/__main__.py"],
     pathex=[".."],
     binaries=collect_dynamic_libs("rawpy"),
-    hiddenimports=["photodesk.cli", "photodesk.gui.app"],
+    hiddenimports=["photodesk.cli", "photodesk.gui.app", "PySide6.QtMultimedia", "PySide6.QtPrintSupport"],
     excludes=["tkinter", "matplotlib", "scipy", "PySide6.QtWebEngineCore", "PySide6.Qt3DCore"],
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)

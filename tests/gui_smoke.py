@@ -45,6 +45,9 @@ def main(folder, shot):
             if fam:
                 app.setFont(fam[0])
                 break
+    for f in os.listdir(folder):      # start from camera settings
+        if f.endswith(".photodesk.json"):
+            os.remove(os.path.join(folder, f))
     res = R.Resources.load()
     w = MainWindow(res)
     w.resize(1500, 950)
@@ -82,6 +85,17 @@ def main(folder, shot):
     assert entry.settings.crop == (0.1, 0.1, 0.6, 0.6)
     w.toggle_dock(w.hist_dock)
     app.processEvents()
+    # Save As (Standard JPEG) through the export path used by File > Save As.
+    out = os.path.join(os.environ.get("TEMP", "/tmp"), "pd_smoke_out")
+    os.makedirs(out, exist_ok=True)
+    from pathlib import Path
+    from photodesk import export
+    auto_close(app, lambda d: None)
+    dest = export.output_path(entry.path, out, "jpeg")
+    if dest.exists():
+        dest.unlink()
+    paths = w._export([entry], [dest], "jpeg")
+    assert paths and Path(paths[0]).stat().st_size > 10000, paths
     w.mdi.tileSubWindows()
     app.processEvents()
     w.grab().save(shot)

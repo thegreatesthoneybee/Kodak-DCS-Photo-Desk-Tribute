@@ -359,8 +359,9 @@ class MainWindow(QMainWindow):
         self.look_menu.clear()
         grp = QActionGroup(self)
         self.look_acts = {}
-        for i, (name, desc) in enumerate(self.looks):
-            act = self.look_menu.addAction(pipeline.look_label(desc))
+        for name, desc in self.looks:
+            act = QAction(pipeline.look_label(desc), self)     # owned by the window, shared by context menus
+            self.look_menu.addAction(act)
             act.setCheckable(True)
             grp.addAction(act)
             act.triggered.connect(lambda _=False, n=name: self.edit("look", look=n))
@@ -872,7 +873,19 @@ class MainWindow(QMainWindow):
         self._export(entries, dests, "tiff", open_with=editor)
 
     def camera_manager(self):
-        D.message(self, self.res, self.res.s(60047), "info")
+        """Run KODAK PROFESSIONAL DCS Camera Manager if it is installed (a separate Kodak program)."""
+        exe = self.q.value("Camera Manager", "")
+        if not exe or not Path(exe).exists():
+            flt = self.res.s(62039).split("|")
+            exe, _ = QFileDialog.getOpenFileName(self, self.res.tip(32905)[1], "",
+                                                 f"{flt[0]} ({flt[1]})" if sys.platform == "win32" else "")
+            if not exe:
+                return
+            self.q.setValue("Camera Manager", exe)
+        try:
+            subprocess.Popen(["open", "-a", exe] if exe.endswith(".app") else [exe])
+        except OSError:
+            D.message(self, self.res, self.res.s(60000).replace("%s", exe))
 
     def rename(self):
         sw = self.active_sheet()

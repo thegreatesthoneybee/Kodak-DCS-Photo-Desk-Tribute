@@ -346,6 +346,7 @@ NOISE_LABEL = {"none": 33140, "basic": 33141, "advanced": 33142, "moire": 33143,
 
 class NoiseDialog(QDialog):
     """Noise Reduction: template 1133 (radius/strength or expert strength/luma) or 1134 (moire threshold)."""
+    fields = ("noise_type", "noise_radius", "noise_strength", "noise_luma", "moire_threshold")
 
     def __init__(self, res, parent, settings, preview, caps, mixed=False):
         super().__init__(parent)

@@ -1,54 +1,98 @@
 # PhotoDesk
 
-Kodak DCS Photo Desk 4.3의 RAW 현상 기능을 Windows 11(x64)과 macOS(Apple Silicon)에서
-네이티브로 다시 구현한 프로그램입니다.
+Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon)에서 네이티브로 다시 구현한 프로그램입니다.
+원본과 같은 화면과 같은 동작을 목표로 합니다.
 
-- RAW 디코딩: LibRaw (rawpy)
-- 색 처리: Photo Desk 4.3에 들어 있던 Kodak ICC 프로파일을 그대로 사용
-  `카메라 RGB → Source Correction(카메라/광원) → ERIMM → Look → sRGB / Adobe RGB / ProPhoto RGB`
-- 컨택트 시트, 리뷰 화면, 광원·Look·화이트밸런스(회색 클릭)·노출·샤프닝·노이즈 감소·회전
-- 설정 복사/붙여넣기 (Photo Desk의 Paste Special), 사이드카 파일 `<파일>.photodesk.json`에 저장
-- JPEG(EXIF·ICC 포함), TIFF 8/16비트 내보내기, 긴 변 리사이즈, 일괄 변환 CLI
+## 원본과 같은 인터페이스
 
-## Kodak 프로파일 설치 (최초 1회)
+화면 요소는 사용자가 가진 원본 설치 파일 `Photo_Desk_V_4_3_0.exe`에서 가져옵니다.
+설치 파일과 그 안의 `PhotoDsk.exe`는 실행하지 않고 리소스 섹션만 읽습니다.
 
-Kodak 프로파일은 저작권 문제로 함께 배포하지 않습니다. 원본 설치 파일
-`Photo_Desk_V_4_3_0.exe`를 지정하면, 실행하지 않고 내부 CAB/InstallShield 아카이브에서
-프로파일 57개만 추출합니다. macOS에서도 같은 .exe 파일을 사용합니다.
+가져오는 요소는 다음과 같습니다.
 
-- GUI: `File > Install Kodak Profiles...`
-- CLI: `photodesk install-profiles Photo_Desk_V_4_3_0.exe`
+- **메뉴와 단축키:** 메뉴(파일·편집·보기·이미지·정보·윈도우·도움말)와 명령 ID, 단축키(액셀러레이터 표), 오른쪽 클릭 메뉴.
+- **툴바:** 아이콘과 버튼 순서.
+- **패널:** 이미지 조절 패널, 이미지 정보 패널, 출력 히스토그램. 원본 대화상자 템플릿의 컨트롤 위치를 대화상자 단위(dialog unit)로 그대로 배치합니다.
+- **대화상자:** 노출 보정, 노출과 톤(노출 히스토그램과 쉐도우·중간 톤·하이라이트 마커), 화이트포인트, 컬러 밸런스, 렌즈 최적화, 노이즈 제거(None/Basic/Advanced/Advanced with Moiré/Expert), 샤프닝(None/Low/Medium/High), 트리밍 비율, 보기 배율, 붙여넣기 옵션, 파일명 변경, 환경 설정, 인쇄 환경 설정, IPTC/작업 일지, 리뷰, 확인 대화상자(Yes/Yes to All/No), 진행 표시, 정보, 시작 화면.
+- **그림과 문자열:** 비트맵(썸네일 정보 아이콘, 도구 아이콘, Kodak 로고), 커서(클릭 밸런스 스포이트, 손, 확대경, 트리밍 크기 조절), 상태 표시줄 형식, 오류 메시지.
+- **번역과 도움말:** 원본 번역표 `PhotoDeskUIStrings.u16`에 있는 10개 언어 공식 번역(한국어 포함)과 각 언어의 도움말(`PHOTODSK.chm`).
 
-설치 위치: Windows `%APPDATA%\PhotoDesk\profiles`, macOS `~/Library/Application Support/PhotoDesk/profiles`
-(환경변수 `PHOTODESK_PROFILES`로 변경 가능)
+## 원본과 같은 동작
+
+- **화면 구성:** 폴더를 컨택트 시트로 열고 이미지 창을 따로 엽니다(MDI). 썸네일 크기는 25/50/100/200%이고, 이름순·날짜순으로 정렬합니다. 썸네일 정보 아이콘은 밸런스, 라이팅, Look, 노이즈, 샤프닝, 노출, 태그, 읽기 전용, 음성, 파일 형식을 표시합니다.
+- **도구:** 선택, 트리밍, 클릭 밸런스, 클로즈업, 손 도구.
+  - 트리밍은 비율 제한, 이동, 모서리·변 크기 조절을 지원합니다.
+  - 클로즈업 창에서는 고정(Pin), 원본 보기, 25–400% 배율을 쓸 수 있습니다.
+- **현상 설정:**
+  - 밸런스: 사전 설정·클릭·사용자·자동.
+  - 라이팅: 주광·텅스텐·형광등·플래시.
+  - 화이트포인트 2000–7500K.
+  - 컬러 밸런스 ±100.
+  - 노출 보정 ±2EV(Pro Back은 ±1EV), 자동 노출 조정.
+  - 톤(쉐도우/중간 톤/하이라이트 EV).
+  - Look, 렌즈 최적화(14nx, SLR/n, SLR/c), 노이즈 제거, 샤프닝.
+  - 촬영 시 설정 사용, 자동 씬 밸런스.
+- **설정 적용:** 모든 설정은 선택한 모든 이미지에 적용됩니다. 대화상자의 미리보기와 "촬영시" 버튼도 원본처럼 동작합니다.
+- **편집:**
+  - 이름이 붙은 실행 취소/다시 실행. 예: "라이팅 취소".
+  - 이미지 복사(트리밍 영역만), 설정 복사/붙여넣기, 붙여넣기 옵션.
+  - 태그, 태그 이미지 선택, 선택 반전.
+- **파일 관리:**
+  - IPTC/작업 일지: 불러오기(.ipt), 다른 이름 저장, 모두 적용, 마지막 정보 보기, 이전/다음.
+  - 주석, 음성 재생.
+  - 파일명 변경: `*` 위치에 일련번호를 넣으며, 원본 검사 규칙과 메시지를 따릅니다.
+  - 휴지통으로 삭제.
+- **저장:**
+  - 저장 형식: Standard TIFF, Standard JPEG, As Is.
+  - 작업 색 공간: Kodak DCS RGB, ProPhoto RGB, sRGB와 시스템 프로파일.
+  - 내보내기 크기: 퍼센트, 화면 채우기, 맞추기.
+  - 해상도, 선형 모드, 8/16비트, 프로파일 첨부, JPEG 품질(고/중간/저), IPTC·EXIF 기록.
+  - 이미지 편집기로 보내기, 저장 후 열기.
+- **인쇄:** 인쇄, 미리보기, 페이지 설정. 컨택트 시트 인쇄 크기를 고를 수 있습니다.
+- **기타:** 빠름/고품질 표시, 화이트 밸런스 파일(.wb) 저장, 상태 표시줄(이미지 수·선택 수, 픽셀 RGB, 좌표, 크기, 배율). 메뉴의 Kodak 웹 링크도 원본과 같습니다.
+
+색 처리는 원본의 Kodak ICC 프로파일을 그대로 사용합니다.
+카메라 RGB에 Source Correction(카메라·광원)을 적용하고 ERIMM, Look 순서로 거쳐 RGB 작업 색 공간으로 변환합니다.
+
+## 최초 설정
+
+원본 설치 파일을 지정합니다. 처음 실행할 때 GUI가 묻고, CLI에서는 다음 명령을 씁니다.
+
+```
+photodesk install-profiles Photo_Desk_V_4_3_0.exe
+```
+
+이 명령은 Kodak 프로파일 57개, `ui/PhotoDsk.exe`, `ui/PhotoDeskUIStrings.u16`, `ui/help/<언어>/PHOTODSK.chm`을 아래 위치에 풉니다.
+위치는 환경변수 `PHOTODESK_PROFILES`로 바꿀 수 있습니다.
+
+- Windows: `%APPDATA%\PhotoDesk\profiles`
+- macOS: `~/Library/Application Support/PhotoDesk/profiles`
+
+UI 언어는 시스템 언어를 따르며, `PHOTODESK_LANG=Korean`처럼 강제로 지정할 수 있습니다.
 
 ## 사용
 
 ```
-photodesk                         # GUI
-photodesk convert <파일|폴더...> -o <출력폴더> [-f JPEG|"TIFF 8-bit"|"TIFF 16-bit"]
-          [-s sRGB|"Adobe RGB (1998)"|"ProPhoto RGB"] [--look DCSPortraitLook.icm]
-          [--illuminant Daylight|Flash|Tungsten|Fluorescent] [--long-edge 3000]
-photodesk looks                   # 설치된 Look 목록
+photodesk [폴더|파일]                # GUI
+photodesk convert <파일|폴더...> -o <출력폴더> [-f jpeg|tiff] [-s <작업 색 공간 프로파일>]
+          [--bits 8|16] [--linear] [--look DCSPortraitLook.icm] [--lighting Tungsten] [--long-edge 3000]
+photodesk looks
 ```
-
-## 카메라 지원
-
-Kodak Source Correction 프로파일이 있는 기종: DCS Pro Back / Pro Back 645, DCS Pro 14n·14nx,
-Pro SLR/n, Pro SLR/c, DCS 720x, DCS 760. 그 밖에 LibRaw가 읽는 기종(DCS 3xx/5xx/6xx 등)은
-LibRaw 색 매트릭스로 ERIMM을 만든 뒤 Kodak Look을 적용합니다.
-
-Kodak 파일에 기록된 촬영 시 화이트밸런스는 LibRaw가 잘못 읽습니다(중성 회색이 청록색으로 나옴).
-그래서 Kodak 파일은 기본 화이트밸런스를 `Daylight`로 시작합니다. `As Shot`, `Auto`,
-회색 클릭(`Pick Neutral`)으로 바꿀 수 있습니다.
 
 ## 개발 / 빌드
 
 ```
 pip install -e .[dev]
-python -m pytest            # vendor/original/Photo_Desk_V_4_3_0.exe, raw/*.DCR가 있으면 전체 테스트 실행
+python -m pytest
+python tests/gui_smoke.py <DCR가 있는 폴더> shot.png       # GUI 자동 점검
+python tests/gui_commands.py <DCR가 있는 폴더> <스크린샷 폴더> # 모든 메뉴 명령과 대화상자 실행
 pyinstaller packaging/photodesk.spec
 ```
 
-Windows x64 빌드는 Windows에서, macOS arm64 빌드(`PhotoDesk.app`)는 Apple Silicon Mac에서 만듭니다.
-`.github/workflows/build.yml`이 두 플랫폼 빌드를 모두 수행합니다(macOS는 `macos-14` M1 러너).
+`vendor/original/Photo_Desk_V_4_3_0.exe`와 `raw/*.DCR` 파일이 있을 때만 전체 테스트가 실행됩니다.
+`.github/workflows/build.yml`이 Windows x64와 macOS arm64(`macos-14` 러너)를 빌드합니다.
+
+## 원본과 다른 점
+
+- Camera Manager는 별도 Kodak 프로그램이어서 포함하지 않습니다. 메뉴에서 설치된 실행 파일을 지정하면 실행합니다.
+- 렌즈 최적화, 노이즈 제거, 자동 밸런스 같은 Kodak 고유 알고리즘은 공개되지 않았습니다. 그래서 같은 조절 범위와 효과를 내는 방식으로 다시 구현했습니다.
