@@ -15,7 +15,7 @@ import numpy as np
 import tifffile
 from PIL import Image
 
-from . import iptc, pipeline, profiles
+from . import camera, iptc, pipeline, profiles
 
 JPEG_QUALITY = {"best": 95, "better": 85, "good": 70}
 FILE_TYPES = ("tiff", "jpeg", "asis")
@@ -126,6 +126,18 @@ def _exif(meta, dpi):
         sub[0x920A] = float(meta["focal_length"])
     if sub:
         exif.get_ifd(0x8769).update(sub)
+    gps = meta.get("gps")
+    if gps:
+        def dms(v):
+            a = abs(v)
+            d, m = int(a), int((a - int(a)) * 60)
+            return (d, m, round((a - d - m / 60) * 3600, 3))
+        g = {0x0000: b"\x02\x02\x00\x00", 0x0001: "N" if gps["lat"] >= 0 else "S", 0x0002: dms(gps["lat"]),
+             0x0003: "E" if gps["lon"] >= 0 else "W", 0x0004: dms(gps["lon"])}
+        if "alt" in gps:
+            g[0x0005] = b"\x01" if gps["alt"] < 0 else b"\x00"
+            g[0x0006] = abs(float(gps["alt"]))
+        exif.get_ifd(0x8825).update(g)
     return exif
 
 
@@ -190,7 +202,7 @@ def process_file(raw_path, dest, file_type="jpeg", opts=None, settings=None, pro
     space = pipeline.resolve_space(opts.working_space, pdir)
     img = pipeline.render(raw, settings, space, pdir, linear=linear)
     if file_type == "tiff" and opts.render_gps and raw.metadata.get("gps"):
-        img = render_gps(img, raw.metadata["gps"])
+        img = render_gps(img, camera.gps_text(raw.metadata["gps"]))
     space_bytes = None if linear else Path(space).read_bytes()
     return save(img, dest, file_type, opts, raw.metadata, settings, space_bytes)
 
@@ -222,8 +234,12 @@ def process_finished(path, dest, file_type, opts, settings):
 
 def render_gps(img, text):
     """Burn GPS text into the upper-left corner (Render GPS Information In TIFF Files)."""
-    out = np.ascontiguousarray(img.copy())
     scale = max(0.5, img.shape[1] / 2000)
-    cv2.putText(out, text, (int(10 * scale), int(30 * scale)), cv2.FONT_HERSHEY_SIMPLEX, scale,
-                (1.0, 1.0, 1.0), max(1, int(2 * scale)), cv2.LINE_AA)
-    return out
+    org = (int(10 * scale), int(30 * scale))
+    thick = max(1, int(2 * scale))
+    mask = np.zeros(img.shape[:2], np.uint8)
+    cv2.putText(mask, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, 255, thick, cv2.LINE_AA)
+    halo = cv2.dilate(mask, np.ones((2 * thick + 1,) * 2, np.uint8))
+    out = img * (1 - halo[..., None] / 255.0)                    # dark outline keeps it legible
+    out = out + (mask[..., None] / 255.0) * (1 - out)            # white text
+    return out.astype(img.dtype)

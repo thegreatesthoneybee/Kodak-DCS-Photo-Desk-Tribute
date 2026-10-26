@@ -75,6 +75,74 @@ def read_make_model(path):
     return vals.get(0x10F, ""), vals.get(0x110, "")
 
 
+def read_gps(path):
+    """GPS position recorded by the camera (TIFF GPS IFD, tag 0x8825) as a dict with ``lat``,
+    ``lon`` (signed degrees) and optional ``alt`` (metres), or None when no fix was recorded."""
+    with open(path, "rb") as f:
+        data = f.read(1 << 20)
+    if data[:4] not in (b"MM\x00*", b"II*\x00"):
+        return None
+    bo = ">" if data[:2] == b"MM" else "<"
+
+    def ifd(off):
+        if off + 2 > len(data):
+            return {}
+        n, = struct.unpack_from(bo + "H", data, off)
+        out = {}
+        for i in range(n):
+            p = off + 2 + 12 * i
+            if p + 12 > len(data):
+                break
+            tag, typ, cnt = struct.unpack_from(bo + "HHI", data, p)
+            size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}.get(typ, 0) * cnt
+            if size <= 4:
+                raw = data[p + 8:p + 8 + size]
+            else:
+                ptr, = struct.unpack_from(bo + "I", data, p + 8)
+                raw = data[ptr:ptr + size]
+            out[tag] = (typ, cnt, raw)
+        return out
+
+    ifd0 = ifd(struct.unpack_from(bo + "I", data, 4)[0])
+    if 0x8825 not in ifd0:
+        return None
+    g = ifd(struct.unpack(bo + "I", ifd0[0x8825][2][:4])[0])
+
+    def rationals(tag):
+        if tag not in g or g[tag][0] != 5:
+            return None
+        v = struct.unpack(bo + "%dI" % (2 * g[tag][1]), g[tag][2])
+        return [a / b if b else 0.0 for a, b in zip(v[::2], v[1::2])]
+
+    def ref(tag):
+        return g[tag][2][:1].decode("latin1") if tag in g else ""
+
+    lat, lon = rationals(0x2), rationals(0x4)
+    if not lat or not lon or not ref(0x1).strip("\0") or not ref(0x3).strip("\0"):
+        return None
+    deg = lambda dms: dms[0] + (dms[1] if len(dms) > 1 else 0) / 60 + (dms[2] if len(dms) > 2 else 0) / 3600
+    out = {"lat": deg(lat) * (-1 if ref(0x1) == "S" else 1), "lon": deg(lon) * (-1 if ref(0x3) == "W" else 1)}
+    alt = rationals(0x6)
+    if alt:
+        below = 0x5 in g and g[0x5][2][:1] == b"\x01"
+        out["alt"] = -alt[0] if below else alt[0]
+    return out
+
+
+def gps_text(gps):
+    """'Lat 37d 33' 59.4" N  Lon 126d 58' 40.7" E  Alt 38 m' (ASCII, burned into TIFF output)"""
+    def dms(v, pos, neg):
+        a = abs(v)
+        d = int(a)
+        m = int((a - d) * 60)
+        s = (a - d - m / 60) * 3600
+        return f"{d}d {m}' {s:.1f}\" {pos if v >= 0 else neg}"
+    text = f"Lat {dms(gps['lat'], 'N', 'S')}  Lon {dms(gps['lon'], 'E', 'W')}"
+    if "alt" in gps:
+        text += f"  Alt {gps['alt']:.0f} m"
+    return text
+
+
 def source_profile(model, illuminant):
     if illuminant not in ILLUMINANTS:
         raise ValueError(f"unknown illuminant {illuminant}")

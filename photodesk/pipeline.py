@@ -198,6 +198,9 @@ def decode(path, half_size=False, algorithm="AHD"):
             "timestamp": o.timestamp.isoformat() if o.timestamp else None, "artist": o.artist,
         }
     metadata["width"], metadata["height"] = full_w, full_h
+    gps = camera.read_gps(path)
+    if gps:
+        metadata["gps"] = gps
     return RawImage(path, make, model, cam, wb / wb[1], daylight / daylight[1], rgb_xyz,
                     camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h))
 

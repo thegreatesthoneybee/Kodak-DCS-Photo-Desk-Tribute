@@ -143,6 +143,42 @@ def test_white_balance_file(tmp_path):
     assert abs(r * 2.0 - g) <= 2 and abs(b * 1.5 - g) <= 2
 
 
+def _tiff_with_gps(path, lat, lon, alt):
+    """Minimal big-endian TIFF whose IFD0 points at a GPS IFD (as DCS cameras write it)."""
+    gps = [(0, 1, 4, b"\x02\x02\x00\x00"), (1, 2, 2, b"S\0\0\0"), (2, 5, 3, None),
+           (3, 2, 2, b"W\0\0\0"), (4, 5, 3, None), (5, 1, 1, b"\0\0\0\0"), (6, 5, 1, None)]
+    rats = {2: lat, 4: lon, 6: alt}
+    gps_off = 8 + 2 + 12 + 4
+    data_off = gps_off + 2 + 12 * len(gps) + 4
+    body, blobs = b"", b""
+    for tag, typ, cnt, val in gps:
+        if val is None:
+            val = struct.pack(">I", data_off + len(blobs))
+            blobs += b"".join(struct.pack(">II", n, d) for n, d in rats[tag])
+        body += struct.pack(">HHI", tag, typ, cnt) + val
+    head = b"MM\0*" + struct.pack(">I", 8) + struct.pack(">H", 1) + struct.pack(">HHII", 0x8825, 4, 1, gps_off)
+    path.write_bytes(head + b"\0" * 4 + struct.pack(">H", len(gps)) + body + b"\0" * 4 + blobs)
+
+
+def test_gps(tmp_path):
+    f = tmp_path / "g.tif"
+    _tiff_with_gps(f, [(33, 1), (52, 1), (300, 10)], [(151, 1), (12, 1), (360, 10)], [(58, 1)])
+    gps = camera.read_gps(f)
+    assert gps["lat"] == pytest.approx(-(33 + 52 / 60 + 30 / 3600))
+    assert gps["lon"] == pytest.approx(-(151 + 12 / 60 + 36 / 3600))
+    assert gps["alt"] == 58
+    assert camera.gps_text(gps) == "Lat 33d 52' 30.0\" S  Lon 151d 12' 36.0\" W  Alt 58 m"
+    img = np.full((100, 800, 3), 0.5, np.float32)
+    out = export.render_gps(img, camera.gps_text(gps))
+    assert out.dtype == np.float32 and out[:40, :400].max() == 1.0 and out[60:].max() == 0.5
+    assert dict(export._exif({"gps": gps}, 300).get_ifd(0x8825))[1] == "S"
+
+
+@need_sample
+def test_gps_absent_in_sample():
+    assert camera.read_gps(SAMPLE) is None       # the ProBack writes an empty GPS IFD
+
+
 def test_iptc_roundtrip(tmp_path):
     data = {"object_name": "Shoot", "keywords": "a; b", "city": "서울", "caption": "x" * 100}
     assert iptc.decode(iptc.encode(data)) == data
