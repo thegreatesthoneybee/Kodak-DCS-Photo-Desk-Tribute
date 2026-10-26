@@ -228,6 +228,8 @@ def process_finished(path, dest, file_type, opts, settings):
     """Finished files only support rotation and crop (as in Photo Desk)."""
     img, icc_bytes = load_finished(path)
     img = pipeline.apply_crop(pipeline.orient(img, 0, settings.rotation), settings.crop)
+    # 8-bit sources stay 8-bit: the 16 Bits/Channel option does not apply to finished files.
+    opts = dataclasses.replace(opts, tiff_16bit=False)
     meta = {"software": "PhotoDesk"}
     return save(img, dest, file_type, opts, meta, settings, icc_bytes)
 

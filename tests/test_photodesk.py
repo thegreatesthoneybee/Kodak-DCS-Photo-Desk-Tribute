@@ -294,6 +294,9 @@ def test_export_formats(tmp_path, profile_dir):
     fin = export.process_file(jpg, tmp_path / "e.jpg", "jpeg", export.OutputOptions(),
                               pipeline.Settings(rotation=1, crop=(0, 0, 0.5, 1)), profile_dir)
     assert Image.open(fin).size == (400, 800)
+    fin_tif = export.process_file(jpg, tmp_path / "f.tif", "tiff", export.OutputOptions(tiff_16bit=True),
+                                  pipeline.Settings(), profile_dir)
+    assert tifffile.imread(fin_tif).dtype == np.uint8          # 16-bit does not apply to 8-bit sources
 
 
 def test_sheet_undo_redo_rename_paste(tmp_path):
