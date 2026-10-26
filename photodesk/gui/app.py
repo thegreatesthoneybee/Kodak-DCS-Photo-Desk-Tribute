@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QToolBar,
 )
 
-from .. import __version__, camera, export, pipeline, profiles
+from .. import __version__, camera, export, pipeline, profiles, wbfile
 from . import dialogs as D
 from . import res as R
 from .model import PASTE_GROUPS, Sheet, is_image
@@ -1651,8 +1651,8 @@ class MainWindow(QMainWindow):
             D.message(self, res, res.s(60036).replace("%s", p.name))
             return
         try:
-            write_wb_file(p, e.settings.click_wb)
-        except OSError:
+            wbfile.write(p, e.path, e.settings.click_wb)
+        except (OSError, wbfile.WBError):
             D.message(self, res, res.s(60026))
 
     def tag(self, on):
@@ -1748,13 +1748,6 @@ class MainWindow(QMainWindow):
 
 
 TOOL_CMD = {v: k for k, v in TOOLS.items()}
-
-
-def write_wb_file(path, wb):
-    """DCS custom white balance file: camera RGB multipliers relative to green (Kodak .wb layout)."""
-    import struct
-    r, g, b = (float(v) / float(wb[1]) for v in wb)
-    Path(path).write_bytes(b"KDKWB\x00\x01\x00" + struct.pack("<3f", r, 1.0, b))
 
 
 def launch(app, path):

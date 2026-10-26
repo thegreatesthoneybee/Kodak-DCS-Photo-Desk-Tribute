@@ -128,6 +128,21 @@ def test_export_size_styles():
     assert img.shape == (1000, 1000, 3) and img[0, 0, 0] == 1.0 and img[500, 500, 0] == 0.0
 
 
+@need_sample
+def test_white_balance_file(tmp_path):
+    from photodesk import wbfile
+    out = tmp_path / "STUDIO.wb"
+    wbfile.write(out, SAMPLE, (2.0, 1.0, 1.5))
+    data = out.read_bytes()
+    assert data[:8] == b"MM\x00\x2a\x00\x00\x00\x08"
+    assert struct.unpack_from(">H", data, 8)[0] == len(wbfile.IFD0_TAGS)
+    ifd0, kodak = wbfile.read_source(out)
+    src0, _ = wbfile.read_source(SAMPLE)
+    assert ifd0[0x827D] == src0[0x827D]          # camera serial number: the camera checks it
+    r, g, b = wbfile.read_neutral(out)
+    assert abs(r * 2.0 - g) <= 2 and abs(b * 1.5 - g) <= 2
+
+
 def test_iptc_roundtrip(tmp_path):
     data = {"object_name": "Shoot", "keywords": "a; b", "city": "서울", "caption": "x" * 100}
     assert iptc.decode(iptc.encode(data)) == data
