@@ -44,6 +44,8 @@ def test_camera_looks():
     assert [n for n, _ in camera.capabilities("DCS620x").looks(looks)] == ["P.icm", "PG.icm", "PR.icm"]
     assert camera.capabilities("DCS Pro SLR/n").looks(looks) == looks
     assert camera.capabilities("DCS315").noise_types == ("none", "basic")
+    assert camera.capabilities("DCS Pro Back").balances == ("preset", "click")
+    assert camera.capabilities("ProBack645").balances == ("preset", "click", "custom", "auto")
     assert camera.capabilities("DCS560").noise_types == ("none", "basic", "advanced")
     assert camera.capabilities("DCS760C").noise_types == ("none", "basic", "advanced", "moire")
     assert camera.capabilities("ProBack645").noise_types == ("none", "basic", "advanced", "moire")
@@ -92,7 +94,7 @@ def test_camera_mapping_and_capabilities():
     with pytest.raises(ValueError):
         camera.source_profile("ProBack645", "Moonlight")
     pb = camera.capabilities("ProBack645")
-    assert pb.exposure_range == 1.0 and "custom" not in pb.balances and "basic" in pb.noise_types
+    assert pb.exposure_range == 1.0 and "custom" in pb.balances and "basic" in pb.noise_types
     slr = camera.capabilities("DCS Pro SLR/n")
     assert slr.exposure_range == 2.0 and "expert" in slr.noise_types and slr.lens_optimization
     assert not camera.capabilities("DCS Pro 14N").lens_optimization

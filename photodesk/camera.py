@@ -24,13 +24,14 @@ _FAMILIES = (
 class Capabilities:
     """Processing options Photo Desk offers for a camera model."""
     dcs: bool              # DCS raw file (all processing options); False for other cameras
-    pro_back: bool         # DCS Pro Back: +-1 EV, no Custom balance, no Auto Scene Balance
+    pro_back: bool         # DCS Pro Back: +-1 EV, no Auto Scene Balance / Auto Exposure, no .wb files
     pro_slr: bool          # DCS Pro 14n/14nx/SLR: Advanced/Moire/Expert noise reduction
     lens_optimization: bool
     look_set: tuple = None  # restricted Looks of older cameras (None: every installed Look)
     # Other DCS cameras (help: Reducing Noise): Basic for the 300/500/600/700 series and Pro Backs,
     # Advanced for all but the DCS 315, Advanced with Moire Reduction for the 700 series and Pro Backs.
     other_noise_types: tuple = ("none", "basic", "advanced", "moire")
+    original_pro_back: bool = False   # the first DCS Pro Back: no Custom or Auto balance
 
     @property
     def exposure_range(self):
@@ -41,7 +42,6 @@ class Capabilities:
         if self.pro_slr:
             return ("none", "advanced", "moire", "expert")
         return self.other_noise_types
-
 
     def looks(self, available):
         """Looks this camera supports, from [(file name, description)] (help: Setting the Image Look)."""
@@ -57,7 +57,9 @@ class Capabilities:
 
     @property
     def balances(self):
-        return ("preset", "click", "auto") if self.pro_back else ("preset", "click", "custom", "auto")
+        # "The Custom and Auto balance methods are available on all ProBack models except the original
+        # ProBack" (help: Specifying the White Balance Method).
+        return ("preset", "click") if self.original_pro_back else ("preset", "click", "custom", "auto")
 
 
 def capabilities(model):
@@ -77,7 +79,8 @@ def capabilities(model):
         noise.remove("advanced")
     if not (pro_back or any(k in m for k in ("720", "760"))):
         noise.remove("moire")
-    return Capabilities(dcs, pro_back, pro_slr, lens, look_set, tuple(noise))
+    original = pro_back and not any(k in m for k in ("645", "plus", " 16", "cf", "+"))
+    return Capabilities(dcs, pro_back, pro_slr, lens, look_set, tuple(noise), original)
 
 
 def read_make_model(path):
