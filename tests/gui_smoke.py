@@ -7,6 +7,8 @@ import sys
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Keep the user's Photo Desk settings (window layout, recent files) untouched.
+os.environ.setdefault("PHOTODESK_SETTINGS", os.path.join(os.environ.get("TEMP", "/tmp"), "photodesk_test.ini"))
 
 from PySide6.QtCore import QEvent, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QFocusEvent, QFontDatabase  # noqa: E402

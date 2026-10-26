@@ -118,14 +118,21 @@ def paste_into(entry, settings, source, fields, source_serial):
 class Sheet:
     """A folder opened as a contact sheet."""
 
-    def __init__(self, folder):
+    def __init__(self, folder, files=None):
+        """files: only these images (an image opened by itself with File > Open, no contact sheet)."""
         self.folder = Path(folder)
+        self.files = {Path(f) for f in files} if files is not None else None
         self.entries = []
-        for p in sorted(f for f in self.folder.iterdir() if is_image(f)):
+        for p in sorted(self._present()):
             make, model = camera.read_make_model(p)
             self.entries.append(Entry(p, pipeline.load_settings(p), make, model))
         self.undo_stack, self.redo_stack = [], []
         self.sort = "name"
+
+    def _present(self):
+        if self.files is not None:
+            return {f for f in self.files if f.is_file()}
+        return {f for f in self.folder.iterdir() if is_image(f)}
 
     def sort_by(self, key):
         self.sort = key
@@ -291,7 +298,7 @@ class Sheet:
     def refresh(self):
         """Pick up files added to or removed from the folder."""
         known = {e.path for e in self.entries}
-        present = {f for f in self.folder.iterdir() if is_image(f)}
+        present = self._present()
         self.entries = [e for e in self.entries if e.path in present]
         for p in sorted(present - known):
             make, model = camera.read_make_model(p)

@@ -91,9 +91,12 @@ def _export_job(path, dest, file_type, opts, settings, pdir):
 
 # ------------------------------------------------------------------ MDI children
 class SheetWindow(QMdiSubWindow):
-    def __init__(self, main, sheet):
+    """A contact sheet. A standalone sheet is never shown: it holds an image opened by itself
+    (File > Open on a file) and goes away with that image's window."""
+
+    def __init__(self, main, sheet, standalone=False):
         super().__init__()
-        self.main, self.sheet = main, sheet
+        self.main, self.sheet, self.standalone = main, sheet, standalone
         self.view = ContactSheetView(main.icons)
         z = main.q.value("LastThumbnailViewSize", 100, int)
         self.view.set_zoom(z if z in SHEET_ZOOMS else 100)
@@ -212,9 +215,18 @@ class ImageWindow(QMdiSubWindow):
             self.main.show_closeup(self.entry, x, y)
 
     def closeEvent(self, ev):
-        if self in self.sheet_win.images:
-            self.sheet_win.images.remove(self)
-        if not any(w.entry is self.entry for w in self.sheet_win.images):
+        sw = self.sheet_win
+        if sw.standalone:
+            # No contact sheet behind this image: ask to save its changes here.
+            if not self.main.confirm_save(sw.sheet.dirty()):
+                ev.ignore()
+                return
+            if sw in self.main.sheets:
+                self.main.sheets.remove(sw)
+            sw.deleteLater()
+        if self in sw.images:
+            sw.images.remove(self)
+        if not any(w.entry is self.entry for w in sw.images):
             self.entry.raw = None
         super().closeEvent(ev)
 
@@ -224,7 +236,9 @@ class MainWindow(QMainWindow):
     def __init__(self, res):
         super().__init__()
         self.res = res
-        self.q = QSettings("Kodak", "DCS Photo Desk")
+        # PHOTODESK_SETTINGS: an .ini file instead of the user's settings (used by the GUI tests).
+        ini = os.environ.get("PHOTODESK_SETTINGS")
+        self.q = QSettings(ini, QSettings.IniFormat) if ini else QSettings("Kodak", "DCS Photo Desk")
         self.pdir = str(profiles.profile_dir())
         self.pool = QThreadPool.globalInstance()
         self.icons = ThumbIcons(res)
@@ -513,7 +527,7 @@ class MainWindow(QMainWindow):
             return w
         if isinstance(w, ImageWindow):
             return w.sheet_win
-        return self.sheets[0] if self.sheets else None
+        return next((sw for sw in self.sheets if not sw.standalone), None)
 
     def active_image(self):
         w = self.mdi.activeSubWindow()
@@ -639,17 +653,25 @@ class MainWindow(QMainWindow):
         if p.is_dir():
             return self.open_folder(p)
         if p.is_file() and is_image(p):
-            sw = self.open_folder(p.parent)
-            entry = sw.sheet.find(p)
-            if entry:
-                self.open_image(entry, sw)
+            # A file opens as a full image rendering only (no contact sheet of its folder); if its
+            # folder is already open as a contact sheet, the image belongs to that sheet.
+            for sw in self.sheets:
+                entry = sw.sheet.find(p)
+                if entry and (not sw.standalone or sw.sheet.files == {p}):
+                    self.open_image(entry, sw)
+                    return sw
+            sw = SheetWindow(self, Sheet(p.parent, files=[p]), standalone=True)
+            self.sheets.append(sw)
+            self._add_recent(p)
+            self._load_thumb(sw, sw.sheet.entries[0])
+            self.open_image(sw.sheet.entries[0], sw)
             return sw
         D.message(self, self.res, self.res.s(60000).replace("%s", str(p)))
 
     def open_folder(self, folder):
         folder = Path(folder)
         for sw in self.sheets:
-            if sw.sheet.folder == folder:
+            if sw.sheet.folder == folder and not sw.standalone:
                 self.mdi.setActiveSubWindow(sw)
                 return sw
         sheet = Sheet(folder)
@@ -1509,6 +1531,9 @@ class MainWindow(QMainWindow):
     def _closeup_parent(self, cu):
         for sw in self.sheets:
             if cu.entry in sw.sheet.entries:
+                if sw.standalone:
+                    self.mdi.setActiveSubWindow(sw.images[0]) if sw.images else None
+                    return
                 self.mdi.setActiveSubWindow(sw)
                 for i in range(sw.view.count()):
                     if sw.view.item(i).data(Qt.UserRole) is cu.entry:
