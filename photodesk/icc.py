@@ -1,4 +1,4 @@
-"""ICC v2 lut16 (mft2) evaluation and Lab/XYZ helpers in NumPy."""
+"""ICC v2 profile reading: lut16 (mft2) evaluation, matrix/TRC working spaces, Lab/XYZ helpers."""
 import struct
 from pathlib import Path
 
@@ -58,8 +58,9 @@ def trilinear(lut, x):
 class Profile:
     def __init__(self, path):
         self.path = Path(path)
-        data = self.path.read_bytes()
-        if data[36:40] != b"acsp":
+        self.data = self.path.read_bytes()
+        data = self.data
+        if len(data) < 132 or data[36:40] != b"acsp":
             raise ValueError(f"{path} is not an ICC profile")
         self.device_class = data[12:16].decode("latin1")
         self.color_space = data[16:20].decode("latin1").strip()
@@ -74,12 +75,69 @@ class Profile:
     def lut(self, sig="A2B0"):
         return Lut16(self.tags[sig])
 
+    @property
+    def is_working_space(self):
+        """True for RGB matrix/TRC display profiles usable as an RGB working space."""
+        return (self.device_class == "mntr" and self.color_space == "RGB" and self.pcs == "XYZ"
+                and all(t in self.tags for t in ("rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC")))
+
+    def rgb_to_xyz_matrix(self):
+        """Columns are the D50 XYZ of the R, G, B primaries."""
+        cols = [struct.unpack_from(">3i", self.tags[t], 8) for t in ("rXYZ", "gXYZ", "bXYZ")]
+        return np.array(cols, np.float64).T / 65536
+
+    def trc(self, channel):
+        """Return increasing (encoded, linear) samples of a channel's tone curve."""
+        tag = self.tags[channel + "TRC"]
+        x = np.linspace(0, 1, 4096)
+        if tag[:4] == b"curv":
+            n, = struct.unpack_from(">I", tag, 8)
+            if n == 0:
+                return x, x
+            if n == 1:
+                return x, x ** (struct.unpack_from(">H", tag, 12)[0] / 256)
+            y = np.frombuffer(tag, ">u2", n, 12).astype(np.float64) / 65535
+            return np.linspace(0, 1, n), y
+        if tag[:4] == b"para":
+            func, = struct.unpack_from(">H", tag, 8)
+            count = {0: 1, 1: 3, 2: 4, 3: 5, 4: 7}[func]
+            p = [v / 65536 for v in struct.unpack_from(f">{count}i", tag, 12)] + [0.0] * 6
+            g, a, b, c, d, e, f = p[:7]
+            if func == 0:
+                y = x ** g
+            elif func == 1:
+                y = np.where(x >= -b / a, np.maximum(a * x + b, 0) ** g, 0)
+            elif func == 2:
+                y = np.where(x >= -b / a, np.maximum(a * x + b, 0) ** g + c, c)
+            elif func == 3:
+                y = np.where(x >= d, np.maximum(a * x + b, 0) ** g, c * x)
+            else:
+                y = np.where(x >= d, np.maximum(a * x + b, 0) ** g + e, c * x + f)
+            return x, y
+        raise ValueError(f"unsupported TRC type {tag[:4]!r}")
+
+    def encoder(self):
+        """Return f(XYZ D50) -> encoded RGB in [0, 1] for a working-space profile."""
+        inv = np.linalg.inv(self.rgb_to_xyz_matrix()).astype(np.float32)
+        curves = [self.trc(c) for c in "rgb"]
+
+        def encode(xyz):
+            lin = np.clip(np.asarray(xyz, np.float32) @ inv.T, 0, 1)
+            return np.stack([np.interp(lin[..., i], y, x) for i, (x, y) in enumerate(curves)],
+                            -1).astype(np.float32)
+        return encode
+
 
 def _desc(tag):
-    if tag[:4] != b"desc":
-        return ""
-    n, = struct.unpack_from(">I", tag, 8)
-    return tag[12:12 + n].split(b"\x00")[0].decode("latin1").strip()
+    if tag[:4] == b"desc":
+        n, = struct.unpack_from(">I", tag, 8)
+        return tag[12:12 + n].split(b"\x00")[0].decode("latin1").strip()
+    if tag[:4] == b"mluc":
+        n, size = struct.unpack_from(">II", tag, 8)
+        if n:
+            length, off = struct.unpack_from(">II", tag, 16 + 4)
+            return tag[off:off + length].decode("utf-16-be").strip("\x00 ")
+    return ""
 
 
 # ICC v2 16-bit PCS encodings (values normalized to [0, 1] of 65535).
