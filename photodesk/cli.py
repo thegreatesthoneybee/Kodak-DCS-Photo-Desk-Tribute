@@ -80,7 +80,9 @@ def main(argv=None):
         return 2
     files = list(collect(args.inputs))
     failed = 0
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+    # Threads, not processes: decoding, LUT interpolation, OpenCV and encoding release the GIL, and a
+    # frozen app would otherwise start (and unpack) a new copy of itself per worker.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.jobs, len(files) or 1))) as pool:
         futures = {pool.submit(_convert, (f, args)): f for f in files}
         for fut in concurrent.futures.as_completed(futures):
             try:

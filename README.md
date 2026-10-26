@@ -92,8 +92,11 @@ UI 언어는 시스템 언어를 따르며, `PHOTODESK_LANG=Korean`처럼 강제
 photodesk [폴더|파일]                # GUI
 photodesk convert <파일|폴더...> -o <출력폴더> [-f jpeg|tiff] [-s <작업 색 공간 프로파일>]
           [--bits 8|16] [--linear] [--look DCSPortraitLook.icm] [--lighting Tungsten] [--long-edge 3000]
+          [-j <동시 변환 수, 기본 4>]
 photodesk looks
 ```
+
+`PHOTODESK_TIMING=1`을 지정하면 `convert`가 파일마다 디코딩·렌더링 시간을 표시합니다.
 
 ## 개발 / 빌드
 
@@ -102,8 +105,29 @@ pip install -e .[dev]
 python -m pytest
 python tests/gui_smoke.py <DCR가 있는 폴더> shot.png       # GUI 자동 점검
 python tests/gui_commands.py <DCR가 있는 폴더> <스크린샷 폴더> # 모든 메뉴 명령과 대화상자 실행
+python tests/bench.py <DCR 파일> [프로파일 폴더]                # 처리 단계별 시간 측정
 pyinstaller packaging/photodesk.spec
 ```
+
+### 성능
+
+16.6MP DCR 기준(Windows, i9-12900H, 20스레드)입니다.
+
+| 작업 | 최적화 전 | 최적화 후 |
+|---|---|---|
+| 전체 해상도 렌더링 | 10.6초 | 1.3초 |
+| 이미지 창 미리보기(빠르게, 1600px) | 1.46초 | 0.21초 |
+| JPEG 내보내기 1장 | 12.7초 | 3.1초 |
+| 컨택트 시트 썸네일 40장 | 15.9초 | 4.9초 |
+| 선택 이미지 40장 설정 변경 시 UI 멈춤 | 썸네일마다 렌더링 | 0.03초 |
+| 슬라이더 30단계 드래그(이미지 창) | 렌더링 18회, 5.9초 | 렌더링 3회, 1.6초 |
+
+- 색 변환 LUT 보간을 블록으로 나눠 모든 코어에서 병렬 처리합니다(출력 차이 1e-7 미만).
+- 노이즈 제거를 OpenCV 연산으로 바꿨습니다(출력 동일).
+- 썸네일과 이미지 창 렌더링은 백그라운드에서 하고, 새 요청이 오면 이전 요청을 건너뜁니다.
+- 완성 파일(JPEG/TIFF)은 썸네일용으로 축소 디코딩하고, 전체 디코딩 결과를 캐시합니다.
+
+이 최적화는 모두 운영체제와 무관한 코드라 macOS arm64 빌드에도 그대로 들어갑니다. 다만 Mac에서 직접 측정하지는 않았습니다.
 
 `vendor/original/Photo_Desk_V_4_3_0.exe`와 `raw/*.DCR` 파일이 있을 때만 전체 테스트가 실행됩니다.
 `.github/workflows/build.yml`이 Windows x64와 macOS arm64(`macos-14` 러너)를 빌드합니다.

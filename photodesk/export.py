@@ -8,7 +8,10 @@ working-space profile, and JPEG quality (Best / Better / Good).
 import dataclasses
 import datetime
 import functools
+import os
 import shutil
+import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -198,10 +201,15 @@ def process_file(raw_path, dest, file_type="jpeg", opts=None, settings=None, pro
         return save_as_is(raw_path, dest, settings)
     if not is_raw(raw_path):
         return process_finished(raw_path, dest, file_type, opts, settings)
+    t0 = time.perf_counter()
     raw = pipeline.decode(raw_path)
+    t1 = time.perf_counter()
     linear = file_type == "tiff" and opts.tiff_linear and raw.caps.dcs
     space = pipeline.resolve_space(opts.working_space, pdir)
     img = pipeline.render(raw, settings, space, pdir, linear=linear)
+    if os.environ.get("PHOTODESK_TIMING"):
+        print(f"{Path(raw_path).name}: decode {t1 - t0:.2f} s, render {time.perf_counter() - t1:.2f} s",
+              file=sys.stderr)
     if file_type == "tiff" and opts.render_gps and raw.metadata.get("gps"):
         img = render_gps(img, camera.gps_text(raw.metadata["gps"]))
     space_bytes = None if linear else Path(space).read_bytes()
