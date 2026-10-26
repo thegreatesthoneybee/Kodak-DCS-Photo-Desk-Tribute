@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QSize, Qt, QThreadPool, QTimer, QUrl
+from PySide6.QtCore import QFileSystemWatcher, QItemSelectionModel, QSettings, QSize, Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QIcon, QImage, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel, QMainWindow, QMdiArea, QMdiSubWindow, QMenu,
@@ -110,6 +110,37 @@ class SheetWindow(QMdiSubWindow):
         self.view.viewport().installEventFilter(self)
         self.view.files_dropped.connect(lambda paths, pos, mode: main.drop_files(self, paths, pos, mode))
         self.images = []
+        # Files copied into the folder by other programs (e.g. Camera Manager) appear automatically.
+        self.watcher = QFileSystemWatcher([str(sheet.folder)], self)
+        self._reload_timer = QTimer(self, singleShot=True, interval=500, timeout=self.reload)
+        self.watcher.directoryChanged.connect(lambda _: self._reload_timer.start())
+
+    def reload(self, replaced=()):
+        """Pick up files added or removed in the folder, keeping the selection; ``replaced`` files
+        were overwritten in place and get new thumbnails."""
+        before = [e.path for e in self.view.entries()]
+        self.sheet.refresh()
+        replaced = {Path(p) for p in replaced}
+        for e in self.sheet.entries:
+            if e.path in replaced:
+                e.thumb = e.small = None
+                e.settings = pipeline.load_settings(e.path)
+        if [e.path for e in self.sheet.entries] == before and not replaced:
+            return
+        selected = {id(e) for e in self.view.selected_entries()}
+        current = self.view.focused_entry()
+        self.view.blockSignals(True)
+        self.view.populate(self.sheet.entries)
+        for i, e in enumerate(self.sheet.entries):
+            if id(e) in selected:
+                self.view.item(i).setSelected(True)
+            if e is current:
+                self.view.setCurrentRow(i, QItemSelectionModel.NoUpdate)
+        self.view.blockSignals(False)
+        for e in self.sheet.entries:
+            if e.thumb is None:
+                self.main._load_thumb(self, e)
+        self.main.selection_changed()
 
     def eventFilter(self, obj, ev):
         if ev.type() == ev.Type.MouseButtonPress and ev.button() == Qt.LeftButton:
@@ -860,11 +891,7 @@ class MainWindow(QMainWindow):
             D.message(self, res, "\n\n".join(state["errors"]))
         for sw in self.sheets:
             if any(Path(p).parent == sw.sheet.folder for p in state["paths"]):
-                sw.sheet.refresh()
-                sw.view.populate(sw.sheet.entries)
-                for e in sw.sheet.entries:
-                    if e.thumb is None:
-                        self._load_thumb(sw, e)
+                sw.reload()
         if open_with:
             for p in state["paths"]:
                 launch(open_with, p)
@@ -987,19 +1014,16 @@ class MainWindow(QMainWindow):
             replace_all = r == D.YesToAllDialog.YES_ALL
             return r in (D.OK, D.YesToAllDialog.YES_ALL)
 
+        existing = {e.path for e in sw.sheet.entries}
+        done = []
         try:
-            sw.sheet.transfer(paths, cmd == 32862, replace)
+            done = sw.sheet.transfer(paths, cmd == 32862, replace)
         except OSError as err:
             D.message(self, self.res, str(err))
         for other in self.sheets:
             if other is not sw and cmd == 32862:
-                other.sheet.refresh()
-                other.view.populate(other.sheet.entries)
-        sw.view.populate(sw.sheet.entries)
-        for e in sw.sheet.entries:
-            if e.thumb is None:
-                self._load_thumb(sw, e)
-        self.selection_changed()
+                other.reload()
+        sw.reload([p for p in done if p in existing])
 
     # ---------------------------------------------------------- printing
     def _print_image(self, printer):

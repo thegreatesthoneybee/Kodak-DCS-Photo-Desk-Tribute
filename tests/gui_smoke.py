@@ -138,6 +138,9 @@ def main(folder, shot):
     sw2.view.dropEvent(QDropEvent(QPointF(10, 10), Qt.MoveAction, md2, Qt.LeftButton, Qt.ShiftModifier))
     assert not moved_src.exists() and (drop_dir / "moved.jpg").exists() and sw2.view.count() == 2
     wait(app, lambda: all(e.thumb is not None for e in sw2.sheet.entries))
+    # A file written into the folder by another program shows up on its own (folder watcher).
+    shutil.copy(paths[0], drop_dir / "external.jpg")
+    wait(app, lambda: sw2.view.count() == 3, 30)
     w.mdi.setActiveSubWindow(sw)
     w.mdi.tileSubWindows()
     app.processEvents()
