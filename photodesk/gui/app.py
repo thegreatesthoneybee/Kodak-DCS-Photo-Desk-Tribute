@@ -1045,22 +1045,9 @@ class MainWindow(QMainWindow):
                 p.end()
                 return
             size = self.q.value("Contact Sheet Printing Size", "view")
-            per_row = {"small": 10, "medium": 4, "large": 2}.get(size)
-            dpi = printer.resolution()
-            cell = page.width() // per_row if per_row else int(sw.view.cell_size().width() * dpi / 96)
-            cols = max(1, page.width() // cell)
-            x = y = 0
-            for e in sw.sheet.entries:
-                if e.thumb is not None:
-                    th = e.thumb.scaled(cell - 10, cell - 10, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    p.drawImage(x * cell + 5, y * cell + 5, th)
-                    p.drawText(R.QRect(x * cell, y * cell + cell - 12, cell, 12), Qt.AlignCenter, e.path.name)
-                x += 1
-                if x >= cols:
-                    x, y = 0, y + 1
-                    if (y + 1) * cell > page.height():
-                        printer.newPage()
-                        y = 0
+            per_short_side = {"small": 10, "medium": 4, "large": 2}.get(size)
+            view_cell = int(sw.view.cell_size().width() * printer.resolution() / 96)
+            print_contact_sheet(p, printer, page, sw.sheet.entries, per_short_side, view_cell)
         p.end()
 
     def _printer(self):
@@ -1748,6 +1735,41 @@ class MainWindow(QMainWindow):
 
 
 TOOL_CMD = {v: k for k, v in TOOLS.items()}
+
+
+def print_contact_sheet(p, printer, page, entries, per_short_side, view_cell):
+    """Contact sheet print: thumbnails about ``per_short_side`` across the short side of the paper
+    (or the on-screen size), each with a thin border, its crop outline, and number and name below."""
+    from PySide6.QtGui import QPen
+    short = min(page.width(), page.height())
+    cell = max(32, short // per_short_side if per_short_side else view_cell)
+    text_h = max(12, cell // 10)
+    cols = max(1, page.width() // cell)
+    rows = max(1, page.height() // (cell + text_h))
+    font = p.font()
+    font.setPixelSize(max(8, text_h * 2 // 3))
+    p.setFont(font)
+    for i, e in enumerate(entries):
+        if i and i % (cols * rows) == 0:
+            printer.newPage()
+        k = i % (cols * rows)
+        x0, y0 = (k % cols) * cell, (k // cols) * (cell + text_h)
+        area = R.QRect(x0 + cell // 20, y0 + cell // 20, cell - cell // 10, cell - cell // 10)
+        if e.thumb is not None:
+            sz = e.thumb.size().scaled(area.size(), Qt.KeepAspectRatio)
+            r = R.QRect(area.left() + (area.width() - sz.width()) // 2,
+                        area.top() + (area.height() - sz.height()) // 2, sz.width(), sz.height())
+            p.drawImage(r, e.thumb)
+            p.setPen(QPen(Qt.black, max(1, cell // 200)))
+            p.drawRect(r)
+            c = e.settings.crop
+            if c:
+                p.setPen(QPen(Qt.black, max(1, cell // 150), Qt.DashLine))
+                p.drawRect(R.QRect(r.left() + round(c[0] * r.width()), r.top() + round(c[1] * r.height()),
+                                   round((c[2] - c[0]) * r.width()), round((c[3] - c[1]) * r.height())))
+        p.setPen(Qt.black)
+        p.drawText(R.QRect(x0, y0 + cell, cell, text_h), Qt.AlignHCenter | Qt.AlignTop,
+                   f"{i + 1}  {e.path.name}")
 
 
 def launch(app, path):
