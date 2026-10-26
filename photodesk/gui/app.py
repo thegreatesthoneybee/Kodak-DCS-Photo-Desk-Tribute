@@ -553,9 +553,10 @@ class MainWindow(QMainWindow):
         dlg.setOption(QFileDialog.DontUseNativeDialog, True)
         dlg.setNameFilters(["DCS Photo Desk (*.dcr *.DCR *.tif *.TIF *.tiff *.jpg *.JPG *.jpeg *.kdc *.KDC)",
                             "All files (*.*)"])
-        open_folder = dlg.addAction if False else None
-        folder_btn = D.QPushButton(self.res.s(59502), dlg)
-        dlg.layout().addWidget(folder_btn)
+        bar = R.QWidget(dlg)                      # template 130: "Open Folder As Contact Sheet"
+        folder_btn = R.build(self.res, bar, 130)[1000]
+        folder_btn.setText(self.res.s(59502))
+        dlg.layout().addWidget(bar, dlg.layout().rowCount(), 0, 1, -1)
 
         def as_sheet():
             cur = Path(dlg.directory().absolutePath())
@@ -744,17 +745,26 @@ class MainWindow(QMainWindow):
             dlg.setOption(QFileDialog.ShowDirsOnly, False)
         else:
             dlg.selectFile(entries[0].path.stem)
-        # Rename Setup and Options... (template 166 / 1131) below the file chooser.
-        extra = QLabel(dlg) if False else None
+        # Rename Setup, Open With, Options... and Save Files In Folder (template 166) below the file chooser.
         setup = R.QWidget(dlg)
         b = R.build(res, setup, 166)
         b[1063].setChecked(False)
         b[1064].setText(self.q.value("Save As Basename", "image"))
         b[1065].setText(str(self.q.value("Save As Num Digits", 4)))
         b[1066].setText(str(self.q.value("Save As Start From", 1)))
-        for cid in (1063, 1068, 1064, 1065, 1066):
+        for cid in (1063, 1068, 1064, 1065, 1066, 1067):
             b[cid].setVisible(multi)
-        b[1067].hide()
+        in_folder = []
+        if multi:
+            def folder_label(d):
+                b[1067].setText(res.s(59510).replace("%s", Path(d).name or d))
+            folder_label(start)
+            dlg.directoryEntered.connect(folder_label)
+
+            def save_in_folder():
+                in_folder.append(Path(dlg.directory().absolutePath()))
+                dlg.done(QFileDialog.Accepted)
+            b[1067].clicked.connect(save_in_folder)
         editor = self.q.value("TIFF Open With", "")
         b[1088].setEnabled(bool(editor))
         b[1088].setText(res.s(59514).replace("%s", Path(editor).stem) if editor else b[1088].text())
@@ -765,7 +775,12 @@ class MainWindow(QMainWindow):
         kind = filters.index(dlg.selectedNameFilter()) if dlg.selectedNameFilter() in filters else 0
         file_type = ("tiff", "jpeg", "asis")[kind]
         self.q.setValue("Save As File Type", kind)
-        target = Path(dlg.selectedFiles()[0])
+        if in_folder:
+            target = in_folder[0]
+        elif dlg.selectedFiles():
+            target = Path(dlg.selectedFiles()[0])
+        else:
+            return
         if multi:
             out_dir = target if target.is_dir() else target.parent
             if b[1063].isChecked():
@@ -1719,6 +1734,22 @@ def _vk_to_qt(vk):
     return k.value if k is not None else None
 
 
+QT_LOCALES = {"English": "en", "Chinese": "zh_CN", "French": "fr", "German": "de", "Italian": "it",
+              "Japanese": "ja", "Korean": "ko", "Portugese": "pt_BR", "Spanish": "es",
+              "Traditional Chinese": "zh_TW"}
+
+
+def install_qt_translation(app, language):
+    """Standard dialogs (file chooser, print, colour) speak the Photo Desk UI language, like the
+    system common dialogs of the original."""
+    from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
+    code = QT_LOCALES.get(language, "en")
+    QLocale.setDefault(QLocale(code))
+    tr = QTranslator(app)
+    if tr.load(f"qtbase_{code}", QLibraryInfo.path(QLibraryInfo.TranslationsPath)):
+        app.installTranslator(tr)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DCS Photo Desk")
@@ -1734,6 +1765,7 @@ def main():
             return 1
         profiles.install_from_installer(installer)
         res = R.Resources.load()
+    install_qt_translation(app, res.language)
     splash = D.Splash(res)
     splash.show()
     app.processEvents()

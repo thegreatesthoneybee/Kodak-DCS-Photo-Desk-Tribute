@@ -16,7 +16,7 @@ from PySide6.QtGui import QFontDatabase  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox  # noqa: E402
 
 from photodesk.gui import res as R  # noqa: E402
-from photodesk.gui.app import MainWindow  # noqa: E402
+from photodesk.gui.app import MainWindow, install_qt_translation  # noqa: E402
 
 SKIP = {57665, 57607, 57609, 57606, 32904, 33108, 57601, 57667, 32870, 32867, 1055, 1056}
 SKIP |= set(range(33158, 33168))      # web links
@@ -30,7 +30,9 @@ def main(folder, outdir):
             break
     errors = []
     sys.excepthook = lambda *exc: errors.append("".join(traceback.format_exception(*exc)))
-    w = MainWindow(R.Resources.load())
+    res = R.Resources.load()
+    install_qt_translation(app, res.language)
+    w = MainWindow(res)
     w.resize(1400, 900)
     w.show()
     sw = w.open_folder(folder)

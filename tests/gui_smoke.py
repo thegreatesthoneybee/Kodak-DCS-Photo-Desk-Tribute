@@ -13,7 +13,7 @@ from PySide6.QtGui import QFontDatabase  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from photodesk.gui import res as R  # noqa: E402
-from photodesk.gui.app import MainWindow  # noqa: E402
+from photodesk.gui.app import MainWindow, install_qt_translation  # noqa: E402
 
 
 def wait(app, cond, timeout=90):
@@ -49,6 +49,7 @@ def main(folder, shot):
         if f.endswith(".photodesk.json"):
             os.remove(os.path.join(folder, f))
     res = R.Resources.load()
+    install_qt_translation(app, res.language)
     w = MainWindow(res)
     w.resize(1500, 950)
     w.show()
