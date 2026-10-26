@@ -384,14 +384,39 @@ def _profile(path):
     return icc.Profile(path)
 
 
+def _is_look(prof):
+    """Look profiles are input-class profiles that map ERIMM to PCS (Kodak and Custom Looks)."""
+    return prof.device_class == "scnr" and "Source Correction" not in prof.description
+
+
 def available_looks(directory=None):
+    """[(file name, description)] of the Kodak Looks plus Custom Looks (e.g. the Kodak Professional
+    DCS Custom Looks product) installed in the system's profile folders."""
     d = Path(directory) if directory else profiles.profile_dir()
-    looks = []
-    for p in sorted(d.glob("*.icm")):
-        prof = _profile(str(p))
-        if prof.device_class == "scnr" and "Source Correction" not in prof.description:
+    looks, seen = [], set()
+    kodak = sorted(d.glob("*.icm"))
+    for p in kodak + sorted(profiles.system_color_dirs_profiles()):
+        if p.name in seen:
+            continue
+        try:
+            prof = _profile(str(p))
+        except (ValueError, OSError):
+            continue
+        # System folders hold scanner profiles too: only Kodak DCS (Custom) Looks are listed from there.
+        if p not in kodak and not prof.description.startswith("Kodak DCS"):
+            continue
+        if _is_look(prof) and "A2B0" in prof.tags:
+            seen.add(p.name)
             looks.append((p.name, prof.description))
     return looks
+
+
+def look_path(name, profile_directory):
+    """Look profile file: the Kodak profile folder first, then the system profile folders."""
+    p = Path(profile_directory) / name
+    if p.is_file():
+        return p
+    return next((q for q in profiles.system_color_dirs_profiles() if q.name == name), p)
 
 
 def look_label(description):
@@ -449,7 +474,7 @@ def color_lut(source_name, look_name, space_path, profile_directory):
         erimm = _profile(str(d / "ERIMM_PCS3.icm")).lut("B2A0")(icc.xyz_encode(scene_xyz))
     else:
         erimm = erimm_encode(scene_xyz @ XYZ50_TO_PROPHOTO.T.astype(np.float32))
-    out_xyz = icc.lab_to_xyz(icc.lab_decode(_profile(str(d / look_name)).lut("A2B0")(erimm)))
+    out_xyz = icc.lab_to_xyz(icc.lab_decode(_profile(str(look_path(look_name, d))).lut("A2B0")(erimm)))
     rgb = _profile(space_path).encoder()(out_xyz)
     return np.clip(rgb, 0, 1).astype(np.float32).reshape(LUT_SIZE, LUT_SIZE, LUT_SIZE, 3)
 

@@ -37,6 +37,16 @@ def raw():
     return pipeline.decode(SAMPLE, half_size=True)
 
 
+def test_custom_looks_in_system_folders(profile_dir, tmp_path, monkeypatch):
+    import shutil
+    shutil.copy(profile_dir / "DCSSepia1.icm", tmp_path / "MyCustomLook.icm")
+    shutil.copy(profile_dir / "KODAK_sRGB.icm", tmp_path / "monitor.icm")
+    monkeypatch.setattr(profiles, "system_color_dirs_profiles", lambda: iter(sorted(tmp_path.iterdir())))
+    names = [n for n, _ in pipeline.available_looks(profile_dir)]
+    assert "MyCustomLook.icm" in names and "monitor.icm" not in names and "DCSProductLook.icm" in names
+    assert pipeline.look_path("MyCustomLook.icm", profile_dir) == tmp_path / "MyCustomLook.icm"
+
+
 def _srgb_lab(img, profile_dir, fx=.18, fy=.37):
     h, w = img.shape[:2]
     p = img[int(fy * h) - 8:int(fy * h) + 8, int(fx * w) - 8:int(fx * w) + 8].reshape(-1, 3).mean(0)
