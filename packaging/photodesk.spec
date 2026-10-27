@@ -6,13 +6,15 @@ from pathlib import Path
 
 from PIL import Image
 from PyInstaller.utils.hooks import collect_dynamic_libs
+
+repo_root = Path(SPECPATH).resolve().parent
+sys.path.insert(0, str(repo_root))  # the package need not be pip-installed to build
 from photodesk.peres import PEResources
 
 block_cipher = None
 
 datas = []
 app_icon = None
-repo_root = Path.cwd()
 if sys.platform == "darwin":
     installed_profiles = Path.home() / "Library/Application Support/PhotoDesk/profiles"
     required = [
