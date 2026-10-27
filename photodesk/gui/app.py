@@ -1,4 +1,4 @@
-"""DCS Photo Desk main window: MDI contact sheets and full image renderings.
+"""PhotoDesk (Tribute) main window (after Kodak DCS Photo Desk 4.3): MDI contact sheets and full image renderings.
 
 Menus, toolbar, accelerators, panels, dialogs, bitmaps, cursors and strings
 come from the original PhotoDsk.exe resources (parsed, never executed) and the
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QStyleFactory, QToolBar, QToolButton,
 )
 
-from .. import __version__, camera, export, pipeline, profiles, wbfile
+from .. import APP_NAME, ORG_NAME, __version__, camera, export, pipeline, profiles, wbfile
 from . import dialogs as D
 from . import res as R
 from .model import PASTE_GROUPS, Sheet, is_image, paste_into
@@ -301,7 +301,7 @@ class MainWindow(QMainWindow):
         self.res = res
         # PHOTODESK_SETTINGS: an .ini file instead of the user's settings (used by the GUI tests).
         ini = os.environ.get("PHOTODESK_SETTINGS")
-        self.q = QSettings(ini, QSettings.IniFormat) if ini else QSettings("Kodak", "DCS Photo Desk")
+        self.q = QSettings(ini, QSettings.IniFormat) if ini else QSettings(ORG_NAME, APP_NAME)
         self.appearance = self.q.value("Appearance", "light")
         apply_appearance(QApplication.instance(), self.appearance)
         self._light_icons = {}
@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
         self.player = None
         self.looks = pipeline.available_looks(self.pdir) if profiles.is_installed() else []
         self.icons.look_labels = {name: pipeline.look_label(desc) for name, desc in self.looks}
-        self.setWindowTitle(res.tr("DCS Photo Desk", ("About Box", "Common")))
+        self.setWindowTitle(APP_NAME)
         self.setWindowIcon(res.app_icon())
         self.mdi = QMdiArea()
         self.mdi.setBackground(self.palette().color(QPalette.ColorRole.Dark))
@@ -802,7 +802,7 @@ class MainWindow(QMainWindow):
         dlg = QFileDialog(self, self.res.s(59501), start)
         dlg.setFileMode(QFileDialog.ExistingFile)
         dlg.setOption(QFileDialog.DontUseNativeDialog, True)
-        dlg.setNameFilters(["DCS Photo Desk (*.dcr *.DCR *.tif *.TIF *.tiff *.jpg *.JPG *.jpeg *.kdc *.KDC)",
+        dlg.setNameFilters([APP_NAME + " (*.dcr *.DCR *.tif *.TIF *.tiff *.jpg *.JPG *.jpeg *.kdc *.KDC)",
                             "All files (*.*)"])
         bar = R.QWidget(dlg)                      # template 130: "Open Folder As Contact Sheet"
         folder_btn = R.build(self.res, bar, 130)[1000]
@@ -2096,20 +2096,39 @@ def install_qt_translation(app, language):
         app.installTranslator(tr)
 
 
+def _migrate_settings(settings, old=None):
+    """Carry preferences over from releases that stored them under Kodak/DCS Photo Desk."""
+    if settings.allKeys():
+        return
+    old = old if old is not None else QSettings("Kodak", "DCS Photo Desk")
+    keys = old.allKeys()
+    if not keys:
+        return
+    for key in keys:
+        settings.setValue(key, old.value(key))
+    settings.sync()
+    old.clear()
+    old.sync()
+
+
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("DCS Photo Desk")
-    app.setOrganizationName("Kodak")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(__version__)
+    app.setOrganizationName(ORG_NAME)
     ini = os.environ.get("PHOTODESK_SETTINGS")
-    settings = QSettings(ini, QSettings.IniFormat) if ini else QSettings("Kodak", "DCS Photo Desk")
+    settings = QSettings(ini, QSettings.IniFormat) if ini else QSettings(ORG_NAME, APP_NAME)
+    if not ini:
+        _migrate_settings(settings)
     apply_appearance(app, settings.value("Appearance", "light"))
     try:
         res = R.Resources.load()
     except R.MissingResources:
         installer, _ = QFileDialog.getOpenFileName(None, "Photo_Desk_V_4_3_0.exe", "", "Photo Desk installer (*.exe)")
         if not installer:
-            QMessageBox.critical(None, "DCS Photo Desk",
-                                 "Photo Desk is not properly installed.\nFiles needed by Photo Desk are missing.\n"
+            QMessageBox.critical(None, APP_NAME,
+                                 f"{APP_NAME} is not properly installed.\nThe Kodak profiles and interface files are missing.\n"
                                  "Select Photo_Desk_V_4_3_0.exe to install the Kodak profiles and interface.")
             return 1
         profiles.install_from_installer(installer)

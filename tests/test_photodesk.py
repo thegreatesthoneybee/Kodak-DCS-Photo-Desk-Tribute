@@ -283,6 +283,21 @@ def test_windows_app_icon_contains_high_resolution_variants():
     assert (256, 256) in {(w, h) for w, h, *_ in icon.info["sizes"]}
 
 
+def test_settings_migrate_from_kodak_scope(tmp_path):
+    from PySide6.QtCore import QSettings
+    from photodesk.gui import app as gui_app
+    old = QSettings(str(tmp_path / "old.ini"), QSettings.IniFormat)   # never the real registry
+    old.setValue("Appearance", "dark")
+    new = QSettings(str(tmp_path / "new.ini"), QSettings.IniFormat)
+    gui_app._migrate_settings(new, old)
+    assert new.value("Appearance") == "dark"
+    assert not old.allKeys()
+    old.setValue("Appearance", "dark")
+    new.setValue("Appearance", "light")
+    gui_app._migrate_settings(new, old)         # existing settings are never overwritten
+    assert new.value("Appearance") == "light"
+
+
 def test_dark_appearance_recolors_icons_and_palette():
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QIcon, QImage, QPalette, QPixmap

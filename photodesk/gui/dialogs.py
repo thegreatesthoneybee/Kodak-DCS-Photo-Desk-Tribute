@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QTextEdit, QWidget,
 )
 
-from .. import __version__, export, iptc, pipeline
+from .. import APP_NAME, AUTHOR, BASED_ON, __version__, export, iptc, pipeline
 from . import res as R
 from .views import EVHistogram, to_qimage
 
@@ -17,7 +17,7 @@ OK, CANCEL = 1, 2
 
 def message(parent, res, text, kind="warning", buttons=QMessageBox.Ok):
     box = QMessageBox(parent)
-    box.setWindowTitle("DCS Photo Desk")
+    box.setWindowTitle(APP_NAME)
     box.setText(text)
     box.setIcon({"warning": QMessageBox.Warning, "info": QMessageBox.Information,
                  "question": QMessageBox.Question, "error": QMessageBox.Critical}[kind])
@@ -1045,7 +1045,7 @@ class YesToAllDialog(TemplateDialog):
 
     def __init__(self, res, parent, text):
         super().__init__(res, parent)
-        self.setWindowTitle("DCS Photo Desk")
+        self.setWindowTitle(APP_NAME)
         self.b[1062].setText(text)
         self.b[OK].clicked.disconnect()
         self.b[OK].clicked.connect(lambda: self.done(OK))
@@ -1085,12 +1085,12 @@ class AboutDialog(TemplateDialog):
 
     def __init__(self, res, parent):
         super().__init__(res, parent)
-        self.setWindowTitle("About PhotoDesk (Tribute)")
+        self.setWindowTitle(f"About {APP_NAME}")
         self.setFixedHeight(self.height() + res.size((0, 26))[1])
         self.b.all[0][1].setPixmap(res.app_icon().pixmap(32, 32))
-        self.b.all[1][1].setText(f"PhotoDesk (Tribute) v{__version__} — Based on Kodak DCS Photo Desk 4.3")
+        self.b.all[1][1].setText(f"{APP_NAME} v{__version__} — Based on {BASED_ON}")
         self.b.all[1][1].setGeometry(res.rect((40, 8, 264, 10)))
-        self.b.all[2][1].setText("Created by GO BANGWON (Korea)")
+        self.b.all[2][1].setText(f"Created by {AUTHOR}")
         self.b.all[2][1].setGeometry(res.rect((40, 24, 200, 9)))
         self.b[OK].setGeometry(res.rect((247, 49, 50, 14)))
 
