@@ -811,11 +811,12 @@ def sharpen(img, settings, scale=1.0):
 
 
 # ------------------------------------------------------------------ Auto noise reduction / sharpening
-# Auto analyses ANALYSIS_GRID x ANALYSIS_GRID tiles of ANALYSIS_TILE pixels spread over the full-size
-# image, rendered without noise reduction and sharpening. Noise is measured on the flattest blocks
-# (Immerkaer's estimator, in 8-bit levels), edge blur on the strongest edges (gradient ratio of the
-# image and a re-blurred copy, as a Gaussian sigma in pixels).
-ANALYSIS_GRID, ANALYSIS_TILE, _BLOCK = 3, 256, 16
+# Auto samples the image at many places: ANALYSIS_GRID x ANALYSIS_GRID tiles of ANALYSIS_TILE pixels
+# at full size, rendered without noise reduction and sharpening. Noise is measured on the flattest
+# blocks of each brightness band (Immerkaer's estimator, in 8-bit levels), edge blur on the strongest
+# edges of each tile (gradient ratio of the image and a re-blurred copy, as a Gaussian sigma in
+# pixels); medians over the samples keep one area from deciding the result.
+ANALYSIS_GRID, ANALYSIS_TILE, _BLOCK = 7, 160, 16
 # Noise left after Auto noise reduction (8-bit levels of the working space): chroma noise is
 # removed down to this level, luminance noise only where it is visible grain.
 NOISE_TARGET_CHROMA, NOISE_TARGET_LUMA = 0.3, 0.6
@@ -825,15 +826,17 @@ SHARPEN_BLUR_FRACTION, SHARPEN_MIN_SIGMA = 0.85, 0.65
 _IMMERKAER = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
 
 
-def analysis_tiles(raw, settings):
-    """Tiles of the image rendered with settings but without noise reduction and sharpening."""
+def analysis_tiles(raw, settings, offset=(0.0, 0.0)):
+    """Tiles of the image rendered with settings but without noise reduction and sharpening, one at
+    the centre of each cell of an ANALYSIS_GRID x ANALYSIS_GRID grid (shifted by offset cells)."""
     s = settings.copy(noise_type="none", sharpen_amount=0.0, crop=None)
     h, w = raw.camera_rgb.shape[:2]
     tw, th = min(1.0, ANALYSIS_TILE * raw.scale / w), min(1.0, ANALYSIS_TILE * raw.scale / h)
     tiles = []
     for i in range(ANALYSIS_GRID):
         for j in range(ANALYSIS_GRID):
-            cx, cy = (j + 1) / (ANALYSIS_GRID + 1), (i + 1) / (ANALYSIS_GRID + 1)
+            cx = min(max((j + 0.5 + offset[0]) / ANALYSIS_GRID, tw / 2), 1 - tw / 2)
+            cy = min(max((i + 0.5 + offset[1]) / ANALYSIS_GRID, th / 2), 1 - th / 2)
             tiles.append(render_region(raw, s, (cx - tw / 2, cy - th / 2, cx + tw / 2, cy + th / 2), margin=0))
     return tiles
 
@@ -850,32 +853,57 @@ def _ycc(img):
     return cv2.cvtColor(np.ascontiguousarray(img, np.float32), cv2.COLOR_RGB2YCrCb)
 
 
+# Brightness bands (luma) noise is measured in separately: noise depends on the level, and the
+# quietest blocks overall would all be highlights.
+_NOISE_BANDS = ((0.06, 0.3), (0.3, 0.65), (0.65, 0.94))
+_BAND_MIN_BLOCKS = 80                # a band counts only with this many blocks over all tiles
+
+
+def _block_luma(y, shape):
+    return y[:shape[0] * _BLOCK, :shape[1] * _BLOCK].reshape(shape[0], _BLOCK, shape[1], _BLOCK).mean(axis=(1, 3))
+
+
 def _flat_blocks(tiles):
-    """Per tile, the mask of well-exposed blocks whose luminance noise is in the lowest 30 % of all
-    tiles (flat areas, where texture does not count as noise)."""
+    """Per tile, an int map of its flat blocks: the band index + 1 for blocks whose luminance noise
+    is in the lowest 30 % of their brightness band over all tiles (flat areas, where texture does
+    not count as noise), 0 elsewhere. None if no band has enough blocks."""
     ys = [_ycc(t)[..., 0] for t in tiles]
     sig = [_block_noise(y) for y in ys]
-    mean = [cv2.resize(y, (s.shape[1], s.shape[0]), interpolation=cv2.INTER_AREA) for y, s in zip(ys, sig)]
-    ok = [(m > 0.06) & (m < 0.94) for m in mean]
-    pool = np.concatenate([s[o] for s, o in zip(sig, ok)])
-    if pool.size < 8:
-        return None
-    limit = np.percentile(pool, 30)
-    return [o & (s <= limit) for s, o in zip(sig, ok)]
+    mean = [_block_luma(y, s.shape) for y, s in zip(ys, sig)]
+    out = [np.zeros(s.shape, np.int8) for s in sig]
+    found = False
+    for b, (lo, hi) in enumerate(_NOISE_BANDS):
+        band = [(m >= lo) & (m < hi) for m in mean]
+        pool = np.concatenate([s[k] for s, k in zip(sig, band)])
+        if pool.size < _BAND_MIN_BLOCKS:
+            continue
+        limit = np.percentile(pool, 30)
+        for o, s, k in zip(out, sig, band):
+            o[k & (s <= limit)] = b + 1
+        found = True
+    return out if found else None
 
 
 def image_noise(tiles, flat=None):
-    """(luma, chroma) noise (8-bit levels) of the flat areas of tiles; None if there are none."""
-    flat = flat or _flat_blocks(tiles)
+    """(luma, chroma) noise (8-bit levels) of the flat areas of tiles: the median per brightness
+    band, averaged over the bands present. None if there are no flat areas."""
+    flat = flat if flat is not None else _flat_blocks(tiles)
     if flat is None:
         return None
-    acc = [[], [], []]
+    acc = {}
     for t, m in zip(tiles, flat):
         ycc = _ycc(t)
-        for c in range(3):
-            acc[c].append(_block_noise(ycc[..., c])[m])
-    y, cr, cb = (float(np.median(np.concatenate(a))) for a in acc)
-    return y, float(np.hypot(cr, cb) / np.sqrt(2))
+        sig = [_block_noise(ycc[..., c]) for c in range(3)]
+        for b in np.unique(m[m > 0]):
+            acc.setdefault(b, [[], [], []])
+            for c in range(3):
+                acc[b][c].append(sig[c][m == b])
+    if not acc:
+        return None
+    bands = [[float(np.median(np.concatenate(a))) for a in v] for v in acc.values()]
+    y = float(np.mean([b[0] for b in bands]))
+    c = float(np.mean([np.hypot(b[1], b[2]) / np.sqrt(2) for b in bands]))
+    return y, c
 
 
 def _noise_values(noise_type, kind, radius, level):
@@ -897,8 +925,7 @@ def noise_auto(tiles, settings, caps, noise_type):
     flat = _flat_blocks(tiles)
     if flat is None:
         return None
-    order = np.argsort([m.sum() for m in flat])
-    flat_i = order[-3:]
+    flat_i = [i for i, m in enumerate(flat) if m.any()]
     luma_matters = noise_type in ("advanced", "moire", "expert") and kind != "threshold"
 
     def residual(v):
@@ -933,9 +960,14 @@ def noise_auto(tiles, settings, caps, noise_type):
     return strongest[1]
 
 
+_EDGE_MIN_PIXELS, _EDGE_MIN_TILES = 30, 3
+
+
 def edge_blur(tiles):
-    """Median Gaussian sigma (pixels) of the strongest edges in tiles; None without enough edges."""
-    ratios = []
+    """Gaussian sigma (pixels) of the strongest edges: the median over the tiles with enough edges
+    of each tile's median, so one area (a single sharp or soft subject) does not decide it.
+    None if fewer than _EDGE_MIN_TILES tiles have edges."""
+    per_tile = []
     for t in tiles:
         y = _ycc(t)[..., 0]
         g1 = np.hypot(cv2.Sobel(y, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(y, cv2.CV_32F, 0, 1, ksize=3))
@@ -944,11 +976,12 @@ def edge_blur(tiles):
         edges = cv2.Canny((np.clip(y, 0, 1) * 255).astype(np.uint8), 40, 100) > 0
         m = edges & (g1 > np.percentile(g1, 90)) & (g2 > 1e-4)
         r = g1[m] / g2[m]
-        ratios.append(r[r > 1.01])
-    r = np.concatenate(ratios)
-    if r.size < 100:
+        r = r[r > 1.01]
+        if r.size >= _EDGE_MIN_PIXELS:
+            per_tile.append(np.median(1.0 / np.sqrt(r ** 2 - 1)))
+    if len(per_tile) < _EDGE_MIN_TILES:
         return None
-    return float(np.median(1.0 / np.sqrt(r ** 2 - 1)))
+    return float(np.median(per_tile))
 
 
 def sharpen_auto(tiles, settings):
