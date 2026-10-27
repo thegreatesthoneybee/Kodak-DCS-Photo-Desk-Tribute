@@ -2251,7 +2251,6 @@ def _migrate_settings(settings, old=None):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    app.setApplicationDisplayName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setOrganizationName(ORG_NAME)
     ini = os.environ.get("PHOTODESK_SETTINGS")
