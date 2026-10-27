@@ -1165,4 +1165,6 @@ class Splash(QDialog):
         btn.setIcon(R.QIcon(res.bitmap(193, transparent=False).scaled(btn.size(), Qt.IgnoreAspectRatio,
                                                                        Qt.SmoothTransformation)))
         btn.clicked.connect(self.accept)
+        # The template's text is the original's "Version 4.3.0.13" and libtiff copyrights.
+        self.b.all[1][1].setText(f"{APP_NAME} v{__version__}\nBased on {BASED_ON}\n\nCreated by {AUTHOR}")
         self.b.all[1][1].setAlignment(Qt.AlignCenter)
