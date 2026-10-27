@@ -53,7 +53,18 @@ TONE_MIN_GAP = 2.0
 # defaults and DCSProBack.dll preset tables: amount 0..20, radius in 0.1 steps, threshold 0..255).
 SHARPEN_PRESETS = {"none": (0.0, 0.0, 0), "low": (5.0, 1.0, 2), "medium": (10.0, 1.0, 2),
                    "high": (17.0, 1.4, 2)}
-NOISE_PRESETS = {"low": (2, 30), "medium": (3, 50), "high": (5, 75)}
+# Noise Reduction presets of Pro Back / Pro SLR images (Photo Desk's ProImage), Low/Medium/High:
+# Basic/Advanced/Moire take (radius level 0..100, strength %) and Expert a strength %. Pro SLR files
+# carry their own tables (Kodak tags 3695 and 3683: type, level, strength per preset); these are
+# the camera DLLs' built-in defaults.
+NOISE_PRESETS = {"radius": ((20, 23), (50, 50), (80, 80)), "expert": (50, 75, 100)}
+NOISE_PRESET_NAMES = ("low", "medium", "high")
+NOISE_RADIUS_TAG, NOISE_EXPERT_TAG = 3695, 3683
+# Radius slider range per type; Basic moves in steps of 2.
+NOISE_RADIUS_RANGE = {"basic": (2, 6), "advanced": (1, 4), "moire": (1, 10)}
+BASIC_PRESET_RADII = (2, 4, 6)
+# Radius level (0..100) -> radius: upper bounds of each radius, from ProImage.
+_RADIUS_LEVELS = {"advanced": (17, 50, 83, 100), "moire": (9, 19, 29, 39, 49, 61, 71, 80, 90, 100)}
 # Crop aspect ratios of the Image Controls panel / Image > Crop Aspect Ratio menu (width, height).
 CROP_RATIOS = {"freeform": None, "square": (1, 1), "2x3l": (3, 2), "3x2p": (2, 3), "4x5l": (5, 4),
                "5x4p": (4, 5), "5x7l": (7, 5), "7x5p": (5, 7)}
@@ -136,6 +147,13 @@ def at_capture(info):
         s.sharpen_amount, s.sharpen_radius, s.sharpen_threshold = SHARPEN_PRESETS["low"]
     if info.get("lighting") in LIGHTINGS:
         s.lighting = info["lighting"]
+    # The camera's white balance setting (Kodak tag 1020): a lighting selects the Preset balance
+    # for it, the camera's Custom setting the Custom balance (camera auto stays on Preset).
+    wb = info.get("white_balance")
+    if wb in LIGHTINGS:
+        s.balance, s.lighting = "preset", wb
+    elif wb == "custom" and "custom" in caps.balances:
+        s.balance = "custom"
     if info.get("look"):
         s.look = info["look"]
     if info.get("sharpening") is False:
@@ -143,6 +161,45 @@ def at_capture(info):
     if "lens_optimization" in info:
         s.lens_optimization = int(info["lens_optimization"])
     return s
+
+
+def noise_radius_for_level(noise_type, level):
+    """Radius Photo Desk derives from a preset's radius level for a noise type."""
+    if noise_type == "basic":
+        return 2 if level <= 24 else 4 if level <= 74 else 6
+    bounds = _RADIUS_LEVELS.get(noise_type, _RADIUS_LEVELS["advanced"])
+    return next((i + 1 for i, b in enumerate(bounds) if level <= b), len(bounds))
+
+
+def noise_presets(raw_path=None):
+    """{"radius": ((level, strength) x3), "expert": (strength x3)} Low/Medium/High presets of a file."""
+    out = dict(NOISE_PRESETS)
+    if raw_path is None:
+        return out
+    try:
+        tags = camera.read_kodak_tags(raw_path, (NOISE_RADIUS_TAG, NOISE_EXPERT_TAG))
+    except OSError:
+        return out
+    v = tags.get(NOISE_RADIUS_TAG)
+    if v and len(v) == 9:
+        out["radius"] = tuple((v[i + 1], v[i + 2]) for i in (0, 3, 6))
+    v = tags.get(NOISE_EXPERT_TAG)
+    if v and len(v) == 9:
+        out["expert"] = tuple(v[i + 2] for i in (0, 3, 6))
+    return out
+
+
+def apply_noise_preset(values, name, presets):
+    """Set the Low/Medium/High preset ``name`` into the noise fields dict ``values``."""
+    i = NOISE_PRESET_NAMES.index(name)
+    t = values["noise_type"]
+    if t == "expert":
+        values["noise_strength"] = values["noise_luma"] = presets["expert"][i]
+    elif t != "none":
+        level, strength = presets["radius"][i]
+        values["noise_radius"] = BASIC_PRESET_RADII[i] if t == "basic" else noise_radius_for_level(t, level)
+        values["noise_strength"] = strength
+    return values
 
 
 def capture_settings(raw_path):
@@ -183,6 +240,9 @@ class RawImage:
     flip: int                   # LibRaw orientation code
     metadata: dict
     scale: float = 1.0          # camera_rgb resolution relative to the full sensor image
+    # Neutral camera RGB the camera recorded for each of its balance settings
+    # (camera.balance_points: lighting names, "custom", "camera_auto").
+    balance_points: dict = dataclasses.field(default_factory=dict)
 
     @property
     def caps(self):
@@ -221,7 +281,8 @@ def decode(path, half_size=False, algorithm="AHD"):
     if gps:
         metadata["gps"] = gps
     return RawImage(path, make, model, cam, wb / wb[1], daylight / daylight[1], rgb_xyz,
-                    camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h))
+                    camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h),
+                    camera.balance_points(path))
 
 
 def reduced(raw, long_edge):
@@ -288,9 +349,36 @@ def cct_shift(raw, from_cct, to_cct):
     return _camera_response(raw, from_cct) / _camera_response(raw, to_cct)
 
 
+def point_wb(point):
+    """Multipliers (G = 1) that balance the neutral camera RGB ``point`` to grey."""
+    p = np.asarray(point, np.float64)
+    return p[1] / p
+
+
 def preset_wb(raw, lighting):
-    """Fixed balance point corresponding to the lighting (Preset balance)."""
+    """Preset balance. Older DCS files (Photo Desk's DCSImage) use the camera's own balance point
+    for the lighting (Kodak tags 2120-2123); Pro Back / Pro SLR files, which Photo Desk balances
+    through the camera DLL's colour model, get LibRaw's daylight balance shifted to the lighting's
+    colour temperature."""
+    caps = raw.caps
+    if lighting in raw.balance_points and not (caps.pro_back or caps.pro_slr):
+        return point_wb(raw.balance_points[lighting])
     return raw.daylight_wb * cct_shift(raw, LIGHTING_CCT["Daylight"], LIGHTING_CCT[lighting])
+
+
+def custom_wb(raw):
+    """Custom balance: the camera's custom (click) balance point, Kodak tag 2124 (Photo Desk's
+    DCSImage reads it with GetBalancePointFromTag(0x84C)). Pro Back / Pro SLR points are in the
+    camera DLL's colour space, so they are applied relative to the Daylight point."""
+    bp = raw.balance_points
+    if "custom" not in bp:
+        return raw.as_shot_wb
+    caps = raw.caps
+    if not (caps.pro_back or caps.pro_slr):
+        return point_wb(bp["custom"])
+    if "Daylight" in bp:
+        return raw.daylight_wb * point_wb(bp["custom"]) / point_wb(bp["Daylight"])
+    return raw.as_shot_wb
 
 
 def auto_wb(cam):
@@ -327,7 +415,7 @@ def white_balance(raw, settings):
     if settings.balance == "click":
         wb = np.array(settings.click_wb, np.float64)
     elif settings.balance == "custom":
-        wb = raw.as_shot_wb
+        wb = custom_wb(raw)
     elif settings.balance == "auto":
         wb = auto_wb(raw.camera_rgb)
     else:
@@ -571,7 +659,7 @@ def finish(img, settings, caps=None, scale=1.0):
     if settings.lens_optimization and caps.lens_optimization:
         img = lens_optimize(img, settings.lens_optimization)
     if settings.noise_type != "none":
-        img = reduce_noise(img, settings, scale)
+        img = reduce_noise(img, settings, scale, caps)
     if settings.sharpen_amount > 0:
         img = sharpen(img, settings, scale)
     return img
@@ -604,7 +692,10 @@ def _clip01(img):
     return np.clip(img, 0, 1, out=img)
 
 
-def reduce_noise(img, settings, scale=1.0):
+def reduce_noise(img, settings, scale=1.0, caps=None):
+    """Noise reduction. Moire reduction strength is the Threshold for older DCS images and the
+    Strength for Pro Back / Pro SLR images, whose dialog has no threshold."""
+    caps = caps or camera.capabilities("")
     ycc = cv2.cvtColor(np.asarray(img, np.float32), cv2.COLOR_RGB2YCrCb)
     y, cr, cb = cv2.split(ycc)
     s = settings.noise_strength / 100
@@ -616,9 +707,10 @@ def reduce_noise(img, settings, scale=1.0):
         cb = _mix(cv2.GaussianBlur(cb, (k, k), 0), cb, s)
         if t != "basic":
             y = cv2.bilateralFilter(y, k, 0.01 + 0.06 * s, radius)
-    if t == "moire" and settings.moire_threshold > 0:
-        k = 2 * max(1, round((1 + settings.moire_threshold / 12) * scale)) + 1
-        m = settings.moire_threshold / 100
+    moire = settings.noise_strength if caps.pro_image else settings.moire_threshold
+    if t == "moire" and moire > 0:
+        k = 2 * max(1, round((1 + moire / 12) * scale)) + 1
+        m = moire / 100
         cr = _mix(cv2.medianBlur(cr, min(k, 5)), cr, m)
         cb = _mix(cv2.medianBlur(cb, min(k, 5)), cb, m)
     if t == "expert":

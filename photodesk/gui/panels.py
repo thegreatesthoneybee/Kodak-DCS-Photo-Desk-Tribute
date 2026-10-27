@@ -184,13 +184,14 @@ class ImageControlsPanel(QWidget):
         b[1175].setCurrentIndex(max(0, b[1175].findData(s.look)))
         b[1226].setText(res.s(NOISE_LABEL[s.noise_type]))
         t = s.noise_type
-        if t == "expert":
-            labels = (res.s(62121), res.s(62122))
-            vals = (f"{s.noise_strength}%", f"{s.noise_luma}%")
-        elif t == "moire" and caps.pro_slr:
+        kind = caps.noise_controls(t)
+        if kind == "strength":
+            labels = (res.s(62121), "")
+            vals = (f"{s.noise_strength}%", "")
+        elif kind == "threshold":
             labels = (res.s(60048), "")
             vals = (str(s.moire_threshold), "")
-        elif t == "none":
+        elif kind == "none":
             labels = (res.tr("Radius:", ("Image Controls Panel",)), res.tr("Strength:", ("Image Controls Panel",)))
             vals = ("0", "0")
         else:

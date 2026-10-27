@@ -347,14 +347,26 @@ class SharpenDialog(AdjustDialog):
 NOISE_LABEL = {"none": 33140, "basic": 33141, "advanced": 33142, "moire": 33143, "expert": 33146}
 
 
+# Radius tick statics of template 1133, left to right (1233 "1" ... 1234 "10"), and the hidden "4"
+# (1245) Photo Desk shows at the right end for Advanced (radius 1..4).
+RADIUS_TICKS = (1233, 1239, 1240, 1237, 1241, 1242, 1238, 1243, 1244, 1234)
+
+
 class NoiseDialog(QDialog):
-    """Noise Reduction: template 1133 (radius/strength or expert strength/luma) or 1134 (moire threshold)."""
+    """Noise Reduction as in Photo Desk 4.3.
+
+    Pro Back / Pro SLR images (ProImage) always use template 1133: Basic (radius 2..6 in steps of
+    2), Advanced (1..4) and Advanced with Moire Reduction (1..10) take Radius and Strength, Expert a
+    single Strength; Low/Medium/High come from the file's preset tables. Older DCS images use
+    template 1134: only Advanced with Moire Reduction has a setting, its Threshold.
+    """
     fields = ("noise_type", "noise_radius", "noise_strength", "noise_luma", "moire_threshold")
 
-    def __init__(self, res, parent, settings, preview, caps, mixed=False, capture=None):
+    def __init__(self, res, parent, settings, preview, caps, mixed=False, capture=None, presets=None):
         super().__init__(parent)
         self.res, self._preview, self.caps, self.mixed = res, preview, caps, mixed
         self.capture = capture or pipeline.Settings()
+        self.presets = presets or pipeline.noise_presets()
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.values_ = {k: getattr(settings, k) for k in
                         ("noise_type", "noise_radius", "noise_strength", "noise_luma", "moire_threshold")}
@@ -362,13 +374,10 @@ class NoiseDialog(QDialog):
         self._build()
 
     def _template_for(self, t):
-        if self.caps.unlocked:
-            # Every method keeps its own controls: the moire threshold page for Pro SLR families,
-            # radius/strength (or expert strength/luma) otherwise.
-            return 1134 if t == "moire" and self.caps.pro_slr else 1133
-        if self.caps.pro_slr:
-            return 1133 if t == "expert" else 1134
-        return 1133
+        if self.caps.pro_image:
+            return 1133
+        # Older DCS images: the threshold page, or (unlocked) radius/strength for the other types.
+        return 1133 if self.caps.unlocked and self.caps.noise_controls(t) in ("radius", "strength") else 1134
 
     def _build(self):
         t = self.values_["noise_type"]
@@ -376,6 +385,7 @@ class NoiseDialog(QDialog):
         preview_on = self.body is not None and self.body.get(self._pid) and self.body[self._pid].isChecked()
         if self.body is not None:
             for _, w in self.body.all:
+                w.hide()
                 w.deleteLater()
         self.rid = rid
         self.b = self.body = R.build(self.res, self, rid)
@@ -397,33 +407,7 @@ class NoiseDialog(QDialog):
         self.b[self._pid].setChecked(bool(preview_on))
         self.b[self._pid].toggled.connect(lambda _: self.changed())
         if rid == 1133:
-            expert = t == "expert"
-            if expert:
-                self.b[1347].setText(self.res.s(62119))
-                self.b[1348].setText(self.res.s(62120))
-                self.first = Linked(self.b[9402], self.b[9405], self.b[9409], 0, 100, 0, on_change=self._edited,
-                                    invalid=self.invalid)
-                self.first.set(self.values_["noise_strength"])
-                self.second = Linked(self.b[9403], self.b[9406], self.b[9410], 0, 100, 0, on_change=self._edited,
-                                     invalid=self.invalid)
-                self.second.set(self.values_["noise_luma"])
-                for cid in (1233, 1234):
-                    self.b[cid].setText("0%" if cid == 1233 else "100%")
-            else:
-                self.first = Linked(self.b[9402], self.b[9405], self.b[9409], 1, 10, 0, on_change=self._edited,
-                                    invalid=self.invalid)
-                self.first.set(self.values_["noise_radius"])
-                self.second = Linked(self.b[9403], self.b[9406], self.b[9410], 0, 100, 0, on_change=self._edited,
-                                     invalid=self.invalid)
-                self.second.set(self.values_["noise_strength"])
-            enabled = t != "none"
-            for cid in (9402, 9403, 9405, 9406, 9409, 9410):
-                self.b[cid].setEnabled(enabled)
-            presets = {7: "low", 10: "medium", 9: "high"}
-            for cid, name in presets.items():
-                self.b[cid].clicked.connect(lambda _=False, n=name: self._preset(n))
-                self.b[cid].setEnabled(enabled)
-            self.b[8].clicked.connect(self._at_capture)
+            self._build_1133(t)
         else:
             self.first = None
             self.second = Linked(self.b[9403], self.b[9406], self.b[9410], 0, 100, 0, on_change=self._edited,
@@ -440,34 +424,82 @@ class NoiseDialog(QDialog):
         self.setWindowTitle(self.res.tr("Noise Reduction", ("Noise Reduction Dialog",)))
         self.setFixedSize(*self.res.size(self.res.pe.dialog(rid).size))
 
+    def _build_1133(self, t):
+        b, res = self.b, self.res
+        kind = self.caps.noise_controls(t)
+        for cid in RADIUS_TICKS[1:-1] + (1245,):
+            b[cid].hide()
+        if kind == "strength":
+            # Expert: one Strength slider (0..100 %); the radius row is hidden.
+            b[1348].setText(res.s(62119))
+            for cid in (1347, 9402, 9405, 9409) + RADIUS_TICKS:
+                b[cid].hide()
+            self.first = None
+            self.second = Linked(b[9403], b[9406], b[9410], 0, 100, 0, on_change=self._edited,
+                                 invalid=self.invalid)
+            self.second.set(self.values_["noise_strength"])
+        else:
+            lo, hi = pipeline.NOISE_RADIUS_RANGE.get(t, (1, 10))
+            step = 2 if t == "basic" else 1
+            b[1347].setText(res.s(62118))
+            b[1348].setText(res.s(62117))
+            # Ticks: first and last radius of the type (Advanced shows its "4" at the right end).
+            b[1233].setText(str(lo))
+            b[1234].setText(str(hi))
+            self.first = Linked(b[9402], b[9405], b[9409], lo, hi, 0, step=step, on_change=self._edited,
+                                invalid=self.invalid)
+            self.first.slider.setTickInterval(step)
+            self.first.slider.setPageStep(step)
+            self.first.set(self.values_["noise_radius"])
+            self.second = Linked(b[9403], b[9406], b[9410], 0, 100, 0, on_change=self._edited,
+                                 invalid=self.invalid)
+            self.second.set(self.values_["noise_strength"])
+            enabled = kind == "radius"
+            for cid in (9402, 9403, 9405, 9406, 9409, 9410):
+                b[cid].setEnabled(enabled)
+        enabled = kind != "none"
+        for cid, name in ((7, "low"), (10, "medium"), (9, "high")):
+            b[cid].clicked.connect(lambda _=False, n=name: self._preset(n))
+            b[cid].setEnabled(enabled)
+        b[8].clicked.connect(self._at_capture)
+
     def invalid(self, lo, hi):
         message(self, self.res, self.res.s(62063, lo, hi))
 
     def _type_changed(self):
         t = self.b[1219].currentData()
-        old_rid = self.rid
         self.values_["noise_type"] = t
-        if self._template_for(t) != old_rid or old_rid == 1133:
+        if self.rid == 1133:
+            # Photo Desk switches to the type's Medium preset (keeps it within the new range).
+            pipeline.apply_noise_preset(self.values_, "medium", self.presets)
             self._build()
+        elif self._template_for(t) != self.rid:
+            self._build()
+        else:
+            on = t == "moire"
+            for cid in (9403, 9406, 9410):
+                self.b[cid].setEnabled(on)
+            self.b[1224].setText("" if on or t == "none" else self.res.s(62046))
         self.changed()
 
     def _edited(self):
         t = self.values_["noise_type"]
         if self.rid == 1133:
-            if t == "expert":
-                self.values_["noise_strength"], self.values_["noise_luma"] = self.first.value(), self.second.value()
+            if self.first is None:
+                self.values_["noise_strength"] = self.values_["noise_luma"] = self.second.value()
             else:
-                self.values_["noise_radius"], self.values_["noise_strength"] = self.first.value(), self.second.value()
+                r = self.first.value()
+                if t == "basic":
+                    r = min(6, max(2, 2 * round(r / 2)))
+                    if r != self.first.value():
+                        self.first.set(r)
+                self.values_["noise_radius"], self.values_["noise_strength"] = r, self.second.value()
         else:
             self.values_["moire_threshold"] = self.second.value()
         self.changed()
 
     def _preset(self, name):
-        r, s = pipeline.NOISE_PRESETS[name]
-        if self.values_["noise_type"] == "expert":
-            self.values_["noise_strength"] = self.values_["noise_luma"] = s
-        else:
-            self.values_["noise_radius"], self.values_["noise_strength"] = r, s
+        pipeline.apply_noise_preset(self.values_, name, self.presets)
         self._build()
         self.changed()
 

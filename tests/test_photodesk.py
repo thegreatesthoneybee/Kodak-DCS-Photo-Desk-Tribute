@@ -54,7 +54,7 @@ def test_camera_looks():
     assert camera.capabilities("DCS560").noise_types == ("none", "basic", "advanced")
     assert camera.capabilities("DCS760C").noise_types == ("none", "basic", "advanced", "moire")
     assert camera.capabilities("ProBack645").noise_types == ("none", "basic", "advanced", "moire")
-    assert camera.capabilities("DCS Pro SLR/n").noise_types == ("none", "advanced", "moire", "expert")
+    assert camera.capabilities("DCS Pro SLR/n").noise_types == ("none", "basic", "advanced", "moire", "expert")
 
 
 def test_custom_looks_in_system_folders(profile_dir, tmp_path, monkeypatch):
@@ -138,6 +138,47 @@ def test_lens_strength_recorded_by_camera():
     assert pipeline.capture_settings(SLR_C_SAMPLE).lens_optimization == 24
     # The 14n has no Lens Optimization even though it writes the tag (as zeros).
     assert "lens_optimization" not in camera.capture_info(PRO14N_SAMPLE, "DCS Pro 14N")
+
+
+DCS560_SAMPLE = ROOT / "raw/560/3R7D2667.TIF"
+
+
+@pytest.mark.skipif(not (DCS560_SAMPLE.is_file() and SAMPLE.is_file()), reason="samples not available")
+def test_custom_balance_uses_camera_balance_point():
+    # Kodak tags 2120-2125 are the camera's balance points; Custom is tag 2124 (0x84C).
+    bp = camera.balance_points(DCS560_SAMPLE)
+    assert bp["custom"] == (288, 412, 130) and bp["Daylight"] == (2069, 2303, 1175)
+    assert camera.capture_info(DCS560_SAMPLE, "DCS560C")["white_balance"] == "custom"
+    raw560 = pipeline.decode(DCS560_SAMPLE, half_size=True)
+    custom = pipeline.white_balance(raw560, pipeline.Settings(balance="custom"))
+    np.testing.assert_allclose(custom, [412 / 288, 1, 412 / 130])
+    # Older DCS images take the Preset balance from the lighting's balance point as well.
+    np.testing.assert_allclose(pipeline.preset_wb(raw560, "Tungsten"), [2233 / 2310, 1, 2233 / 923])
+    # The camera shot it with its Custom setting: At Capture selects the Custom balance.
+    assert pipeline.capture_settings(DCS560_SAMPLE).balance == "custom"
+    # Pro Back: Custom differs from Preset (it used to fall back to the as-shot balance).
+    pb = pipeline.decode(SAMPLE, half_size=True)
+    assert not np.allclose(pipeline.white_balance(pb, pipeline.Settings(balance="custom")),
+                           pipeline.white_balance(pb, pipeline.Settings()))
+
+
+def test_noise_presets_and_ranges():
+    v = {"noise_type": "advanced", "noise_radius": 1, "noise_strength": 0, "noise_luma": 0}
+    presets = pipeline.noise_presets()
+    assert pipeline.apply_noise_preset(dict(v), "low", presets)["noise_radius"] == 2
+    assert pipeline.apply_noise_preset(dict(v), "high", presets)["noise_radius"] == 3   # level 80 <= 83
+    assert pipeline.apply_noise_preset(dict(v), "medium", presets)["noise_strength"] == 50
+    moire = pipeline.apply_noise_preset(dict(v, noise_type="moire"), "high", presets)
+    assert (moire["noise_radius"], moire["noise_strength"]) == (8, 80)
+    assert pipeline.apply_noise_preset(dict(v, noise_type="basic"), "medium", presets)["noise_radius"] == 4
+    assert pipeline.apply_noise_preset(dict(v, noise_type="expert"), "low", presets)["noise_strength"] == 50
+    pb, old = camera.capabilities("ProBack645"), camera.capabilities("DCS560C")
+    assert pb.noise_controls("moire") == "radius" and pb.noise_controls("expert") == "strength"
+    assert old.noise_controls("moire") == "threshold" and old.noise_controls("advanced") == "none"
+    if SLR_C_SAMPLE.is_file():
+        # Pro SLR files carry the preset tables (Kodak tags 3695 and 3683).
+        p = pipeline.noise_presets(SLR_C_SAMPLE)
+        assert p["radius"] == ((20, 23), (50, 50), (80, 80)) and p["expert"] == (50, 70, 80)
 
 
 def test_lab_xyz_roundtrip():

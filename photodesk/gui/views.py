@@ -99,11 +99,14 @@ class ThumbIcons:
             out["sharpen"] = (s(62040).replace("^", f"{st.sharpen_amount:.1f}")
                               .replace("%", f"{st.sharpen_radius:.1f}").replace("#", str(st.sharpen_threshold)))
         nt = st.noise_type
-        if nt == "expert":
+        kind = e.caps.noise_controls(nt)
+        if kind == "strength":
             out["noise"] = s(62123).replace("%d%%", f"{st.noise_strength}%")
-        elif nt == "moire" and not e.caps.pro_slr:
+        elif kind == "threshold":
             out["noise"] = s(62029).replace("^", str(st.moire_threshold))
-        elif nt in ("basic", "advanced", "moire"):
+        elif kind == "none" and nt != "none":
+            out["noise"] = s({"basic": 33141, "advanced": 33142}[nt])
+        elif kind == "radius":
             fmt = s({"basic": 62047, "advanced": 62041, "moire": 62042}[nt])
             out["noise"] = fmt.replace("%d%%", f"{st.noise_strength}%").replace("%d", str(st.noise_radius), 1)
         return out

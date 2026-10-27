@@ -40,7 +40,7 @@ class Capabilities:
     """Processing options Photo Desk offers for a camera model."""
     dcs: bool              # DCS raw file (all processing options); False for other cameras
     pro_back: bool         # DCS Pro Back: +-1 EV, no Auto Scene Balance / Auto Exposure, no .wb files
-    pro_slr: bool          # DCS Pro 14n/14nx/SLR: Advanced/Moire/Expert noise reduction
+    pro_slr: bool          # DCS Pro 14n/14nx/SLR: Basic/Advanced/Moire/Expert noise reduction
     lens_optimization: bool
     look_set: tuple = None  # restricted Looks of older cameras (None: every installed Look)
     # Other DCS cameras (help: Reducing Noise): Basic for the 300/500/600/700 series and Pro Backs,
@@ -68,8 +68,28 @@ class Capabilities:
         if self.unlocked:
             return ALL_NOISE_TYPES
         if self.pro_slr:
-            return ("none", "advanced", "moire", "expert")
+            return ("none", "basic", "advanced", "moire", "expert")
         return self.other_noise_types
+
+    @property
+    def pro_image(self):
+        """Pro Back / Pro SLR file, which Photo Desk processes through the camera DLL (ProImage):
+        Radius/Strength noise reduction with presets, instead of the older DCS Moire threshold."""
+        return self.pro_back or self.pro_slr
+
+    def noise_controls(self, noise_type):
+        """Settings the Noise Reduction dialog offers for a type: "none", "radius" (Radius and
+        Strength), "strength" (Expert) or "threshold" (older DCS Advanced with Moire Reduction)."""
+        if noise_type == "none":
+            return "none"
+        if noise_type == "expert":
+            return "strength"
+        if not self.pro_image:
+            if noise_type == "moire":
+                return "threshold"
+            if not self.unlocked:
+                return "none"
+        return "radius"
 
     def looks(self, available):
         """Looks this camera supports, from [(file name, description)] (help: Setting the Image Look)."""
@@ -146,11 +166,18 @@ def _ifd0_strings(path, tags):
     return vals
 
 
-_TIFF_INTS = {1: "B", 3: "H", 4: "I", 8: "h", 9: "i"}
+_TIFF_INTS = {1: "B", 3: "H", 4: "I", 8: "h", 9: "i", 5: "II", 10: "ii"}   # 5/10: rationals
 KODAK_IFD = 0x8290
 # Kodak IFD tags 2654-2656: [56, 0, strength, 0] per channel, the Lens Optimization strength the
 # camera applied (DCSPro3SLR/DCSPro4SLR.dll read them and accept strengths of 0..99).
 LENS_STRENGTH_TAG = 2654
+# Kodak IFD tags 2120-2125: camera RGB of a neutral under each white balance setting of the camera
+# (Daylight, Tungsten, Fluorescent, Flash, Custom, Auto); tag 1020 is the setting used for the shot.
+# Photo Desk takes the Preset balance from the lighting's point and Custom from tag 2124 (0x84C).
+BALANCE_POINT_TAGS = {"Daylight": 2120, "Tungsten": 2121, "Fluorescent": 2122, "Flash": 2123,
+                      "custom": 2124, "camera_auto": 2125}
+WB_SETTING_TAG = 1020
+WB_SETTINGS = ("Daylight", "Tungsten", "Fluorescent", "Flash", "custom", "camera_auto")
 
 
 def read_kodak_tags(path, tags):
@@ -187,13 +214,26 @@ def read_kodak_tags(path, tags):
                 f.seek(struct.unpack(bo + "I", val)[0])
                 raw = f.read(size)
             if len(raw) == size:
-                out[tag] = struct.unpack(bo + code * cnt, raw)
+                v = struct.unpack(bo + code * cnt, raw)
+                if len(code) == 2:
+                    v = tuple(n / d if d else 0.0 for n, d in zip(v[::2], v[1::2]))
+                out[tag] = v
     return out
+
+
+def balance_points(path):
+    """{"Daylight"|...|"custom"|"camera_auto": (R, G, B)} neutral points the camera recorded."""
+    tags = read_kodak_tags(path, tuple(BALANCE_POINT_TAGS.values()))
+    return {k: tuple(float(x) for x in tags[t]) for k, t in BALANCE_POINT_TAGS.items()
+            if len(tags.get(t, ())) == 3 and all(x > 0 for x in tags[t])}
 
 
 def capture_info(path, model):
     """Processing settings the camera recorded with the image, for At Capture / Auto buttons."""
     info = {"model": model}
+    v = read_kodak_tags(path, (WB_SETTING_TAG,)).get(WB_SETTING_TAG)
+    if v and 0 <= v[0] < len(WB_SETTINGS):
+        info["white_balance"] = WB_SETTINGS[v[0]]
     if capabilities(model).lens_optimization:
         v = read_kodak_tags(path, (LENS_STRENGTH_TAG,)).get(LENS_STRENGTH_TAG)
         if v and len(v) >= 3 and 0 <= v[2] <= 99:

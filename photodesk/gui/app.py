@@ -664,7 +664,8 @@ class MainWindow(QMainWindow):
     def active_document(self):
         if self._active_window is not None and self.is_open_document(self._active_window):
             return self._active_window
-        return self.mdi.activeSubWindow()
+        # currentSubWindow stays set while another top-level window (popup, dialog) has focus.
+        return self.mdi.currentSubWindow()
 
     def is_open_document(self, window):
         if getattr(window, "floating", False):
@@ -1829,7 +1830,8 @@ class MainWindow(QMainWindow):
         capture = pipeline.capture_settings(focus.path)
         dlg = dialog_cls(self.res, self, focus.settings, preview, *args, mixed=mixed, capture=capture, **kw) \
             if dialog_cls is not D.NoiseDialog else dialog_cls(self.res, self, focus.settings, preview, focus.caps,
-                                                               mixed=mixed, capture=capture)
+                                                               mixed=mixed, capture=capture,
+                                                               presets=pipeline.noise_presets(focus.path))
         ok = dlg.exec() == D.QDialog.Accepted
         values = dlg.values()
         for e in entries:
