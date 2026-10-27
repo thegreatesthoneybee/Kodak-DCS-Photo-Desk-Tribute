@@ -3,7 +3,8 @@
 Everything visible in the original interface (menus, toolbar, dialogs and
 panels laid out in dialog units, bitmaps, cursors, strings) is read from the
 user's PhotoDsk.exe, which ``photodesk install-profiles`` stores next to the
-Kodak profiles.  Strings go through the official translation table
+Kodak profiles, or from the interface resource pack (PhotoDeskUI.pack, no
+program code) that release builds ship instead.  Strings go through the official translation table
 (PhotoDeskUIStrings.u16) for the selected language.
 """
 import functools
@@ -19,8 +20,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QPushButton, QRadioButton, QSizePolicy, QSlider, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .. import profiles, ui_strings
-from ..peres import PEResources
+from .. import peres, profiles, ui_strings
 
 SS_TYPEMASK, SS_ICON, SS_BITMAP, SS_CENTER, SS_RIGHT = 0x1F, 0x03, 0x0E, 0x01, 0x02
 ES_MULTILINE, ES_READONLY, ES_CENTER, ES_RIGHT = 0x4, 0x800, 0x1, 0x2
@@ -53,7 +53,7 @@ class MissingResources(RuntimeError):
 
 class Resources:
     def __init__(self, exe_bytes, table_bytes=None, language=None):
-        self.pe = PEResources(exe_bytes)
+        self.pe = peres.load(exe_bytes)
         self.language = language or ui_strings.system_language()
         self.tr = ui_strings.Translator(table_bytes, self.language)
         self.strings = self.pe.strings()
@@ -62,11 +62,11 @@ class Resources:
     @classmethod
     def load(cls, language=None):
         d = profiles.ui_dir()
-        exe = d / "PhotoDsk.exe"
-        if not exe.is_file():
-            raise MissingResources(str(exe))
+        source = next((d / n for n in (profiles.UI_PACK, "PhotoDsk.exe") if (d / n).is_file()), None)
+        if source is None:
+            raise MissingResources(str(d / "PhotoDsk.exe"))
         table = d / "PhotoDeskUIStrings.u16"
-        return cls(exe.read_bytes(), table.read_bytes() if table.is_file() else None, language)
+        return cls(source.read_bytes(), table.read_bytes() if table.is_file() else None, language)
 
     # ---------------------------------------------------------------- strings
     def s(self, sid, *args, context=("Pop-Up Message", "Common Strings", "Common")):

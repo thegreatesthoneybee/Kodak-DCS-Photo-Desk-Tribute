@@ -1,8 +1,9 @@
 """Kodak ICC profile management.
 
-The Kodak profiles are copyrighted and are not redistributed with this
-program.  ``install_from_installer`` unpacks them from the user's own copy of
-the original ``Photo_Desk_V_4_3_0.exe`` without executing it.
+``install_from_installer`` unpacks the Kodak profiles, the interface resources and
+the help files from the user's own copy of the original ``Photo_Desk_V_4_3_0.exe``
+without executing it.  Release builds bundle the profiles, the translation table
+and an interface resource pack (no program code, no help files).
 """
 import os
 import sys
@@ -15,6 +16,9 @@ PROFILE_GROUPS = ("Standard ICC Profiles", "Custom Looks ICC Profiles")
 # layouts, menus, toolbar, bitmaps and cursors; the .u16 file holds the
 # official translations of every UI string.
 UI_FILES = ("PhotoDsk.exe", "PhotoDeskUIStrings.u16")
+# Release builds bundle the profiles plus only the interface resources of PhotoDsk.exe
+# (peres.write_pack), never the executable itself or the help files.
+UI_PACK = "PhotoDeskUI.pack"
 # Help Topics: the original HTML help of each language (installer file groups "Help Files - <name>").
 HELP_GROUPS = ("English", "French", "German", "Italian", "Japanese", "Korean", "Portuguese",
                "Simplified Chinese", "Spanish", "Traditional Chinese")
@@ -41,9 +45,13 @@ def profile_dir():
 
 
 def bundled_profile_dir():
-    if not getattr(sys, "frozen", False) or sys.platform != "darwin":
+    """Profiles shipped inside a frozen build: PhotoDesk.app/Contents/Resources/profiles on macOS,
+    _internal/profiles next to PhotoDesk.exe on Windows."""
+    if not getattr(sys, "frozen", False):
         return None
-    return Path(sys.executable).resolve().parent.parent / "Resources" / "profiles"
+    if sys.platform == "darwin":
+        return Path(sys.executable).resolve().parent.parent / "Resources" / "profiles"
+    return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "profiles"
 
 
 def _cabinet(installer_bytes):
@@ -106,10 +114,13 @@ def ui_dir(dest=None):
 def help_file(language, dest=None):
     """PHOTODSK.chm for a UI language name (falls back to English)."""
     group = {"Chinese": "Simplified Chinese", "Portugese": "Portuguese"}.get(language, language)
-    for g in (group, "English"):
-        p = ui_dir(dest) / "help" / g / "PHOTODSK.chm"
-        if p.is_file():
-            return p
+    # Release builds carry no help files; an install-profiles run puts them in the user data folder.
+    roots = [ui_dir(dest)] if dest else list(dict.fromkeys([ui_dir(), data_dir() / "profiles" / "ui"]))
+    for root in roots:
+        for g in (group, "English"):
+            p = root / "help" / g / "PHOTODSK.chm"
+            if p.is_file():
+                return p
     return None
 
 

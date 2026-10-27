@@ -1,5 +1,7 @@
 # PyInstaller spec: builds PhotoDesk.exe (Windows x64) or PhotoDesk.app (macOS arm64).
 # Run from the repository root:  pyinstaller packaging/photodesk.spec
+import os
+import shutil
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -10,7 +12,7 @@ from PyInstaller.utils.hooks import collect_dynamic_libs
 repo_root = Path(SPECPATH).resolve().parent
 sys.path.insert(0, str(repo_root))  # the package need not be pip-installed to build
 from photodesk import APP_NAME, AUTHOR, BASED_ON, __version__
-from photodesk.peres import PEResources
+from photodesk import peres, profiles
 
 version_tuple = tuple(int(part) for part in __version__.split(".")) + (0,) * (4 - len(__version__.split(".")))
 
@@ -18,30 +20,32 @@ block_cipher = None
 
 datas = []
 app_icon = None
-if sys.platform == "darwin":
-    installed_profiles = Path.home() / "Library/Application Support/PhotoDesk/profiles"
-    required = [
-        installed_profiles / "ERIMM_PCS3.icm",
-        installed_profiles / "ui/PhotoDsk.exe",
-        installed_profiles / "ui/PhotoDeskUIStrings.u16",
-    ]
-    if not all(resource.is_file() for resource in required):
-        raise SystemExit(
-            "Kodak profiles are required for the macOS app bundle. Install them from your "
-            "Photo_Desk_V_4_3_0.exe first."
-        )
-    datas.extend(
-        (str(profile), "profiles")
-        for profile in installed_profiles.glob("*.icm")
-    )
-    datas.extend(
-        (str(resource), "profiles/ui")
-        for resource in (installed_profiles / "ui").glob("*")
-    )
-    app_icon = Path("build/PhotoDesk.icns").resolve()
-    app_icon.parent.mkdir(parents=True, exist_ok=True)
-    original_icon = PEResources(required[1].read_bytes()).icon(128)
-    with Image.open(BytesIO(original_icon)) as image:
+
+# Bundle the user's installed Kodak profiles, the official translation table and the interface
+# resources of PhotoDsk.exe (dialogs, menus, bitmaps, strings) as a pack without its program code.
+# The original executable and the help files are never shipped.
+installed_profiles = Path(os.environ.get("PHOTODESK_PROFILES") or profiles.data_dir() / "profiles")
+required = [installed_profiles / "ERIMM_PCS3.icm", installed_profiles / "ui/PhotoDsk.exe",
+            installed_profiles / "ui/PhotoDeskUIStrings.u16"]
+original = None
+if all(resource.is_file() for resource in required):
+    staging = Path(workpath) / "bundled_profiles"
+    shutil.rmtree(staging, ignore_errors=True)
+    (staging / "ui").mkdir(parents=True)
+    for profile in installed_profiles.glob("*.icm"):
+        shutil.copy2(profile, staging / profile.name)
+    shutil.copy2(required[2], staging / "ui" / required[2].name)
+    original = peres.PEResources(required[1].read_bytes())
+    (staging / "ui" / profiles.UI_PACK).write_bytes(peres.write_pack(original))
+    datas.append((str(staging), "profiles"))
+    print(f"Bundling Kodak profiles and interface resources from {installed_profiles}")
+else:
+    # e.g. CI: the app then asks for Photo_Desk_V_4_3_0.exe on first start.
+    print(f"WARNING: no Kodak profiles in {installed_profiles}; building without bundled profiles")
+
+if sys.platform == "darwin" and original is not None:
+    app_icon = Path(workpath) / "PhotoDesk.icns"
+    with Image.open(BytesIO(original.icon(128))) as image:
         image.convert("RGBA").save(app_icon, format="ICNS")
 elif sys.platform == "win32":
     from PyInstaller.utils.win32.versioninfo import (FixedFileInfo, StringFileInfo, StringStruct, StringTable,
@@ -93,7 +97,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="PhotoDesk.app",
-        icon=str(app_icon),
+        icon=str(app_icon) if app_icon else None,
         bundle_identifier="org.photodesk.PhotoDesk",
         info_plist={
             "CFBundleName": "PhotoDesk",

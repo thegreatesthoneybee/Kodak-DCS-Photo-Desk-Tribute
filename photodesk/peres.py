@@ -3,12 +3,17 @@
 The executable is never run; only its resource section is parsed so that the
 reimplementation can use the original dialog layouts, menus, toolbar,
 accelerators, string table, bitmaps and cursors.
+
+A resource pack (``write_pack``) holds just those resources, without the program
+code, so release builds can ship the interface without the original executable.
 """
 import struct
+import zlib
 
-RT_CURSOR, RT_BITMAP, RT_ICON, RT_MENU, RT_DIALOG, RT_STRING = 1, 2, 3, 4, 5, 6
-RT_ACCELERATOR, RT_GROUP_CURSOR, RT_GROUP_ICON = 9, 12, 14
-RT_TOOLBAR = 241
+PACK_MAGIC = b"PDRES1\0\0"
+# Resource types the reimplementation reads (RT_ICON/RT_CURSOR via their groups).
+PACK_TYPES = (RT_CURSOR := 1, RT_BITMAP := 2, RT_ICON := 3, RT_MENU := 4, RT_DIALOG := 5, RT_STRING := 6,
+              RT_ACCELERATOR := 9, RT_GROUP_CURSOR := 12, RT_GROUP_ICON := 14, RT_TOOLBAR := 241)
 
 _CONTROL_CLASSES = {0x80: "Button", 0x81: "Edit", 0x82: "Static", 0x83: "ListBox",
                     0x84: "ScrollBar", 0x85: "ComboBox"}
@@ -77,61 +82,14 @@ class Dialog:
         return next(c for c in self.controls if c.id == cid)
 
 
-class PEResources:
-    def __init__(self, data):
-        self.data = data
-        pe, = struct.unpack_from("<I", data, 0x3C)
-        if data[pe:pe + 4] != b"PE\0\0":
-            raise ValueError("not a PE file")
-        nsec, = struct.unpack_from("<H", data, pe + 6)
-        opt_size, = struct.unpack_from("<H", data, pe + 20)
-        opt = pe + 24
-        magic, = struct.unpack_from("<H", data, opt)
-        dd = opt + (96 if magic == 0x10B else 112)
-        self._rsrc_rva, _ = struct.unpack_from("<II", data, dd + 2 * 8)
-        self._sections = []
-        for i in range(nsec):
-            s = opt + opt_size + 40 * i
-            vsize, va, rsize, raw = struct.unpack_from("<IIII", data, s + 8)
-            self._sections.append((va, max(vsize, rsize), raw))
-        self._base = self._offset(self._rsrc_rva)
-        self.tree = self._read_dir(0, 0)
-
-    def _offset(self, rva):
-        for va, size, raw in self._sections:
-            if va <= rva < va + size:
-                return rva - va + raw
-        raise ValueError(f"RVA {rva:#x} outside sections")
-
-    def _read_dir(self, off, depth):
-        b = self.data
-        p = self._base + off
-        named, ids = struct.unpack_from("<HH", b, p + 12)
-        out = {}
-        for i in range(named + ids):
-            name, target = struct.unpack_from("<II", b, p + 16 + 8 * i)
-            if name & 0x80000000:
-                q = self._base + (name & 0x7FFFFFFF)
-                n, = struct.unpack_from("<H", b, q)
-                key = b[q + 2:q + 2 + 2 * n].decode("utf-16le")
-            else:
-                key = name
-            if target & 0x80000000:
-                out[key] = self._read_dir(target & 0x7FFFFFFF, depth + 1)
-            else:
-                rva, size = struct.unpack_from("<II", b, self._base + target)
-                out[key] = (rva, size)
-        return out
+class Resources:
+    """Typed views over raw resources; subclasses provide raw() and ids()."""
 
     def raw(self, rtype, rid):
-        langs = self.tree[rtype][rid]
-        entry = langs.get(1033) or next(iter(langs.values()))
-        rva, size = entry
-        o = self._offset(rva)
-        return self.data[o:o + size]
+        raise NotImplementedError
 
     def ids(self, rtype):
-        return list(self.tree.get(rtype, {}))
+        raise NotImplementedError
 
     # ------------------------------------------------------------------ typed
     def dialog(self, rid):
@@ -217,3 +175,95 @@ class PEResources:
             out += struct.pack("<BBBBHHII", w, h, cc, r, planes, bpp, len(img), off)
             off += len(img)
         return out + b"".join(images)
+
+
+class PackResources(Resources):
+    """Resources read from a pack written by write_pack()."""
+
+    def __init__(self, data):
+        if data[:8] != PACK_MAGIC:
+            raise ValueError("not a Photo Desk resource pack")
+        b = zlib.decompress(data[8:])
+        n, = struct.unpack_from("<I", b, 0)
+        o = 4
+        self._res = {}
+        for _ in range(n):
+            rtype, rid, size = struct.unpack_from("<III", b, o)
+            o += 12
+            self._res.setdefault(rtype, {})[rid] = b[o:o + size]
+            o += size
+
+    def raw(self, rtype, rid):
+        return self._res[rtype][rid]
+
+    def ids(self, rtype):
+        return list(self._res.get(rtype, {}))
+
+
+def write_pack(res):
+    """Serialise the interface resources (no program code) of a Resources object."""
+    items = [(t, rid, res.raw(t, rid)) for t in PACK_TYPES for rid in res.ids(t) if isinstance(rid, int)]
+    body = struct.pack("<I", len(items)) + b"".join(struct.pack("<III", t, rid, len(d)) + d for t, rid, d in items)
+    return PACK_MAGIC + zlib.compress(body, 9)
+
+
+def load(data):
+    """PackResources for a pack, PEResources for an executable."""
+    return PackResources(data) if data[:8] == PACK_MAGIC else PEResources(data)
+
+
+class PEResources(Resources):
+    def __init__(self, data):
+        self.data = data
+        pe, = struct.unpack_from("<I", data, 0x3C)
+        if data[pe:pe + 4] != b"PE\0\0":
+            raise ValueError("not a PE file")
+        nsec, = struct.unpack_from("<H", data, pe + 6)
+        opt_size, = struct.unpack_from("<H", data, pe + 20)
+        opt = pe + 24
+        magic, = struct.unpack_from("<H", data, opt)
+        dd = opt + (96 if magic == 0x10B else 112)
+        self._rsrc_rva, _ = struct.unpack_from("<II", data, dd + 2 * 8)
+        self._sections = []
+        for i in range(nsec):
+            s = opt + opt_size + 40 * i
+            vsize, va, rsize, raw = struct.unpack_from("<IIII", data, s + 8)
+            self._sections.append((va, max(vsize, rsize), raw))
+        self._base = self._offset(self._rsrc_rva)
+        self.tree = self._read_dir(0, 0)
+
+    def _offset(self, rva):
+        for va, size, raw in self._sections:
+            if va <= rva < va + size:
+                return rva - va + raw
+        raise ValueError(f"RVA {rva:#x} outside sections")
+
+    def _read_dir(self, off, depth):
+        b = self.data
+        p = self._base + off
+        named, ids = struct.unpack_from("<HH", b, p + 12)
+        out = {}
+        for i in range(named + ids):
+            name, target = struct.unpack_from("<II", b, p + 16 + 8 * i)
+            if name & 0x80000000:
+                q = self._base + (name & 0x7FFFFFFF)
+                n, = struct.unpack_from("<H", b, q)
+                key = b[q + 2:q + 2 + 2 * n].decode("utf-16le")
+            else:
+                key = name
+            if target & 0x80000000:
+                out[key] = self._read_dir(target & 0x7FFFFFFF, depth + 1)
+            else:
+                rva, size = struct.unpack_from("<II", b, self._base + target)
+                out[key] = (rva, size)
+        return out
+
+    def raw(self, rtype, rid):
+        langs = self.tree[rtype][rid]
+        entry = langs.get(1033) or next(iter(langs.values()))
+        rva, size = entry
+        o = self._offset(rva)
+        return self.data[o:o + size]
+
+    def ids(self, rtype):
+        return list(self.tree.get(rtype, {}))

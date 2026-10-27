@@ -54,7 +54,25 @@ python tests/gui_commands.py raw /tmp/pdshots
 
 두 스크립트는 `$TEMP`(없으면 `/tmp`)의 `photodesk_test.ini`를 설정 파일로 씁니다. 그래서 실제 사용자 설정은 바뀌지 않습니다.
 
-## 4. 앱 빌드
+## 4. Kodak 프로파일 설치
+
+빌드하기 **전에** 원본 설치 파일에서 프로파일을 풀어 둡니다. 원본 설치 파일은 실행하지 않고 읽기만 하므로 Mac에서도 동작합니다.
+
+```bash
+python -m photodesk install-profiles vendor/original/Photo_Desk_V_4_3_0.exe
+```
+
+빌드할 때 spec 파일이 이 위치의 프로파일 57개와 번역표, 원본 화면 리소스 묶음(`PhotoDeskUI.pack`, 원본 `PhotoDsk.exe`에서 화면 리소스만 뽑은 것)을 `PhotoDesk.app/Contents/Resources/profiles`에 넣습니다.
+원본 `PhotoDsk.exe`와 도움말(CHM)은 앱에 넣지 않습니다. 프로파일이 없으면 프로파일 없이 빌드되고, 앱을 처음 실행할 때 설치 파일을 묻습니다.
+
+설치 위치는 `~/Library/Application Support/PhotoDesk/profiles`입니다. 프로파일 57개, `ui/PhotoDsk.exe`, `ui/PhotoDeskUIStrings.u16`, `ui/help/<언어>/PHOTODSK.chm`이 들어갑니다.
+GUI를 처음 실행할 때 프로파일이 없으면 설치 파일을 고르는 창이 뜨므로, 이 단계를 GUI에서 해도 됩니다.
+
+다른 위치를 쓰려면 `PHOTODESK_PROFILES=/경로`를 지정합니다. UI 언어를 강제하려면 `PHOTODESK_LANG=Korean`을 지정합니다.
+
+Custom Look 프로파일은 `/Library/ColorSync/Profiles` 또는 `~/Library/ColorSync/Profiles`에 두면 Look 메뉴에 나타납니다(원본 도움말 "Installing Profiles"와 같음).
+
+## 5. 앱 빌드
 
 ```bash
 pyinstaller --noconfirm packaging/photodesk.spec
@@ -69,21 +87,6 @@ file dist/PhotoDesk.app/Contents/MacOS/PhotoDesk        # "arm64"가 보여야 �
 # 프로파일이 없으면 convert는 코드 2로 끝나야 함(충돌하지 않음)
 dist/PhotoDesk.app/Contents/MacOS/PhotoDesk convert nonexistent.DCR -o out; echo $?
 ```
-
-## 5. Kodak 프로파일 설치
-
-앱에는 Kodak 파일이 들어 있지 않습니다. 사용자가 가진 원본 설치 파일에서 풀어 씁니다. 원본 설치 파일은 실행하지 않고 읽기만 하므로 Mac에서도 동작합니다.
-
-```bash
-dist/PhotoDesk.app/Contents/MacOS/PhotoDesk install-profiles vendor/original/Photo_Desk_V_4_3_0.exe
-```
-
-설치 위치는 `~/Library/Application Support/PhotoDesk/profiles`입니다. 프로파일 57개, `ui/PhotoDsk.exe`, `ui/PhotoDeskUIStrings.u16`, `ui/help/<언어>/PHOTODSK.chm`이 들어갑니다.
-GUI를 처음 실행할 때 프로파일이 없으면 설치 파일을 고르는 창이 뜨므로, 이 단계를 GUI에서 해도 됩니다.
-
-다른 위치를 쓰려면 `PHOTODESK_PROFILES=/경로`를 지정합니다. UI 언어를 강제하려면 `PHOTODESK_LANG=Korean`을 지정합니다.
-
-Custom Look 프로파일은 `/Library/ColorSync/Profiles` 또는 `~/Library/ColorSync/Profiles`에 두면 Look 메뉴에 나타납니다(원본 도움말 "Installing Profiles"와 같음).
 
 ## 6. 실행 확인
 
@@ -141,5 +144,5 @@ Mac이 없어도 저장소를 GitHub에 올리면 `build` 워크플로가 `macos
 | `file`에 `x86_64`가 나옴 | Rosetta Python으로 빌드함. arm64 Python으로 가상 환경을 다시 만듦 |
 | `pip install`이 rawpy를 소스로 빌드하려 함 | Python 버전에 맞는 휠이 없음. Python 3.10–3.13 사용 |
 | 앱이 바로 꺼짐 | 터미널에서 `dist/PhotoDesk.app/Contents/MacOS/PhotoDesk`를 직접 실행해 오류 확인 |
-| "Kodak profiles not installed" | 5절의 `install-profiles` 실행 |
+| "Kodak profiles not installed" | 4절의 `install-profiles` 실행 후 다시 빌드 |
 | 앱이 "손상되었습니다"로 열리지 않음 | 격리 속성 문제. 7절의 `xattr -dr com.apple.quarantine` 실행 |

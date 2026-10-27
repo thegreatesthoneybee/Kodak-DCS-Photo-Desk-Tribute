@@ -74,13 +74,17 @@ Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon)에서 네이
 
 ## 최초 설정
 
-원본 설치 파일을 지정합니다. 처음 실행할 때 GUI가 묻고, CLI에서는 다음 명령을 씁니다.
+배포용 빌드(GitHub 릴리즈의 zip)에는 Kodak 프로파일 57개, 번역표(`PhotoDeskUIStrings.u16`), 원본 화면 리소스 묶음(`PhotoDeskUI.pack`)이 들어 있어 바로 실행됩니다.
+화면 리소스 묶음은 원본 `PhotoDsk.exe`에서 대화상자 배치·메뉴·툴바·비트맵·커서·문자열만 뽑은 데이터이며, 원본 프로그램 코드는 들어 있지 않습니다. 원본 도움말(CHM)도 포함하지 않습니다.
+
+소스에서 실행하거나 도움말을 쓰려면 원본 설치 파일을 지정합니다. 처음 실행할 때 GUI가 묻고, CLI에서는 다음 명령을 씁니다.
 
 ```
 photodesk install-profiles Photo_Desk_V_4_3_0.exe
 ```
 
 이 명령은 Kodak 프로파일 57개, `ui/PhotoDsk.exe`, `ui/PhotoDeskUIStrings.u16`, `ui/help/<언어>/PHOTODSK.chm`을 아래 위치에 풉니다.
+배포용 빌드에서도 이 명령을 실행하면 도움말 메뉴가 그 위치의 도움말을 엽니다.
 위치는 환경변수 `PHOTODESK_PROFILES`로 바꿀 수 있습니다.
 
 - Windows: `%APPDATA%\PhotoDesk\profiles`
@@ -111,6 +115,7 @@ python tests/bench.py <DCR 파일> [프로파일 폴더]                # 처리
 pyinstaller --noconfirm packaging/photodesk.spec
 ```
 
+빌드할 때 위 위치에 설치된 프로파일을 찾으면 프로파일·번역표·화면 리소스 묶음을 앱에 넣습니다(원본 exe와 도움말은 넣지 않음). 없으면 프로파일 없이 빌드되고, 앱이 처음 실행될 때 설치 파일을 묻습니다.
 빌드 결과는 Windows가 `dist/PhotoDesk-Windows/PhotoDesk.exe`, macOS가 `dist/PhotoDesk.app`입니다. 폴더가 플랫폼별로 나뉘어 있어, 저장소를 Windows와 Mac이 함께 쓰더라도(시놀로지 등) 한쪽 빌드가 다른 쪽 결과를 지우지 않습니다.
 
 ### 성능

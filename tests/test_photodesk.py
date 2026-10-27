@@ -336,6 +336,29 @@ def test_installer_profiles_and_ui(profile_dir):
 
 
 @need_installer
+def test_interface_pack_replaces_original_exe(profile_dir, tmp_path, monkeypatch):
+    from photodesk import peres
+    from photodesk.gui import res as R
+    exe = (profiles.ui_dir(profile_dir) / "PhotoDsk.exe").read_bytes()
+    original = PEResources(exe)
+    pack = peres.write_pack(original)
+    assert len(pack) < len(exe) // 3 and b"This program cannot be run" not in pack
+    packed = peres.load(pack)
+    assert isinstance(packed, peres.PackResources)
+    assert packed.strings() == original.strings() and packed.menu(128) == original.menu(128)
+    assert packed.dialog(103).size == original.dialog(103).size and packed.icon(128) == original.icon(128)
+    assert packed.bitmap(193) == original.bitmap(193) and packed.cursor(packed.ids(12)[0]) == original.cursor(original.ids(12)[0])
+    # A release layout: profiles + translation table + pack, no PhotoDsk.exe and no help.
+    release = tmp_path / "profiles"
+    (release / "ui").mkdir(parents=True)
+    (release / "ui" / "PhotoDeskUIStrings.u16").write_bytes((profiles.ui_dir(profile_dir) / "PhotoDeskUIStrings.u16").read_bytes())
+    (release / "ui" / profiles.UI_PACK).write_bytes(pack)
+    monkeypatch.setenv("PHOTODESK_PROFILES", str(release))
+    res = R.Resources.load("Korean")
+    assert isinstance(res.pe, peres.PackResources) and res.s(59148)
+
+
+@need_installer
 def test_source_profile_neutral_axis(profile_dir):
     lut = icc.Profile(profile_dir / "DCSPB645DaylightSource.icm").lut()
     lab = icc.lab_decode(lut(np.array([[0.5, 0.5, 0.5], [0.1, 0.1, 0.1]], np.float32)))
