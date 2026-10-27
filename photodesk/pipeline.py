@@ -810,6 +810,175 @@ def sharpen(img, settings, scale=1.0):
     return _clip01(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB))
 
 
+# ------------------------------------------------------------------ Auto noise reduction / sharpening
+# Auto analyses ANALYSIS_GRID x ANALYSIS_GRID tiles of ANALYSIS_TILE pixels spread over the full-size
+# image, rendered without noise reduction and sharpening. Noise is measured on the flattest blocks
+# (Immerkaer's estimator, in 8-bit levels), edge blur on the strongest edges (gradient ratio of the
+# image and a re-blurred copy, as a Gaussian sigma in pixels).
+ANALYSIS_GRID, ANALYSIS_TILE, _BLOCK = 3, 256, 16
+# Noise left after Auto noise reduction (8-bit levels of the working space): chroma noise is
+# removed down to this level, luminance noise only where it is visible grain.
+NOISE_TARGET_CHROMA, NOISE_TARGET_LUMA = 0.3, 0.6
+# Auto sharpening narrows the measured edge blur (Gaussian sigma, full-size pixels) to this fraction,
+# not below SHARPEN_MIN_SIGMA (edges that sharp get no sharpening), with at most the High amount.
+SHARPEN_BLUR_FRACTION, SHARPEN_MIN_SIGMA = 0.85, 0.65
+_IMMERKAER = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
+
+
+def analysis_tiles(raw, settings):
+    """Tiles of the image rendered with settings but without noise reduction and sharpening."""
+    s = settings.copy(noise_type="none", sharpen_amount=0.0, crop=None)
+    h, w = raw.camera_rgb.shape[:2]
+    tw, th = min(1.0, ANALYSIS_TILE * raw.scale / w), min(1.0, ANALYSIS_TILE * raw.scale / h)
+    tiles = []
+    for i in range(ANALYSIS_GRID):
+        for j in range(ANALYSIS_GRID):
+            cx, cy = (j + 1) / (ANALYSIS_GRID + 1), (i + 1) / (ANALYSIS_GRID + 1)
+            tiles.append(render_region(raw, s, (cx - tw / 2, cy - th / 2, cx + tw / 2, cy + th / 2), margin=0))
+    return tiles
+
+
+def _block_noise(ch):
+    """Noise sigma (8-bit levels) of each _BLOCK x _BLOCK block of a channel."""
+    lap = np.abs(cv2.filter2D(ch, -1, _IMMERKAER, borderType=cv2.BORDER_REFLECT))
+    hb, wb = ch.shape[0] // _BLOCK, ch.shape[1] // _BLOCK
+    lap = lap[:hb * _BLOCK, :wb * _BLOCK].reshape(hb, _BLOCK, wb, _BLOCK).mean(axis=(1, 3))
+    return np.sqrt(np.pi / 2) / 6 * 255 * lap
+
+
+def _ycc(img):
+    return cv2.cvtColor(np.ascontiguousarray(img, np.float32), cv2.COLOR_RGB2YCrCb)
+
+
+def _flat_blocks(tiles):
+    """Per tile, the mask of well-exposed blocks whose luminance noise is in the lowest 30 % of all
+    tiles (flat areas, where texture does not count as noise)."""
+    ys = [_ycc(t)[..., 0] for t in tiles]
+    sig = [_block_noise(y) for y in ys]
+    mean = [cv2.resize(y, (s.shape[1], s.shape[0]), interpolation=cv2.INTER_AREA) for y, s in zip(ys, sig)]
+    ok = [(m > 0.06) & (m < 0.94) for m in mean]
+    pool = np.concatenate([s[o] for s, o in zip(sig, ok)])
+    if pool.size < 8:
+        return None
+    limit = np.percentile(pool, 30)
+    return [o & (s <= limit) for s, o in zip(sig, ok)]
+
+
+def image_noise(tiles, flat=None):
+    """(luma, chroma) noise (8-bit levels) of the flat areas of tiles; None if there are none."""
+    flat = flat or _flat_blocks(tiles)
+    if flat is None:
+        return None
+    acc = [[], [], []]
+    for t, m in zip(tiles, flat):
+        ycc = _ycc(t)
+        for c in range(3):
+            acc[c].append(_block_noise(ycc[..., c])[m])
+    y, cr, cb = (float(np.median(np.concatenate(a))) for a in acc)
+    return y, float(np.hypot(cr, cb) / np.sqrt(2))
+
+
+def _noise_values(noise_type, kind, radius, level):
+    if kind == "strength":
+        return {"noise_type": noise_type, "noise_strength": level, "noise_luma": level}
+    if kind == "threshold":
+        return {"noise_type": noise_type, "moire_threshold": level}
+    return {"noise_type": noise_type, "noise_radius": radius, "noise_strength": level}
+
+
+def noise_auto(tiles, settings, caps, noise_type):
+    """Noise Reduction values for noise_type measured on analysis_tiles(): the smallest radius and
+    then the lowest strength that bring the flat areas' noise down to the targets (the gentlest
+    setting, least loss of detail); the strongest setting if the targets cannot be reached.
+    None if the image has no flat areas."""
+    kind = caps.noise_controls(noise_type)
+    if kind == "none":
+        return {"noise_type": noise_type}
+    flat = _flat_blocks(tiles)
+    if flat is None:
+        return None
+    order = np.argsort([m.sum() for m in flat])
+    flat_i = order[-3:]
+    luma_matters = noise_type in ("advanced", "moire", "expert") and kind != "threshold"
+
+    def residual(v):
+        s = settings.copy(**v)
+        out = [reduce_noise(tiles[i], s, 1.0, caps) for i in flat_i]
+        y, c = image_noise(out, [flat[i] for i in flat_i])
+        return max(c / NOISE_TARGET_CHROMA, y / NOISE_TARGET_LUMA if luma_matters else 0)
+
+    if kind == "radius":
+        lo, hi = NOISE_RADIUS_RANGE.get(noise_type, (1, 10))
+        radii = range(lo, hi + 1, 2 if noise_type == "basic" else 1)
+    else:
+        radii = (None,)
+    levels = list(range(0, 101, 5))
+    strongest = None
+    for r in radii:
+        top = _noise_values(noise_type, kind, r, levels[-1])
+        res = residual(top)
+        if res > 1:
+            if strongest is None or res < strongest[0]:
+                strongest = (res, top)
+            continue
+        # The residual falls as the strength rises: the lowest level reaching the targets.
+        a, b = 0, len(levels) - 1
+        while a < b:
+            m = (a + b) // 2
+            if residual(_noise_values(noise_type, kind, r, levels[m])) <= 1:
+                b = m
+            else:
+                a = m + 1
+        return _noise_values(noise_type, kind, r, levels[a])
+    return strongest[1]
+
+
+def edge_blur(tiles):
+    """Median Gaussian sigma (pixels) of the strongest edges in tiles; None without enough edges."""
+    ratios = []
+    for t in tiles:
+        y = _ycc(t)[..., 0]
+        g1 = np.hypot(cv2.Sobel(y, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(y, cv2.CV_32F, 0, 1, ksize=3))
+        yb = cv2.GaussianBlur(y, (0, 0), 1.0)
+        g2 = np.hypot(cv2.Sobel(yb, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(yb, cv2.CV_32F, 0, 1, ksize=3))
+        edges = cv2.Canny((np.clip(y, 0, 1) * 255).astype(np.uint8), 40, 100) > 0
+        m = edges & (g1 > np.percentile(g1, 90)) & (g2 > 1e-4)
+        r = g1[m] / g2[m]
+        ratios.append(r[r > 1.01])
+    r = np.concatenate(ratios)
+    if r.size < 100:
+        return None
+    return float(np.median(1.0 / np.sqrt(r ** 2 - 1)))
+
+
+def sharpen_auto(tiles, settings):
+    """Sharpening (amount, radius, threshold) measured on analysis_tiles(): radius from the edge
+    blur, threshold above the noise so grain is not sharpened, and the lowest amount that narrows
+    the edges to SHARPEN_BLUR_FRACTION of their blur. None if the image has too few edges."""
+    blur = edge_blur(tiles)
+    if blur is None:
+        return None
+    noise = image_noise(tiles)
+    threshold = int(min(25, max(1, round(2.5 * noise[0])))) if noise else SHARPEN_PRESETS["medium"][2]
+    radius = float(min(3.0, max(0.5, round(blur, 1))))
+    target = max(SHARPEN_MIN_SIGMA, SHARPEN_BLUR_FRACTION * blur)
+    top = SHARPEN_PRESETS["high"][0]
+    if blur <= target:
+        return 0.0, radius, threshold
+    lo, hi = 0.5, top                       # edge blur falls as the amount rises
+    s = settings.copy(sharpen_radius=radius, sharpen_threshold=threshold)
+    if (edge_blur([sharpen(t, s.copy(sharpen_amount=hi)) for t in tiles]) or 0) > target:
+        return top, radius, threshold
+    while hi - lo > 0.5:
+        m = round((lo + hi) / 2 * 2) / 2
+        after = edge_blur([sharpen(t, s.copy(sharpen_amount=m)) for t in tiles])
+        if after is None or after <= target:
+            hi = m
+        else:
+            lo = m
+    return float(hi), radius, threshold
+
+
 def orient(img, flip, rotation):
     # LibRaw flip codes: 3 = 180, 5 = 90 CCW, 6 = 90 CW.
     quarter_turns = {0: 0, 3: 2, 5: 3, 6: 1}.get(flip, 0) + rotation

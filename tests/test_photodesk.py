@@ -201,6 +201,56 @@ def test_lens_auto_measures_corner_cast():
     assert pipeline.lens_auto(red) is None
 
 
+def _test_tiles(noise=0.0, blur=0.0, seed=0):
+    """Analysis tiles: flat grey fields with chroma noise, beside step edges blurred by blur px."""
+    import cv2
+    rng = np.random.default_rng(seed)
+    tiles = []
+    for i in range(9):
+        t = np.full((256, 256, 3), 0.45, np.float32)
+        if i % 3 == 0:                                  # detailed tiles: a checkerboard of edges
+            yy, xx = np.mgrid[0:256, 0:256]
+            t[((yy // 32 + xx // 32) % 2) == 1] = 0.75
+            if blur:
+                t = cv2.GaussianBlur(t, (0, 0), blur)
+        t = t + rng.normal(0, noise, (256, 256, 3)).astype(np.float32)
+        tiles.append(np.clip(t, 0, 1))
+    return tiles
+
+
+def test_noise_auto_follows_measured_noise():
+    caps = camera.capabilities("DCS Pro SLR/n")
+    s = pipeline.Settings()
+    quiet, noisy = _test_tiles(0.4 / 255), _test_tiles(3 / 255)
+    assert pipeline.image_noise(noisy)[1] > 4 * pipeline.image_noise(quiet)[1]
+    low = pipeline.noise_auto(quiet, s, caps, "basic")
+    high = pipeline.noise_auto(noisy, s, caps, "basic")
+    assert low["noise_type"] == high["noise_type"] == "basic"
+    assert low["noise_strength"] < high["noise_strength"]
+    assert pipeline.NOISE_RADIUS_RANGE["basic"][0] <= high["noise_radius"] <= pipeline.NOISE_RADIUS_RANGE["basic"][1]
+    # Expert sets one strength; an older DCS image's Advanced with Moire Reduction its threshold.
+    assert set(pipeline.noise_auto(noisy, s, caps, "expert")) == {"noise_type", "noise_strength", "noise_luma"}
+    dcs = camera.capabilities("DCS760C")
+    assert set(pipeline.noise_auto(noisy, s, dcs, "moire")) == {"noise_type", "moire_threshold"}
+    assert pipeline.noise_auto(noisy, s, caps, "none") == {"noise_type": "none"}
+    # nothing flat or well exposed to measure
+    dark = [np.zeros((256, 256, 3), np.float32)] * 9
+    assert pipeline.noise_auto(dark, s, caps, "basic") is None
+
+
+def test_sharpen_auto_follows_edge_blur():
+    s = pipeline.Settings()
+    assert pipeline.edge_blur(_test_tiles(blur=1.5)) > pipeline.edge_blur(_test_tiles(blur=0.5))
+    soft = pipeline.sharpen_auto(_test_tiles(blur=1.5), s)
+    crisp = pipeline.sharpen_auto(_test_tiles(blur=0.3), s)
+    assert soft[0] > crisp[0] and soft[1] > crisp[1]
+    assert 0 < soft[0] <= pipeline.SHARPEN_PRESETS["high"][0]
+    # the threshold rises with the noise so grain is not sharpened
+    assert pipeline.sharpen_auto(_test_tiles(3 / 255, blur=1.5), s)[2] > soft[2]
+    flat = [np.full((256, 256, 3), 0.5, np.float32)] * 9
+    assert pipeline.sharpen_auto(flat, s) is None
+
+
 def test_noise_presets_and_ranges():
     v = {"noise_type": "advanced", "noise_radius": 1, "noise_strength": 0, "noise_luma": 0}
     presets = pipeline.noise_presets()

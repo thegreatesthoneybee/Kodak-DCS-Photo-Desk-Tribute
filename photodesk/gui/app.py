@@ -1936,10 +1936,11 @@ class MainWindow(QMainWindow):
         mixed = any(any(getattr(e.settings, f) != getattr(focus.settings, f) for f in dialog_cls.fields)
                     for e in entries) if dialog_cls.fields else False
         capture = pipeline.capture_settings(focus.path)
-        dlg = dialog_cls(self.res, self, focus.settings, preview, *args, mixed=mixed, capture=capture, **kw) \
-            if dialog_cls is not D.NoiseDialog else dialog_cls(self.res, self, focus.settings, preview, focus.caps,
-                                                               mixed=mixed, capture=capture,
-                                                               presets=pipeline.noise_presets(focus.path))
+        if dialog_cls is D.NoiseDialog:
+            dlg = dialog_cls(self.res, self, focus.settings, preview, focus.caps, *args, mixed=mixed,
+                             capture=capture, presets=pipeline.noise_presets(focus.path))
+        else:
+            dlg = dialog_cls(self.res, self, focus.settings, preview, *args, mixed=mixed, capture=capture, **kw)
         ok = dlg.exec() == D.QDialog.Accepted
         values = dlg.values()
         for e in entries:
@@ -2001,10 +2002,33 @@ class MainWindow(QMainWindow):
         return pipeline.capture_settings(e.path).lens_optimization if k is None else k
 
     def noise_dialog(self):
-        self._adjust(D.NoiseDialog, "noise")
+        focus = self._dialog_focus()
+        if focus:
+            tiles = {}
+            self._adjust(D.NoiseDialog, "noise", lambda t: pipeline.noise_auto(
+                self._analysis_tiles(focus, tiles), focus.settings, focus.caps, t))
 
     def sharpen_dialog(self):
-        self._adjust(D.SharpenDialog, "sharpening")
+        focus = self._dialog_focus()
+        if focus:
+            tiles = {}
+            self._adjust(D.SharpenDialog, "sharpening",
+                         lambda: pipeline.sharpen_auto(self._analysis_tiles(focus, tiles), focus.settings))
+
+    def _dialog_focus(self):
+        sel = self._raw_selection()
+        return (self.focused() if self.focused() in sel else sel[0]) if sel else None
+
+    def _analysis_tiles(self, e, cache):
+        """Full-resolution analysis tiles of e for Auto noise reduction / sharpening, rendered with
+        the settings the dialog was opened on; kept in cache (one dialog) instead of the full decode."""
+        if "tiles" not in cache:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                cache["tiles"] = pipeline.analysis_tiles(pipeline.decode(e.path), e.settings)
+            finally:
+                QApplication.restoreOverrideCursor()
+        return cache["tiles"]
 
     def set_balance(self, bal):
         entries = [e for e in self._raw_selection() if bal in e.caps.balances]

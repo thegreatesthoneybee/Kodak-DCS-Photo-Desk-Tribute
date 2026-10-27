@@ -50,6 +50,32 @@ class TemplateDialog(QDialog):
         return self.res.tr(text, R.DIALOG_CONTEXT.get(self.rid, ()))
 
 
+# Messages of the Auto buttons, which Photo Desk does not have (English unless translated here).
+AUTO_MESSAGES = {
+    "noise": {"English": "The image has too few even areas to measure the noise.",
+              "Korean": "이미지에 노이즈를 잴 수 있는 고른 영역이 너무 적습니다."},
+    "edges": {"English": "The image has too few edges to measure the sharpness.",
+              "Korean": "이미지에 선명도를 잴 수 있는 윤곽이 너무 적습니다."},
+}
+
+
+def auto_message(res, key):
+    texts = AUTO_MESSAGES[key]
+    return texts.get(res.language, texts["English"])
+
+
+def auto_button(dlg, res, below, context):
+    """Auto push button in the free slot above the template's At Capture button ``below`` (where the
+    Lens Optimization dialog has its Auto); Photo Desk's Sharpening and Noise Reduction dialogs have
+    none, Auto there measures the image."""
+    at = dlg.b[below].geometry()
+    b = QPushButton(res.tr("Auto", context), dlg)
+    b.setFont(dlg.b[below].font())
+    b.setGeometry(at.x(), at.y() - (at.height() + res.size((0, 3))[1]), at.width(), at.height())
+    b.show()
+    return b
+
+
 class Linked:
     """Trackbar + edit (+ up-down) bound to one value in [lo, hi] with given decimals."""
 
@@ -320,8 +346,14 @@ class SharpenDialog(AdjustDialog):
     rid, preview_id, capture_id = 1132, 1339, 1345
     fields = ("sharpen_amount", "sharpen_radius", "sharpen_threshold")
 
+    def __init__(self, res, parent, settings, preview, auto, mixed=False, capture=None):
+        self.auto = auto            # () -> (amount, radius, threshold) measured on the image, or None
+        super().__init__(res, parent, settings, preview, mixed, capture)
+
     def setup(self, s):
         if not hasattr(self, "amount"):
+            self.auto_btn = auto_button(self, self.res, self.capture_id, R.DIALOG_CONTEXT.get(self.rid, ()))
+            self.auto_btn.clicked.connect(self._auto)
             self.amount = Linked(self.b[9401], self.b[9404], self.b[9408], 0, 20, 1, on_change=self.changed,
                                  invalid=self._invalid1)
             self.radius = Linked(self.b[9402], self.b[9405], self.b[9409], 0, 10, 1, on_change=self.changed,
@@ -338,7 +370,17 @@ class SharpenDialog(AdjustDialog):
         message(self, self.res, self.res.s(62065).replace("%.1f", f"{lo:.1f}", 1).replace("%.1f", f"{hi:.1f}", 1))
 
     def _preset(self, name):
-        a, r, t = pipeline.SHARPEN_PRESETS[name]
+        self._set_values(pipeline.SHARPEN_PRESETS[name])
+
+    def _auto(self):
+        v = self.auto()
+        if v is None:
+            message(self, self.res, auto_message(self.res, "edges"), "info")
+            return
+        self._set_values(v)
+
+    def _set_values(self, v):
+        a, r, t = v
         self.amount.set(a)
         self.radius.set(r)
         self.thr.set(t)
@@ -367,9 +409,10 @@ class NoiseDialog(QDialog):
     """
     fields = ("noise_type", "noise_radius", "noise_strength", "noise_luma", "moire_threshold")
 
-    def __init__(self, res, parent, settings, preview, caps, mixed=False, capture=None, presets=None):
+    def __init__(self, res, parent, settings, preview, caps, auto, mixed=False, capture=None, presets=None):
         super().__init__(parent)
         self.res, self._preview, self.caps, self.mixed = res, preview, caps, mixed
+        self.auto = auto            # (noise type) -> noise fields measured on the image, or None
         self.capture = capture or pipeline.Settings()
         self.presets = presets or pipeline.noise_presets()
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
@@ -389,7 +432,7 @@ class NoiseDialog(QDialog):
         rid = self._template_for(t)
         preview_on = self.body is not None and self.body.get(self._pid) and self.body[self._pid].isChecked()
         if self.body is not None:
-            for _, w in self.body.all:
+            for w in [w for _, w in self.body.all] + [self.auto_btn]:
                 w.hide()
                 w.deleteLater()
         self.rid = rid
@@ -411,6 +454,10 @@ class NoiseDialog(QDialog):
         self.b[CANCEL].clicked.connect(self.reject)
         self.b[self._pid].setChecked(bool(preview_on))
         self.b[self._pid].toggled.connect(lambda _: self.changed())
+        # Auto above At Capture (template 1133) or above Preview (1134, which has no At Capture).
+        self.auto_btn = auto_button(self, self.res, 8 if rid == 1133 else self._pid, R.DIALOG_CONTEXT.get(rid, ()))
+        self.auto_btn.clicked.connect(self._auto)
+        self.auto_btn.setEnabled(self.caps.noise_controls(t) != "none")
         if rid == 1133:
             self._build_1133(t)
         else:
@@ -505,6 +552,15 @@ class NoiseDialog(QDialog):
 
     def _preset(self, name):
         pipeline.apply_noise_preset(self.values_, name, self.presets)
+        self._build()
+        self.changed()
+
+    def _auto(self):
+        v = self.auto(self.values_["noise_type"])
+        if v is None:
+            message(self, self.res, auto_message(self.res, "noise"), "info")
+            return
+        self.values_.update(v)
         self._build()
         self.changed()
 
