@@ -79,6 +79,8 @@ def _dark_icon(icon):
 # no help is shipped, and the Kodak web links of the Help menu (33158-33167). The Help menu keeps
 # only About Photo Desk.
 NO_HELP = (57667, 57669) + tuple(range(33158, 33168))
+# The Korean table translates About Photo Desk as "포토 데스크 도움말" (help); it opens the program information.
+LABEL_OVERRIDES = {("Korean", 57664): "프로그램 정보(&A)..."}
 MENU_CONTEXTS = ("File Menu", "Edit Menu", "View Menu", "Image Menu", "Info Menu", "Window Menu", "Help Menu")
 
 
@@ -328,7 +330,7 @@ class MainWindow(QMainWindow):
         self.q = QSettings(ini, QSettings.IniFormat) if ini else QSettings(ORG_NAME, APP_NAME)
         self.appearance = self.q.value("Appearance", "light")
         apply_appearance(QApplication.instance(), self.appearance)
-        camera.set_unlock_all(self.q.value("Unlock All Camera Features", False, bool))
+        camera.set_unlock_all(self.q.value("Unlock All Camera Features", True, bool))
         self._light_icons = {}
         self.pdir = str(profiles.profile_dir())
         # Interactive renders (image windows, close-ups, review) use the global pool; contact sheet
@@ -416,9 +418,11 @@ class MainWindow(QMainWindow):
         self.acts = {}
         bar_icons = {cmd: icon for cmd, icon in res.toolbar() if cmd}
         for cmd, text in texts.items():
-            label, _ = R.strip_accel(res.tr(text, MENU_CONTEXTS))
+            label, _ = R.strip_accel(LABEL_OVERRIDES.get((res.language, cmd)) or res.tr(text, MENU_CONTEXTS))
             act = QAction(label, self)
             prompt, tip = res.tip(cmd)
+            if (res.language, cmd) in LABEL_OVERRIDES:
+                tip = label.replace("&", "").rstrip(".")
             act.setStatusTip(prompt)
             act.setToolTip(tip or label.replace("&", ""))
             if cmd in accels:
