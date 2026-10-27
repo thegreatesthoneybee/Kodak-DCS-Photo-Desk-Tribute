@@ -58,8 +58,6 @@ program code and help files are not included.
 
 The software is provided "as is", without warranty of any kind. Keep copies of your original raw files.
 
-Created by GO BANGWON (Korea).
-
 ---
 
 ## 한국어
