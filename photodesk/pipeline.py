@@ -49,8 +49,10 @@ WHITE_POINT_DEFAULT = 5000
 WHITE_POINT_RANGE = (2000, 7500)
 TONE_DEFAULT = (-9.5, 0.0, 3.4)
 TONE_MIN_GAP = 2.0
-SHARPEN_PRESETS = {"none": (0.0, 0.0, 0), "low": (3.0, 0.8, 8), "medium": (6.0, 1.0, 6),
-                   "high": (10.0, 1.2, 4)}
+# Sharpening dialog presets (amount, radius, threshold) as built into Photo Desk 4.3 (DCS SDK
+# defaults and DCSProBack.dll preset tables: amount 0..20, radius in 0.1 steps, threshold 0..255).
+SHARPEN_PRESETS = {"none": (0.0, 0.0, 0), "low": (5.0, 1.0, 2), "medium": (10.0, 1.0, 2),
+                   "high": (17.0, 1.4, 2)}
 NOISE_PRESETS = {"low": (2, 30), "medium": (3, 50), "high": (5, 75)}
 # Crop aspect ratios of the Image Controls panel / Image > Crop Aspect Ratio menu (width, height).
 CROP_RATIOS = {"freeform": None, "square": (1, 1), "2x3l": (3, 2), "3x2p": (2, 3), "4x5l": (5, 4),
@@ -82,9 +84,9 @@ class Settings:
     noise_strength: int = 50            # 0..100 % (Expert: Strength)
     noise_luma: int = 50                # 0..100 % (Expert: Luma Strength)
     moire_threshold: int = 50           # 0..100
-    sharpen_amount: float = 6.0         # 0..20
+    sharpen_amount: float = 10.0        # 0..20 (default: Medium preset)
     sharpen_radius: float = 1.0         # 0.0..10.0
-    sharpen_threshold: int = 6          # 0..255
+    sharpen_threshold: int = 2          # 0..255
     rotation: int = 0                   # extra clockwise rotation in 90-degree steps
     crop: tuple = None                  # (x0, y0, x1, y1) normalised to the oriented image
     tagged: bool = False
@@ -123,24 +125,40 @@ def sidecar_path(raw_path):
 
 
 def at_capture(info):
-    """Settings the image was given by the camera (Use Original Camera Settings)."""
+    """Settings the image was given by the camera (At Capture / Use Original Camera Settings);
+    ``info`` is camera.capture_info() of the image."""
     s = Settings()
     if info is None:
         return s
+    caps = camera.capabilities(info.get("model"))
+    if caps.pro_back or caps.pro_slr:
+        # ProImage (Pro Back / Pro SLR files) falls back to the Low preset, older DCS files to Medium.
+        s.sharpen_amount, s.sharpen_radius, s.sharpen_threshold = SHARPEN_PRESETS["low"]
     if info.get("lighting") in LIGHTINGS:
         s.lighting = info["lighting"]
     if info.get("look"):
         s.look = info["look"]
     if info.get("sharpening") is False:
         s.sharpen_amount, s.sharpen_radius, s.sharpen_threshold = SHARPEN_PRESETS["none"]
+    if "lens_optimization" in info:
+        s.lens_optimization = int(info["lens_optimization"])
     return s
 
 
-def load_settings(raw_path, info=None):
+def capture_settings(raw_path):
+    """at_capture() of a file, reading what the camera recorded in it."""
+    try:
+        _, model = camera.read_make_model(raw_path)
+        return at_capture(camera.capture_info(raw_path, model))
+    except OSError:
+        return Settings()
+
+
+def load_settings(raw_path):
     sc = sidecar_path(raw_path)
     if sc.is_file():
         return Settings.from_json(json.loads(sc.read_text("utf-8")))
-    return at_capture(info)
+    return capture_settings(raw_path)
 
 
 def save_settings(raw_path, settings):
@@ -324,7 +342,7 @@ def white_balance(raw, settings):
 # ----------------------------------------------------------------- exposure/tone
 def exposure_range(raw_or_model):
     model = raw_or_model.model if isinstance(raw_or_model, RawImage) else raw_or_model
-    return 1.0 if camera.capabilities(model).pro_back else 2.0
+    return camera.capabilities(model).exposure_range
 
 
 def scene_luminance(lin):

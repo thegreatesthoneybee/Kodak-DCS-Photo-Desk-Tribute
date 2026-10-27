@@ -480,7 +480,9 @@ class ImageView(QScrollArea):
     # --------------------------------------------------------- tools
     def set_tool(self, tool):
         self.tool = tool
-        self.canvas.setCursor(self.cursors.get(tool, Qt.ArrowCursor))
+        cursor = self.cursors.get(tool, Qt.ArrowCursor)
+        self.canvas.setCursor(cursor)
+        self.viewport().setCursor(cursor)     # also over the margin around a fitted image
 
     def _crop_hit(self, pos):
         """'inside', an edge/corner code like 'l', 'tr', or None."""

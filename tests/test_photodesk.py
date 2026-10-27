@@ -15,7 +15,9 @@ from photodesk.peres import PEResources
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = Path(os.environ.get("PHOTODESK_INSTALLER", ROOT / "vendor/original/Photo_Desk_V_4_3_0.exe"))
-SAMPLE = Path(os.environ.get("PHOTODESK_SAMPLE", ROOT / "raw/4H6B9130.DCR"))
+SAMPLE = Path(os.environ.get("PHOTODESK_SAMPLE", ROOT / "raw/ProBack645/4H6B9130.DCR"))
+SLR_C_SAMPLE = ROOT / "raw/SLRc/F5KG7096.DCR"
+PRO14N_SAMPLE = ROOT / "raw/14n/CX458821.DCR"
 
 need_installer = pytest.mark.skipif(not INSTALLER.is_file(), reason="Photo Desk installer not available")
 need_sample = pytest.mark.skipif(not SAMPLE.is_file(), reason="sample DCR not available")
@@ -101,6 +103,41 @@ def test_camera_mapping_and_capabilities():
     slr = camera.capabilities("DCS Pro SLR/n")
     assert slr.exposure_range == 2.0 and "expert" in slr.noise_types and slr.lens_optimization
     assert not camera.capabilities("DCS Pro 14N").lens_optimization
+
+
+def test_unlock_all_camera_features():
+    try:
+        camera.set_unlock_all(True)
+        c = camera.capabilities("DCS560C")
+        assert c.lens_optimization and c.white_point and c.look_set is None
+        assert c.noise_types == camera.ALL_NOISE_TYPES
+        pb = camera.capabilities("DCS Pro Back")
+        assert pb.balances == ("preset", "click", "custom", "auto") and pb.exposure_range == 2.0
+        assert pb.auto_scene and pb.balance_file
+        assert not camera.capabilities("Canon EOS 5D").unlocked     # only DCS raw files
+    finally:
+        camera.set_unlock_all(False)
+    c = camera.capabilities("DCS560C")
+    assert not c.lens_optimization and c.look_set and not camera.capabilities("ProBack645").auto_scene
+
+
+def test_at_capture_defaults_per_camera():
+    low, medium = pipeline.SHARPEN_PRESETS["low"], pipeline.SHARPEN_PRESETS["medium"]
+    sharp = lambda s: (s.sharpen_amount, s.sharpen_radius, s.sharpen_threshold)
+    assert sharp(pipeline.at_capture({"model": "DCS560C"})) == medium
+    assert sharp(pipeline.at_capture({"model": "ProBack645"})) == low
+    assert sharp(pipeline.at_capture({"model": "DCS Pro SLR/c"})) == low
+    assert sharp(pipeline.at_capture({"model": "ProBack645", "sharpening": False})) == (0, 0, 0)
+    assert pipeline.at_capture({"model": "DCS Pro SLR/c", "lens_optimization": 24}).lens_optimization == 24
+
+
+@pytest.mark.skipif(not (SLR_C_SAMPLE.is_file() and PRO14N_SAMPLE.is_file()), reason="SLR samples not available")
+def test_lens_strength_recorded_by_camera():
+    # Kodak IFD tag 2654 = [56, 0, strength, 0] on Pro SLR/c and SLR/n files.
+    assert camera.capture_info(SLR_C_SAMPLE, "DCS Pro SLR/c")["lens_optimization"] == 24
+    assert pipeline.capture_settings(SLR_C_SAMPLE).lens_optimization == 24
+    # The 14n has no Lens Optimization even though it writes the tag (as zeros).
+    assert "lens_optimization" not in camera.capture_info(PRO14N_SAMPLE, "DCS Pro 14N")
 
 
 def test_lab_xyz_roundtrip():

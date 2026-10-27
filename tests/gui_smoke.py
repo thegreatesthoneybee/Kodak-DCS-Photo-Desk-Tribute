@@ -86,7 +86,8 @@ def main(folder, shot):
     # Sharpening dialog with preview, choose High, OK.
     auto_close(app, lambda d: (d.b[9].click(), d.b[1].click()))
     w.acts[33149].trigger()
-    assert entry.settings.sharpen_amount == 10.0
+    assert (entry.settings.sharpen_amount, entry.settings.sharpen_radius,
+            entry.settings.sharpen_threshold) == (17.0, 1.4, 2)
     # Open the full image rendering and use the crop tool programmatically.
     iw = w.open_image(entry, sw)
     wait(app, lambda: iw.view.image is not None, 180)

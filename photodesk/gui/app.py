@@ -286,6 +286,12 @@ class ImageWindow(DocumentSubWindow):
             if sw in self.main.sheets:
                 self.main.sheets.remove(sw)
             sw.deleteLater()
+        elif (not self.main._closing_documents and self.entry.dirty
+              and not any(w is not self and w.entry is self.entry for w in sw.images)):
+            # Full image rendering opened from a contact sheet: ask to save this image's changes.
+            if not self.main.confirm_save([self.entry]):
+                ev.ignore()
+                return
         if self in sw.images:
             sw.images.remove(self)
         if not any(w.entry is self.entry for w in sw.images):
@@ -304,6 +310,7 @@ class MainWindow(QMainWindow):
         self.q = QSettings(ini, QSettings.IniFormat) if ini else QSettings(ORG_NAME, APP_NAME)
         self.appearance = self.q.value("Appearance", "light")
         apply_appearance(QApplication.instance(), self.appearance)
+        camera.set_unlock_all(self.q.value("Unlock All Camera Features", False, bool))
         self._light_icons = {}
         self.pdir = str(profiles.profile_dir())
         # Interactive renders (image windows, close-ups, review) use the global pool; contact sheet
@@ -758,7 +765,7 @@ class MainWindow(QMainWindow):
             33149: raw, 32807: raw, 32812: raw, 32816: raw and any(e.settings.click_wb != (1.0, 1.0, 1.0) for e in sel),
             32814: raw and all("custom" in e.caps.balances for e in sel),
             32815: raw and all("auto" in e.caps.balances for e in sel),
-            32803: raw and not any(e.caps.pro_back for e in sel), 33131: raw and not any(e.caps.pro_back for e in sel),
+            32803: raw and all(e.caps.auto_scene for e in sel), 33131: raw and all(e.caps.auto_scene for e in sel),
             33197: raw and all(e.caps.lens_optimization for e in sel),
             32867: len(sel) == 1 and raw and sel[0].settings.balance == "click",
             1055: focus is not None and bool(focus.sounds), 1056: self.player is not None,
@@ -1474,16 +1481,29 @@ class MainWindow(QMainWindow):
     def preferences(self):
         spaces = pipeline.working_spaces(self.pdir)
         dlg = D.PreferencesDialog(self.res, self, self.opts, self.q.value("Send Files To Path", ""), spaces,
-                                 self.appearance)
+                                 self.appearance, camera.unlock_all())
         if dlg.exec() == D.QDialog.Accepted:
             self.opts = dlg.opts
             self.q.setValue("OutputOptions", self.opts.to_json())
             self.q.setValue("Send Files To Path", dlg.send_folder)
             if dlg.appearance != self.appearance:
                 self.set_appearance(dlg.appearance)
+            if dlg.unlock_all != camera.unlock_all():
+                self.set_unlock_all(dlg.unlock_all)
             for sw in self.sheets:
                 for w in sw.images:
                     self.render_window(w)
+
+    def set_unlock_all(self, on):
+        """Lift (or restore) the per-camera-model limits on processing options."""
+        camera.set_unlock_all(on)
+        self.q.setValue("Unlock All Camera Features", bool(on))
+        for sw in self.sheets:
+            for e in sw.sheet.entries:
+                if e.is_raw:
+                    self.refresh_thumb(e)      # lens optimization etc. now (no longer) apply
+            sw.view.viewport().update()
+        self.selection_changed()
 
     def printing_preferences(self):
         dlg = D.PrintingPreferencesDialog(self.res, self, self.q.value("Contact Sheet Printing Size", "view"),
@@ -1806,9 +1826,10 @@ class MainWindow(QMainWindow):
             self._preview_refresh(entries)
         mixed = any(any(getattr(e.settings, f) != getattr(focus.settings, f) for f in dialog_cls.fields)
                     for e in entries) if dialog_cls.fields else False
-        dlg = dialog_cls(self.res, self, focus.settings, preview, *args, mixed=mixed, **kw) \
+        capture = pipeline.capture_settings(focus.path)
+        dlg = dialog_cls(self.res, self, focus.settings, preview, *args, mixed=mixed, capture=capture, **kw) \
             if dialog_cls is not D.NoiseDialog else dialog_cls(self.res, self, focus.settings, preview, focus.caps,
-                                                               mixed=mixed)
+                                                               mixed=mixed, capture=capture)
         ok = dlg.exec() == D.QDialog.Accepted
         values = dlg.values()
         for e in entries:
@@ -1874,9 +1895,9 @@ class MainWindow(QMainWindow):
         sw = self.active_sheet()
         if sw:
             def change(e, s):
-                cap = pipeline.at_capture(e.meta)
+                cap = pipeline.capture_settings(e.path)
                 for f in ("sharpen_amount", "sharpen_radius", "sharpen_threshold", "balance", "lighting",
-                          "white_point", "color_balance"):
+                          "white_point", "color_balance", "lens_optimization"):
                     setattr(s, f, getattr(cap, f))
                 if e.caps.pro_slr:
                     for f in ("rotation", "look", "noise_type", "noise_radius", "noise_strength", "noise_luma"):
@@ -1891,7 +1912,7 @@ class MainWindow(QMainWindow):
                 raw = e.raw or e.small
                 if raw is not None:
                     s.exposure = pipeline.auto_exposure(raw, s)
-            self.after_edit(sw.sheet.apply([e for e in self._raw_selection() if not e.caps.pro_back],
+            self.after_edit(sw.sheet.apply([e for e in self._raw_selection() if e.caps.auto_scene],
                                            "auto_scene", change))
 
     def save_balance_file(self):
@@ -1903,7 +1924,7 @@ class MainWindow(QMainWindow):
         if e.settings.balance != "click":
             D.message(self, res, res.s(60031))
             return
-        if e.caps.pro_back:
+        if not e.caps.balance_file:
             D.message(self, res, res.s(60027))
             return
         flt = res.s(62009).split("|")

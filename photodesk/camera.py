@@ -20,6 +20,21 @@ _FAMILIES = (
 )
 
 
+# Preferences > "Unlock all camera features": every processing option for every DCS model,
+# ignoring the per-model limits of the original Photo Desk.
+_unlock_all = False
+ALL_NOISE_TYPES = ("none", "basic", "advanced", "moire", "expert")
+
+
+def set_unlock_all(on):
+    global _unlock_all
+    _unlock_all = bool(on)
+
+
+def unlock_all():
+    return _unlock_all
+
+
 @dataclasses.dataclass(frozen=True)
 class Capabilities:
     """Processing options Photo Desk offers for a camera model."""
@@ -32,13 +47,26 @@ class Capabilities:
     # Advanced for all but the DCS 315, Advanced with Moire Reduction for the 700 series and Pro Backs.
     other_noise_types: tuple = ("none", "basic", "advanced", "moire")
     original_pro_back: bool = False   # the first DCS Pro Back: no Custom or Auto balance
+    unlocked: bool = False            # per-model limits lifted (pro_back/pro_slr still name the family)
 
     @property
     def exposure_range(self):
-        return 1.0 if self.pro_back else 2.0
+        return 1.0 if self.pro_back and not self.unlocked else 2.0
+
+    @property
+    def auto_scene(self):
+        """Auto Scene Balance / Auto Exposure (not for Pro Back images)."""
+        return self.unlocked or not self.pro_back
+
+    @property
+    def balance_file(self):
+        """Save White Balance File (Pro Backs do not accept .wb files)."""
+        return self.unlocked or not self.pro_back
 
     @property
     def noise_types(self):
+        if self.unlocked:
+            return ALL_NOISE_TYPES
         if self.pro_slr:
             return ("none", "advanced", "moire", "expert")
         return self.other_noise_types
@@ -53,7 +81,7 @@ class Capabilities:
     @property
     def white_point(self):
         """White Point (Kelvin) control: DCS Pro 14n, Pro SLR/n and Pro SLR/c images only."""
-        return self.pro_slr
+        return self.pro_slr or self.unlocked
 
     @property
     def balances(self):
@@ -80,6 +108,8 @@ def capabilities(model):
     if not (pro_back or any(k in m for k in ("720", "760"))):
         noise.remove("moire")
     original = pro_back and not any(k in m for k in ("645", "plus", " 16", "cf", "+"))
+    if _unlock_all and dcs:
+        return Capabilities(dcs, pro_back, pro_slr, True, None, ALL_NOISE_TYPES[:4], False, True)
     return Capabilities(dcs, pro_back, pro_slr, lens, look_set, tuple(noise), original)
 
 
@@ -114,6 +144,61 @@ def _ifd0_strings(path, tags):
             raw = head[val:val + cnt] if cnt > 4 else head[p + 8:p + 8 + cnt]
             vals[tag] = raw.split(b"\x00")[0].decode("latin1").strip()
     return vals
+
+
+_TIFF_INTS = {1: "B", 3: "H", 4: "I", 8: "h", 9: "i"}
+KODAK_IFD = 0x8290
+# Kodak IFD tags 2654-2656: [56, 0, strength, 0] per channel, the Lens Optimization strength the
+# camera applied (DCSPro3SLR/DCSPro4SLR.dll read them and accept strengths of 0..99).
+LENS_STRENGTH_TAG = 2654
+
+
+def read_kodak_tags(path, tags):
+    """Integer values of the given Kodak IFD (tag 0x8290) tags as {tag: tuple}; reads only the
+    IFD entries and those values, not the whole file."""
+    out = {}
+    with open(path, "rb") as f:
+        head = f.read(8)
+        if head[:4] not in (b"MM\x00*", b"II*\x00"):
+            return out
+        bo = ">" if head[:2] == b"MM" else "<"
+
+        def entries(off):
+            f.seek(off)
+            raw = f.read(2)
+            if len(raw) < 2:
+                return []
+            n, = struct.unpack(bo + "H", raw)
+            data = f.read(12 * n)
+            return [struct.unpack_from(bo + "HHI4s", data, 12 * i) for i in range(len(data) // 12)]
+
+        kodak = next((v for t, typ, _, v in entries(struct.unpack(bo + "I", head[4:])[0])
+                      if t == KODAK_IFD and typ in (4, 13)), None)
+        if kodak is None:
+            return out
+        for tag, typ, cnt, val in entries(struct.unpack(bo + "I", kodak)[0]):
+            code = _TIFF_INTS.get(typ)
+            if tag not in tags or code is None or cnt > 64:
+                continue
+            size = struct.calcsize(code) * cnt
+            if size <= 4:
+                raw = val[:size]
+            else:
+                f.seek(struct.unpack(bo + "I", val)[0])
+                raw = f.read(size)
+            if len(raw) == size:
+                out[tag] = struct.unpack(bo + code * cnt, raw)
+    return out
+
+
+def capture_info(path, model):
+    """Processing settings the camera recorded with the image, for At Capture / Auto buttons."""
+    info = {"model": model}
+    if capabilities(model).lens_optimization:
+        v = read_kodak_tags(path, (LENS_STRENGTH_TAG,)).get(LENS_STRENGTH_TAG)
+        if v and len(v) >= 3 and 0 <= v[2] <= 99:
+            info["lens_optimization"] = v[2]
+    return info
 
 
 def read_gps(path):

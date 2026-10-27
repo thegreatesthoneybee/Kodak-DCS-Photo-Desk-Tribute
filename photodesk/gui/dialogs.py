@@ -5,7 +5,7 @@ import os
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QPalette, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QTextEdit, QWidget,
+    QCheckBox, QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QTextEdit, QWidget,
 )
 
 from .. import APP_NAME, AUTHOR, BASED_ON, __version__, export, iptc, pipeline
@@ -122,10 +122,11 @@ class AdjustDialog(TemplateDialog):
     capture_id = None
     fields = ()
 
-    def __init__(self, res, parent, settings, preview, mixed=False):
+    def __init__(self, res, parent, settings, preview, mixed=False, capture=None):
         super().__init__(res, parent)
         self._preview = preview
         self.settings = settings
+        self.capture = capture or pipeline.Settings()   # what the camera set at capture
         if self.capture_id and self.b.get(self.capture_id):
             self.b[self.capture_id].clicked.connect(self._at_capture)
         if self.preview_id:
@@ -147,7 +148,7 @@ class AdjustDialog(TemplateDialog):
             self._preview(None)
 
     def _at_capture(self):
-        self.setup(pipeline.at_capture(None))
+        self.setup(self.capture)
         self.changed()
 
     def invalid(self, lo, hi):
@@ -168,9 +169,9 @@ class ExposureDialog(AdjustDialog):
     rid, preview_id = 129, 1341
     fields = ("exposure",)
 
-    def __init__(self, res, parent, settings, preview, rng, auto, mixed=False):
+    def __init__(self, res, parent, settings, preview, rng, auto, mixed=False, capture=None):
         self.rng, self.auto = rng, auto
-        super().__init__(res, parent, settings, preview, mixed)
+        super().__init__(res, parent, settings, preview, mixed, capture)
 
     def setup(self, s):
         if not hasattr(self, "ev"):
@@ -197,9 +198,9 @@ class ExposureToneDialog(ExposureDialog):
     rid, preview_id, capture_id = 281, 1336, 1335
     fields = ("exposure", "tone")
 
-    def __init__(self, res, parent, settings, preview, rng, auto, hist, mixed=False):
+    def __init__(self, res, parent, settings, preview, rng, auto, hist, mixed=False, capture=None):
         self.hist_fn = hist
-        super().__init__(res, parent, settings, preview, rng, auto, mixed)
+        super().__init__(res, parent, settings, preview, rng, auto, mixed, capture)
 
     def setup(self, s):
         if not hasattr(self, "graph"):
@@ -302,7 +303,8 @@ class LensDialog(AdjustDialog):
         if not hasattr(self, "st"):
             self.st = Linked(self.b[1359], self.b[1360], self.b[1361], 0, 99, 0, on_change=self.changed,
                              invalid=self.invalid)
-            self.b[1272].clicked.connect(lambda: self.st.set(50, notify=True))
+            # Auto: the strength the camera set (help: "may be the same as ... At Capture").
+            self.b[1272].clicked.connect(lambda: self.st.set(self.capture.lens_optimization, notify=True))
         self.st.set(s.lens_optimization)
 
     def values(self):
@@ -349,9 +351,10 @@ class NoiseDialog(QDialog):
     """Noise Reduction: template 1133 (radius/strength or expert strength/luma) or 1134 (moire threshold)."""
     fields = ("noise_type", "noise_radius", "noise_strength", "noise_luma", "moire_threshold")
 
-    def __init__(self, res, parent, settings, preview, caps, mixed=False):
+    def __init__(self, res, parent, settings, preview, caps, mixed=False, capture=None):
         super().__init__(parent)
         self.res, self._preview, self.caps, self.mixed = res, preview, caps, mixed
+        self.capture = capture or pipeline.Settings()
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self.values_ = {k: getattr(settings, k) for k in
                         ("noise_type", "noise_radius", "noise_strength", "noise_luma", "moire_threshold")}
@@ -359,6 +362,10 @@ class NoiseDialog(QDialog):
         self._build()
 
     def _template_for(self, t):
+        if self.caps.unlocked:
+            # Every method keeps its own controls: the moire threshold page for Pro SLR families,
+            # radius/strength (or expert strength/luma) otherwise.
+            return 1134 if t == "moire" and self.caps.pro_slr else 1133
         if self.caps.pro_slr:
             return 1133 if t == "expert" else 1134
         return 1133
@@ -465,7 +472,7 @@ class NoiseDialog(QDialog):
         self.changed()
 
     def _at_capture(self):
-        s = pipeline.at_capture(None)
+        s = self.capture
         for k in self.values_:
             self.values_[k] = getattr(s, k)
         self._build()
@@ -641,14 +648,28 @@ class PreferencesDialog(TemplateDialog):
         "Traditional Chinese": ("外觀", "淺色", "深色"),
     }
 
-    def __init__(self, res, parent, opts, send_folder, spaces, appearance="light"):
+    # Not in the original Photo Desk: lifts the per-camera-model limits on processing options.
+    UNLOCK_LABELS = {
+        "Chinese": "解除所有相机型号的功能限制",
+        "French": "Débloquer toutes les fonctions pour tous les appareils",
+        "German": "Alle Funktionen für alle Kameramodelle freischalten",
+        "Italian": "Sblocca tutte le funzioni per tutti i modelli",
+        "Japanese": "すべての機種で全機能を使用可能にする",
+        "Korean": "기종 제한 해제 (모든 기종에서 모든 기능 사용)",
+        "Portugese": "Desbloquear todas as funções para todos os modelos",
+        "Spanish": "Desbloquear todas las funciones para todos los modelos",
+        "Traditional Chinese": "解除所有相機型號的功能限制",
+    }
+
+    def __init__(self, res, parent, opts, send_folder, spaces, appearance="light", unlock_all=False):
         super().__init__(res, parent)
         b = self.b
         self.opts = export.OutputOptions.from_json(opts.to_json())
         self.spaces = spaces
         self.appearance = appearance
+        self.unlock_all = unlock_all
         labels = self.APPEARANCE_LABELS.get(res.language, ("Appearance", "Light", "Dark"))
-        extra_height = res.size((0, 30))[1]
+        extra_height = res.size((0, 48))[1]
         self.setFixedSize(self.width(), self.height() + extra_height)
         label = QLabel(labels[0], self)
         label.setGeometry(res.rect((14, 416, 68, 14)))
@@ -657,6 +678,10 @@ class PreferencesDialog(TemplateDialog):
         self.appearance_combo.addItem(labels[1], "light")
         self.appearance_combo.addItem(labels[2], "dark")
         self.appearance_combo.setCurrentIndex(max(0, self.appearance_combo.findData(appearance)))
+        self.unlock_check = QCheckBox(
+            self.UNLOCK_LABELS.get(res.language, "Unlock all features for every camera model"), self)
+        self.unlock_check.setGeometry(res.rect((14, 434, 260, 14)))
+        self.unlock_check.setChecked(unlock_all)
         b[1179].setEditable(False)
         for path, desc in spaces:
             b[1179].addItem(desc, path)
@@ -788,6 +813,7 @@ class PreferencesDialog(TemplateDialog):
         o.embed_jpeg_profile = b[1181].isChecked()
         self.send_folder = b[1130].text().strip()
         self.appearance = self.appearance_combo.currentData()
+        self.unlock_all = self.unlock_check.isChecked()
         super().accept()
 
 
