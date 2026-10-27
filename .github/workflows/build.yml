@@ -31,7 +31,7 @@ jobs:
             BIN=dist/PhotoDesk.app/Contents/MacOS/PhotoDesk
             file "$BIN" | grep arm64
           else
-            BIN=dist/PhotoDesk/PhotoDesk.exe
+            BIN=dist/PhotoDesk-Windows/PhotoDesk.exe
           fi
           # No profiles are installed on CI, so 'convert' must exit with code 2 (not crash).
           set +e
@@ -44,7 +44,7 @@ jobs:
           ditto -c -k --keepParent dist/PhotoDesk.app ${{ matrix.artifact }}.zip
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path dist/PhotoDesk -DestinationPath ${{ matrix.artifact }}.zip
+        run: Compress-Archive -Path dist/PhotoDesk-Windows -DestinationPath ${{ matrix.artifact }}.zip
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

@@ -108,8 +108,10 @@ python -m pytest
 python tests/gui_smoke.py <DCR가 있는 폴더> shot.png       # GUI 자동 점검
 python tests/gui_commands.py <DCR가 있는 폴더> <스크린샷 폴더> # 모든 메뉴 명령과 대화상자 실행
 python tests/bench.py <DCR 파일> [프로파일 폴더]                # 처리 단계별 시간 측정
-pyinstaller packaging/photodesk.spec
+pyinstaller --noconfirm packaging/photodesk.spec
 ```
+
+빌드 결과는 Windows가 `dist/PhotoDesk-Windows/PhotoDesk.exe`, macOS가 `dist/PhotoDesk.app`입니다. 폴더가 플랫폼별로 나뉘어 있어, 저장소를 Windows와 Mac이 함께 쓰더라도(시놀로지 등) 한쪽 빌드가 다른 쪽 결과를 지우지 않습니다.
 
 ### 성능
 
