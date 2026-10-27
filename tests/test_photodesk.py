@@ -228,14 +228,34 @@ def test_noise_auto_follows_measured_noise():
     assert low["noise_type"] == high["noise_type"] == "basic"
     assert low["noise_strength"] < high["noise_strength"]
     assert pipeline.NOISE_RADIUS_RANGE["basic"][0] <= high["noise_radius"] <= pipeline.NOISE_RADIUS_RANGE["basic"][1]
-    # Expert sets one strength; an older DCS image's Advanced with Moire Reduction its threshold.
-    assert set(pipeline.noise_auto(noisy, s, caps, "expert")) == {"noise_type", "noise_strength", "noise_luma"}
+    # Expert sets one strength, which also follows the noise; an older DCS image's Advanced with
+    # Moire Reduction its threshold.
+    ex_low, ex_high = pipeline.noise_auto(quiet, s, caps, "expert"), pipeline.noise_auto(noisy, s, caps, "expert")
+    assert set(ex_high) == {"noise_type", "noise_strength", "noise_luma"}
+    assert ex_low["noise_strength"] < ex_high["noise_strength"] and ex_high["noise_strength"] > 0
     dcs = camera.capabilities("DCS760C")
     assert set(pipeline.noise_auto(noisy, s, dcs, "moire")) == {"noise_type", "moire_threshold"}
     assert pipeline.noise_auto(noisy, s, caps, "none") == {"noise_type": "none"}
     # nothing flat or well exposed to measure
     dark = [np.zeros((256, 256, 3), np.float32)] * 9
     assert pipeline.noise_auto(dark, s, caps, "basic") is None
+
+
+def test_expert_noise_reduction_follows_strength():
+    caps = camera.capabilities("DCS Pro SLR/n")
+    tiles = _test_tiles(3 / 255)
+    flat = pipeline._flat_blocks(tiles)
+    s = pipeline.Settings(noise_type="expert")
+
+    def after(level):
+        out = [pipeline.reduce_noise(t, s.copy(noise_strength=level, noise_luma=level), 1.0, caps) for t in tiles]
+        return out, pipeline.image_noise(out, flat)
+
+    noise = [after(level)[1] for level in (0, 25, 50, 75, 100)]
+    assert noise[0] == pytest.approx(pipeline.image_noise(tiles, flat), rel=1e-3)   # 0 leaves it as is
+    for a, b in zip(noise, noise[1:]):                                             # stronger, less noise
+        assert b[0] < a[0] and b[1] < a[1]
+    assert np.abs(after(0)[0][0] - tiles[0]).max() < 2e-3
 
 
 def test_sharpen_auto_follows_edge_blur():

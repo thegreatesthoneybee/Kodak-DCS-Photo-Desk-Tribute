@@ -769,6 +769,10 @@ def _clip01(img):
     return np.clip(img, 0, 1, out=img)
 
 
+# Expert noise reduction: bilateral tone range (YCrCb, 0..1) at strength 100.
+EXPERT_LUMA_SIGMA, EXPERT_CHROMA_SIGMA = 0.12, 0.15
+
+
 def reduce_noise(img, settings, scale=1.0, caps=None):
     """Noise reduction. Moire reduction strength is the Threshold for older DCS images and the
     Strength for Pro Back / Pro SLR images, whose dialog has no threshold."""
@@ -791,10 +795,16 @@ def reduce_noise(img, settings, scale=1.0, caps=None):
         cr = _mix(cv2.medianBlur(cr, min(k, 5)), cr, m)
         cb = _mix(cv2.medianBlur(cb, min(k, 5)), cb, m)
     if t == "expert":
+        # Edge-preserving (bilateral) filtering whose reach in tone and the share of the filtered
+        # result both grow with the strength: 0 leaves the image unchanged, 100 is the strongest.
         d = max(3, round(5 * scale) | 1)
-        y = cv2.bilateralFilter(y, d, 0.02 + 0.1 * settings.noise_luma / 100, 3)
-        cr = cv2.bilateralFilter(cr, d * 2 + 1, 0.05 + 0.1 * s, 6)
-        cb = cv2.bilateralFilter(cb, d * 2 + 1, 0.05 + 0.1 * s, 6)
+        ls = settings.noise_luma / 100
+        if ls > 0:
+            y = _mix(cv2.bilateralFilter(y, d, EXPERT_LUMA_SIGMA * ls, 3 * scale), y, ls)
+        if s > 0:
+            k = d * 2 + 1
+            cr = _mix(cv2.bilateralFilter(cr, k, EXPERT_CHROMA_SIGMA * s, 6 * scale), cr, s)
+            cb = _mix(cv2.bilateralFilter(cb, k, EXPERT_CHROMA_SIGMA * s, 6 * scale), cb, s)
     return _clip01(cv2.cvtColor(cv2.merge([y, cr, cb]), cv2.COLOR_YCrCb2RGB))
 
 
