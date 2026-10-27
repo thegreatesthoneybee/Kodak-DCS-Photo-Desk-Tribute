@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QFileSystemWatcher, QItemSelectionModel, QPoint, QRect, QSettings, QSize, Qt, QThreadPool, QTimer, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QGuiApplication, QIcon, QImage, QKeySequence, QPalette, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QGuiApplication, QIcon, QImage, QKeySequence, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel, QMainWindow, QMdiArea, QMdiSubWindow, QMenu,
     QMessageBox, QStyleFactory, QToolBar, QToolButton,
@@ -75,10 +75,10 @@ def _dark_icon(icon):
                 value = 170 + round(max(color.red(), color.green(), color.blue()) * 0.25)
                 image.setPixelColor(x, y, QColor(value, value, value, color.alpha()))
     return QIcon(QPixmap.fromImage(image))
-HELP_URLS = {33158: 62044, 33159: 62048, 33160: 62049, 33161: 62050, 33162: 62051, 33163: 62052,
-             33164: 62053, 33165: 62054, 33167: 62061}
-# Help Topics (57667) and the toolbar's context help button (57669) are left out: no help is shipped.
-NO_HELP = (57667, 57669)
+# Left out of the menus and toolbar: Help Topics (57667) and the context help button (57669), as
+# no help is shipped, and the Kodak web links of the Help menu (33158-33167). The Help menu keeps
+# only About Photo Desk.
+NO_HELP = (57667, 57669) + tuple(range(33158, 33168))
 MENU_CONTEXTS = ("File Menu", "Edit Menu", "View Menu", "Image Menu", "Info Menu", "Window Menu", "Help Menu")
 
 
@@ -485,8 +485,6 @@ class MainWindow(QMainWindow):
             h[cmd] = functools.partial(self.edit, "lighting", lighting=lt)
         for cmd, key in CROP_CMD.items():
             h[cmd] = functools.partial(self.set_crop_mode, key)
-        for cmd, sid in HELP_URLS.items():
-            h[cmd] = functools.partial(self.open_url, sid)
         return h
 
     def _menus(self):
@@ -513,6 +511,10 @@ class MainWindow(QMainWindow):
     def _submenu(self, title, items):
         res = self.res
         menu = QMenu(res.tr(title, MENU_CONTEXTS), self)
+        items = [it for it in items if not (it[0] == "item" and it[1] in NO_HELP)]
+        # No leading, trailing or doubled separators once items are left out.
+        items = [it for i, it in enumerate(items)
+                 if it[0] != "sep" or (0 < i < len(items) - 1 and items[i - 1][0] != "sep")]
         for it in items:
             if it[0] == "sep":
                 menu.addSeparator()
@@ -524,8 +526,6 @@ class MainWindow(QMainWindow):
                     menu.addMenu(sub)
                 else:
                     menu.addMenu(self._submenu(it[1], it[2]))
-            elif it[1] in NO_HELP:
-                continue
             elif it[1] == 57616:
                 # MFC ID_FILE_MRU_FILE1: the placeholder item is replaced inline by "&1 path" entries.
                 self.recent_menu = menu
@@ -2083,9 +2083,6 @@ class MainWindow(QMainWindow):
             p, self.player = self.player, None
             p.stop()
         self.update_commands()
-
-    def open_url(self, sid):
-        QDesktopServices.openUrl(QUrl(self.res.s(sid)))
 
     def about(self):
         D.AboutDialog(self.res, self).exec()

@@ -20,8 +20,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox  #
 from photodesk.gui import res as R  # noqa: E402
 from photodesk.gui.app import MainWindow, install_qt_translation  # noqa: E402
 
-SKIP = {57665, 57607, 57609, 57606, 32904, 33108, 57601, 57667, 32870, 32867, 1055, 1056}
-SKIP |= set(range(33158, 33168))      # web links
+SKIP = {57665, 57607, 57609, 57606, 32904, 33108, 57601, 32870, 32867, 1055, 1056}
 
 
 def main(folder, outdir):
