@@ -29,6 +29,8 @@ THUMB_EDGE = 256
 ZOOMS = {32842: 25, 32853: 50, 32852: 100, 32841: 200}
 SHEET_ZOOMS = (50, 100, 200)      # contact sheets: 50/100/200 % (25 % is for full image renderings)
 TOOLS = {32847: "select", 32848: "crop", 32846: "click", 33178: "closeup", 33177: "hand"}
+# Edits that change the balance method: the White Point follows the new balance's temperature.
+BALANCE_KINDS = ("balance", "click_balance", "lighting")
 BALANCE_CMD = {32812: "preset", 32816: "click", 32814: "custom", 32815: "auto"}
 LIGHTING_CMD = dict(zip((32787, 32788, 32789, 32790), pipeline.LIGHTINGS))
 CROP_CMD = dict(zip(range(33110, 33118), CROP_ITEMS))
@@ -902,9 +904,14 @@ class MainWindow(QMainWindow):
         def done(entry, result):
             entry.small, entry.meta, img = result
             entry.thumb = to_qimage(img)
+            s = entry.settings
+            if entry.small is not None and s.white_point == s.white_point_ref:
+                # Show the loaded balance's temperature (the render is the same: no edit, not dirty).
+                s.white_point = s.white_point_ref = pipeline.balance_temperature(entry.small, s)
             sw.view.refresh_entry(entry)
             if entry is self.focused():
                 self.info.set_entry(entry)
+                self.controls.set_entry(entry)
                 self._update_histogram()
         task.signals.done.connect(done)
         task.signals.failed.connect(lambda entry, msg: self.statusBar().showMessage(
@@ -1445,8 +1452,25 @@ class MainWindow(QMainWindow):
             return
         if kind not in ("tag", "untag", "annotation", "iptc", "rotate", "crop"):
             entries = [e for e in entries if e.is_raw]     # processing options need DCS raw files
-        changed = sw.sheet.set_fields(entries, kind, **fields)
+        if kind in BALANCE_KINDS:
+            def change(e, s):
+                for k, v in fields.items():
+                    setattr(s, k, v)
+                self._set_balance_temperature(e, s)
+            changed = sw.sheet.apply(entries, kind, change)
+        else:
+            changed = sw.sheet.set_fields(entries, kind, **fields)
         self.after_edit(changed)
+
+    def _set_balance_temperature(self, e, s):
+        """White Point slider shows the colour temperature of the new balance (and starts from it)."""
+        raw = e.raw or e.small
+        if raw is None:
+            try:
+                raw = e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
+            except Exception:
+                return
+        s.white_point = s.white_point_ref = pipeline.balance_temperature(raw, s)
 
     def after_edit(self, changed):
         for e in changed:
@@ -1987,8 +2011,9 @@ class MainWindow(QMainWindow):
 
         def change(e, s):
             cap = pipeline.capture_settings(e.path)
-            for f in ("balance", "lighting", "white_point"):
+            for f in ("balance", "lighting"):
                 setattr(s, f, getattr(cap, f))
+            self._set_balance_temperature(e, s)
         changed = sw.sheet.apply(entries, "balance", change)
         self.after_edit(changed)
         if not changed:
@@ -2000,8 +2025,9 @@ class MainWindow(QMainWindow):
             def change(e, s):
                 cap = pipeline.capture_settings(e.path)
                 for f in ("sharpen_amount", "sharpen_radius", "sharpen_threshold", "balance", "lighting",
-                          "white_point", "color_balance", "lens_optimization"):
+                          "color_balance", "lens_optimization"):
                     setattr(s, f, getattr(cap, f))
+                self._set_balance_temperature(e, s)
                 if e.caps.pro_slr:
                     for f in ("rotation", "look", "noise_type", "noise_radius", "noise_strength", "noise_luma"):
                         setattr(s, f, getattr(cap, f))
@@ -2012,6 +2038,7 @@ class MainWindow(QMainWindow):
         if sw:
             def change(e, s):
                 s.balance = "auto"
+                self._set_balance_temperature(e, s)
                 raw = e.raw or e.small
                 if raw is not None:
                     s.exposure = pipeline.auto_exposure(raw, s)

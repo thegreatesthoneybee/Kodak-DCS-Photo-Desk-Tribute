@@ -162,6 +162,21 @@ def test_custom_balance_uses_camera_balance_point():
                            pipeline.white_balance(pb, pipeline.Settings()))
 
 
+@pytest.mark.skipif(not SAMPLE.is_file(), reason="sample not available")
+def test_white_point_follows_balance_method():
+    raw = pipeline.reduced(pipeline.decode(SAMPLE, half_size=True), 256)
+    s = pipeline.Settings()
+    # Preset balances map back to their lighting's temperature.
+    assert pipeline.balance_temperature(raw, s) == pipeline.LIGHTING_CCT["Daylight"]
+    assert pipeline.balance_temperature(raw, s.copy(lighting="Tungsten")) == pipeline.LIGHTING_CCT["Tungsten"]
+    # The White Point slider starts at the method's temperature without changing the balance.
+    t = pipeline.balance_temperature(raw, s.copy(balance="auto"))
+    a = s.copy(balance="auto", white_point=t, white_point_ref=t)
+    np.testing.assert_allclose(pipeline.white_balance(raw, a), pipeline.white_balance(raw, s.copy(balance="auto")))
+    # Moving it warms/cools from there.
+    assert not np.allclose(pipeline.white_balance(raw, a.copy(white_point=t + 1000)), pipeline.white_balance(raw, a))
+
+
 def test_noise_presets_and_ranges():
     v = {"noise_type": "advanced", "noise_radius": 1, "noise_strength": 0, "noise_luma": 0}
     presets = pipeline.noise_presets()

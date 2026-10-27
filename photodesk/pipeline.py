@@ -86,6 +86,9 @@ class Settings:
     balance: str = "preset"
     click_wb: tuple = (1.0, 1.0, 1.0)   # camera RGB multipliers from the Click Balance tool
     white_point: int = WHITE_POINT_DEFAULT
+    # Colour temperature the balance method's own balance corresponds to; White Point re-balances
+    # from it, so white_point == white_point_ref leaves the balance as the method set it.
+    white_point_ref: int = WHITE_POINT_DEFAULT
     color_balance: tuple = (0, 0, 0)    # R, G, B in -100..100
     exposure: float = 0.0               # EV
     tone: tuple = TONE_DEFAULT          # shadow, midtone, highlight EV
@@ -411,7 +414,27 @@ def click_wb(cam, x, y, radius=2):
     return tuple(float(v) for v in mean[1] / mean)
 
 
-def white_balance(raw, settings):
+def balance_temperature(raw, settings):
+    """Colour temperature (K, rounded to 100 within WHITE_POINT_RANGE) whose Preset-style balance
+    (Daylight balance shifted along the illuminant locus) is closest to the balance method's own."""
+    wb = np.asarray(method_wb(raw, settings), np.float64)
+    day = np.asarray(raw.daylight_wb, np.float64)
+    if not np.any(raw.rgb_xyz) or not np.all(wb > 0):
+        return WHITE_POINT_DEFAULT
+    lo, hi = WHITE_POINT_RANGE
+    temps = np.arange(lo, hi + 1, 100)
+    target = np.log(wb / wb[1])[[0, 2]]
+    best, best_d = WHITE_POINT_DEFAULT, np.inf
+    for t in temps:
+        c = day * cct_shift(raw, LIGHTING_CCT["Daylight"], int(t))
+        d = np.sum((np.log(c / c[1])[[0, 2]] - target) ** 2)
+        if d < best_d:
+            best, best_d = int(t), d
+    return best
+
+
+def method_wb(raw, settings):
+    """Balance of the balance method alone (before White Point and Colour Balance)."""
     if settings.balance == "click":
         wb = np.array(settings.click_wb, np.float64)
     elif settings.balance == "custom":
@@ -420,7 +443,13 @@ def white_balance(raw, settings):
         wb = auto_wb(raw.camera_rgb)
     else:
         wb = preset_wb(raw, settings.lighting)
-    wb = np.asarray(wb, np.float64) * cct_shift(raw, WHITE_POINT_DEFAULT, settings.white_point)
+    return wb
+
+
+def white_balance(raw, settings):
+    wb = np.asarray(method_wb(raw, settings), np.float64)
+    if settings.white_point != settings.white_point_ref:
+        wb = wb * cct_shift(raw, settings.white_point_ref, settings.white_point)
     gains = 2.0 ** (np.asarray(settings.color_balance, np.float64) / 100)
     # Colour balance preserves overall luminance.
     gains /= gains @ np.array([0.3, 0.59, 0.11])

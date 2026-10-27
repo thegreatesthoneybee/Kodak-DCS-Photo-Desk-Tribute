@@ -92,7 +92,7 @@ class ThumbIcons:
                "lighting": s(62016 + pipeline.LIGHTINGS.index(st.lighting)),
                "exposure": s(62034), "sound": s(62035), "lock": s(62036), "tag": s(62037),
                "file": s({"R": 50011, "T": 50012, "J": 50013, "E": 50014}[e.file_type])}
-        if st.white_point != pipeline.WHITE_POINT_DEFAULT and e.caps.white_point:
+        if st.white_point != st.white_point_ref and e.caps.white_point:
             out["balance"] += s(62043).replace("%d", str(st.white_point))
         out["look"] = self.look_labels.get(st.look, "")
         if st.sharpen_amount > 0:
