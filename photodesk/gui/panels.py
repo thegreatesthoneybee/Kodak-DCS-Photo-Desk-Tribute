@@ -10,6 +10,7 @@ from .views import CloseUpView, HistogramWidget
 TOOL_STRIP = (32847, 32848, 32846, 33178, 33177, 32855, 32856, 32838, 32837)
 CROP_ITEMS = ("freeform", "square", "2x3l", "3x2p", "4x5l", "5x4p", "5x7l", "7x5p")
 BALANCE_LABEL = {"preset": 33132, "click": 33133, "custom": 33134, "auto": 33135}
+AT_CAPTURE = "at_capture"
 LIGHTING_LABEL = dict(zip(pipeline.LIGHTINGS, (33136, 33137, 33138, 33139)))
 NOISE_LABEL = {"none": 33140, "basic": 33141, "advanced": 33142, "moire": 33143, "expert": 33146}
 
@@ -94,11 +95,18 @@ class ImageControlsPanel(QWidget):
         self.wp.valueChanged.connect(self._wp)
         for cid in (1173, 1174, 1175):
             b[cid].setEditable(False)
-        b[1173].activated.connect(lambda _: self._emit("balance", balance=b[1173].currentData()))
+        b[1173].activated.connect(self._balance_chosen)
         b[1174].activated.connect(lambda _: self._emit("lighting", lighting=b[1174].currentData()))
         b[1175].activated.connect(lambda _: self._emit("look", look=b[1175].currentData()))
         self.looks = []
         self.set_entry(None)
+
+    def _balance_chosen(self, _):
+        bal = self.b[1173].currentData()
+        if bal == AT_CAPTURE:
+            self._emit("balance_capture")
+        else:
+            self._emit("balance", balance=bal)
 
     def _emit(self, kind, **fields):
         if not self._loading:
@@ -166,6 +174,8 @@ class ImageControlsPanel(QWidget):
         combo.clear()
         for bal in caps.balances:
             combo.addItem(res.s(BALANCE_LABEL[bal]), bal)
+        # Extra entry: put the balance back to what the camera used for the shot.
+        combo.addItem(res.tr("At Capture", ("Image Controls Panel", "Common")), AT_CAPTURE)
         combo.setCurrentIndex(max(0, combo.findData(s.balance)))
         self.wp.setValue(s.white_point // 100)
         b[1041].setText(f"{s.white_point}° K")

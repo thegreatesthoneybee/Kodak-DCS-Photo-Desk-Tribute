@@ -1433,6 +1433,8 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------- edit
     def edit(self, kind, entries=None, **fields):
+        if kind == "balance_capture":
+            return self.balance_at_capture(entries)
         sw = self.active_sheet()
         entries = entries if entries is not None else self.selection()
         if not sw or not entries:
@@ -1970,6 +1972,23 @@ class MainWindow(QMainWindow):
         if bal == "click":
             entries = [e for e in entries if e.settings.click_wb != (1.0, 1.0, 1.0)]
         self.edit("balance", entries, balance=bal)
+
+    def balance_at_capture(self, entries=None):
+        """Balance > At Capture: balance method, lighting and white point as the camera set them."""
+        sw = self.active_sheet()
+        entries = [e for e in (entries if entries is not None else self.selection()) if e.is_raw]
+        if not sw or not entries:
+            self.selection_changed()
+            return
+
+        def change(e, s):
+            cap = pipeline.capture_settings(e.path)
+            for f in ("balance", "lighting", "white_point"):
+                setattr(s, f, getattr(cap, f))
+        changed = sw.sheet.apply(entries, "balance", change)
+        self.after_edit(changed)
+        if not changed:
+            self.selection_changed()        # already at capture: show the method again, not "At Capture"
 
     def original_settings(self):
         sw = self.active_sheet()
