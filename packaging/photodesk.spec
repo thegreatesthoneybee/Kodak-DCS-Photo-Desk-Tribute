@@ -23,7 +23,7 @@ app_icon = None
 
 # Bundle the user's installed Kodak profiles, the official translation table and the interface
 # resources of PhotoDsk.exe (dialogs, menus, bitmaps, strings) as a pack without its program code.
-# The original executable and the help files are never shipped.
+# The original executable is never shipped.
 installed_profiles = Path(os.environ.get("PHOTODESK_PROFILES") or profiles.data_dir() / "profiles")
 required = [installed_profiles / "ERIMM_PCS3.icm", installed_profiles / "ui/PhotoDsk.exe",
             installed_profiles / "ui/PhotoDeskUIStrings.u16"]

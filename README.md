@@ -16,7 +16,7 @@ Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon)에서 네이
 - **패널:** 이미지 조절 패널, 이미지 정보 패널, 출력 히스토그램. 원본 대화상자 템플릿의 컨트롤 위치를 대화상자 단위(dialog unit)로 그대로 배치합니다.
 - **대화상자:** 노출 보정, 노출과 톤(노출 히스토그램과 쉐도우·중간 톤·하이라이트 마커), 화이트포인트, 컬러 밸런스, 렌즈 최적화, 노이즈 제거(None/Basic/Advanced/Advanced with Moiré/Expert), 샤프닝(None/Low/Medium/High), 트리밍 비율, 보기 배율, 붙여넣기 옵션, 파일명 변경, 환경 설정, 인쇄 환경 설정, IPTC/작업 일지, 리뷰, 확인 대화상자(Yes/Yes to All/No), 진행 표시, 정보, 시작 화면.
 - **그림과 문자열:** 비트맵(썸네일 정보 아이콘, 도구 아이콘, Kodak 로고), 커서(클릭 밸런스 스포이트, 손, 확대경, 트리밍 크기 조절), 상태 표시줄 형식, 오류 메시지.
-- **번역과 도움말:** 원본 번역표 `PhotoDeskUIStrings.u16`에 있는 10개 언어 공식 번역(한국어 포함)과 각 언어의 도움말(`PHOTODSK.chm`).
+- **번역:** 원본 번역표 `PhotoDeskUIStrings.u16`에 있는 10개 언어 공식 번역(한국어 포함). 원본 도움말(CHM)과 도움말 항목·상황별 도움말 버튼은 쓰지 않습니다.
 
 ## 원본과 같은 동작
 
@@ -75,16 +75,15 @@ Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon)에서 네이
 ## 최초 설정
 
 배포용 빌드(GitHub 릴리즈의 zip)에는 Kodak 프로파일 57개, 번역표(`PhotoDeskUIStrings.u16`), 원본 화면 리소스 묶음(`PhotoDeskUI.pack`)이 들어 있어 바로 실행됩니다.
-화면 리소스 묶음은 원본 `PhotoDsk.exe`에서 대화상자 배치·메뉴·툴바·비트맵·커서·문자열만 뽑은 데이터이며, 원본 프로그램 코드는 들어 있지 않습니다. 원본 도움말(CHM)도 포함하지 않습니다.
+화면 리소스 묶음은 원본 `PhotoDsk.exe`에서 대화상자 배치·메뉴·툴바·비트맵·커서·문자열만 뽑은 데이터이며, 원본 프로그램 코드는 들어 있지 않습니다.
 
-소스에서 실행하거나 도움말을 쓰려면 원본 설치 파일을 지정합니다. 처음 실행할 때 GUI가 묻고, CLI에서는 다음 명령을 씁니다.
+소스에서 실행하려면 원본 설치 파일을 지정합니다. 처음 실행할 때 GUI가 묻고, CLI에서는 다음 명령을 씁니다.
 
 ```
 photodesk install-profiles Photo_Desk_V_4_3_0.exe
 ```
 
-이 명령은 Kodak 프로파일 57개, `ui/PhotoDsk.exe`, `ui/PhotoDeskUIStrings.u16`, `ui/help/<언어>/PHOTODSK.chm`을 아래 위치에 풉니다.
-배포용 빌드에서도 이 명령을 실행하면 도움말 메뉴가 그 위치의 도움말을 엽니다.
+이 명령은 Kodak 프로파일 57개, `ui/PhotoDsk.exe`, `ui/PhotoDeskUIStrings.u16`을 아래 위치에 풉니다.
 위치는 환경변수 `PHOTODESK_PROFILES`로 바꿀 수 있습니다.
 
 - Windows: `%APPDATA%\PhotoDesk\profiles`

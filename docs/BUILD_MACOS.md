@@ -63,9 +63,9 @@ python -m photodesk install-profiles vendor/original/Photo_Desk_V_4_3_0.exe
 ```
 
 빌드할 때 spec 파일이 이 위치의 프로파일 57개와 번역표, 원본 화면 리소스 묶음(`PhotoDeskUI.pack`, 원본 `PhotoDsk.exe`에서 화면 리소스만 뽑은 것)을 `PhotoDesk.app/Contents/Resources/profiles`에 넣습니다.
-원본 `PhotoDsk.exe`와 도움말(CHM)은 앱에 넣지 않습니다. 프로파일이 없으면 프로파일 없이 빌드되고, 앱을 처음 실행할 때 설치 파일을 묻습니다.
+원본 `PhotoDsk.exe`는 앱에 넣지 않습니다. 프로파일이 없으면 프로파일 없이 빌드되고, 앱을 처음 실행할 때 설치 파일을 묻습니다.
 
-설치 위치는 `~/Library/Application Support/PhotoDesk/profiles`입니다. 프로파일 57개, `ui/PhotoDsk.exe`, `ui/PhotoDeskUIStrings.u16`, `ui/help/<언어>/PHOTODSK.chm`이 들어갑니다.
+설치 위치는 `~/Library/Application Support/PhotoDesk/profiles`입니다. 프로파일 57개, `ui/PhotoDsk.exe`, `ui/PhotoDeskUIStrings.u16`이 들어갑니다.
 GUI를 처음 실행할 때 프로파일이 없으면 설치 파일을 고르는 창이 뜨므로, 이 단계를 GUI에서 해도 됩니다.
 
 다른 위치를 쓰려면 `PHOTODESK_PROFILES=/경로`를 지정합니다. UI 언어를 강제하려면 `PHOTODESK_LANG=Korean`을 지정합니다.
@@ -132,7 +132,6 @@ Mac이 없어도 저장소를 GitHub에 올리면 `build` 워크플로가 `macos
 
 ## 9. 알려진 macOS 차이점
 
-- **도움말:** 원본 도움말은 Windows CHM 형식입니다. 도움말 → 도움말 항목은 시스템 기본 앱으로 `PHOTODSK.chm`을 엽니다. macOS에는 기본 CHM 뷰어가 없으므로 CHM 뷰어(예: iChm, CHM Reader)를 설치해야 합니다. 없으면 열리지 않습니다.
 - **단축키:** 메뉴 단축키는 원본 Windows 키를 그대로 씁니다. Qt가 macOS에서 `Ctrl`을 `⌘`로 바꿔 표시합니다.
 - **외부 프로그램:** 이미지 편집기와 Camera Manager로 `.app`을 지정하면 `open -a`로 실행합니다.
 - **검증 상태:** Windows에서는 실제 실행까지 확인했습니다. macOS 빌드는 GitHub Actions 러너에서 빌드·CLI 점검만 하도록 되어 있고, 실제 Mac에서 GUI를 확인한 적은 없습니다. 대화상자 글자 잘림 등이 보이면 알려 주세요.

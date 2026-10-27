@@ -77,6 +77,8 @@ def _dark_icon(icon):
     return QIcon(QPixmap.fromImage(image))
 HELP_URLS = {33158: 62044, 33159: 62048, 33160: 62049, 33161: 62050, 33162: 62051, 33163: 62052,
              33164: 62053, 33165: 62054, 33167: 62061}
+# Help Topics (57667) and the toolbar's context help button (57669) are left out: no help is shipped.
+NO_HELP = (57667, 57669)
 MENU_CONTEXTS = ("File Menu", "Edit Menu", "View Menu", "Image Menu", "Info Menu", "Window Menu", "Help Menu")
 
 
@@ -167,7 +169,9 @@ class SheetWindow(DocumentSubWindow):
         self.view.populate(sheet.entries)
         self.view.itemSelectionChanged.connect(main.selection_changed)
         self.view.currentItemChanged.connect(lambda *_: main.selection_changed())
+        # Double-clicking a thumbnail shows it in the sheet's floating image window.
         self.view.itemDoubleClicked.connect(lambda it: main.open_image(it.data(Qt.UserRole), self))
+        self.viewer = None
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(
             lambda pos: main.context_menu(194, self.view.viewport().mapToGlobal(pos)))
@@ -269,6 +273,17 @@ class ImageWindow(DocumentSubWindow):
         self.rgb = None
         sheet_win.images.append(self)
 
+    def set_entry(self, entry):
+        """Show another image of the same contact sheet in this window."""
+        old = self.entry
+        self.entry = entry
+        self.setWindowTitle(entry.path.name)
+        self.rgb = None
+        self.token += 1
+        self.latest[0] = self.token
+        if not any(w.entry is old for w in self.sheet_win.images):
+            old.raw = None
+
     def _clicked(self, x, y):
         tool = self.main.tool
         if tool == "click":
@@ -294,6 +309,9 @@ class ImageWindow(DocumentSubWindow):
                 return
         if self in sw.images:
             sw.images.remove(self)
+        if sw.viewer is self:
+            sw.viewer = None
+            self.main.q.setValue("Image Viewer Geometry", self.geometry())
         if not any(w.entry is self.entry for w in sw.images):
             self.entry.raw = None
         self.main._document_closed(self)
@@ -372,7 +390,7 @@ class MainWindow(QMainWindow):
             for it in items:
                 if it[0] == "popup":
                     walk(it[2])
-                elif it[0] == "item":
+                elif it[0] == "item" and it[1] not in NO_HELP:
                     texts.setdefault(it[1], it[2])
         walk(self.res.menu(128))
         return texts
@@ -415,12 +433,6 @@ class MainWindow(QMainWindow):
                 act.triggered.connect(lambda _=False, f=fn: f())
             self.acts[cmd] = act
             self.addAction(act)
-        if 57669 not in self.acts:   # context help button on the toolbar
-            act = QAction(self)
-            act.setIcon(bar_icons.get(57669, QIcon()))
-            act.setToolTip(res.tip(57669)[1] or "Help")
-            act.triggered.connect(self.help_topics)
-            self.acts[57669] = act
         for group_cmds in (ZOOMS, TOOLS, BALANCE_CMD, LIGHTING_CMD, CROP_CMD, {33129: 0, 33128: 0},
                            {32824: 0, 32825: 0}):
             grp = QActionGroup(self)
@@ -461,7 +473,7 @@ class MainWindow(QMainWindow):
             32803: self.auto_scene, 32867: self.save_balance_file, 32855: lambda: self.tag(True),
             32856: lambda: self.tag(False), 32854: self.iptc_dialog, 1055: self.play_sounds,
             1056: self.stop_sounds, 57650: self.mdi.cascadeSubWindows, 57651: self.mdi.tileSubWindows,
-            57649: self.mdi.tileSubWindows, 57667: self.help_topics, 57664: self.about,
+            57649: self.mdi.tileSubWindows, 57664: self.about,
         }
         for cmd, z in ZOOMS.items():
             h[cmd] = functools.partial(self.set_zoom, z)
@@ -512,6 +524,8 @@ class MainWindow(QMainWindow):
                     menu.addMenu(sub)
                 else:
                     menu.addMenu(self._submenu(it[1], it[2]))
+            elif it[1] in NO_HELP:
+                continue
             elif it[1] == 57616:
                 # MFC ID_FILE_MRU_FILE1: the placeholder item is replaced inline by "&1 path" entries.
                 self.recent_menu = menu
@@ -567,6 +581,8 @@ class MainWindow(QMainWindow):
         tb.setObjectName("Toolbar")
         tb.setIconSize(QSize(22, 22))
         for cmd, _ in self.res.toolbar():
+            if cmd in NO_HELP:
+                continue
             if cmd == 0:
                 tb.addSeparator()
             else:
@@ -919,29 +935,91 @@ class MainWindow(QMainWindow):
 
     def open_selected(self):
         sw = self.active_sheet()
-        for e in self.selection():
-            self.open_image(e, sw)
+        sel = self.selection()
+        for i, e in enumerate(sel):
+            if i == 0 or sw.standalone:
+                self.open_image(e, sw)
+            elif not any(w.entry is e for w in sw.images):
+                # More than one image: the others get floating windows of their own.
+                w = ImageWindow(self, sw, e)
+                self._float_new(w, offset=24 * i)
+                self._load_render(w)
+
+    def _activate_image(self, w):
+        if w.floating:
+            self._document_activated(w)
+            w.raise_()
+            w.activateWindow()
+        else:
+            self.mdi.setActiveSubWindow(w)
+
+    def _float_new(self, w, offset=0):
+        """Show a new image window as a floating top-level window that can leave the main frame."""
+        w.floating = True
+        w.setParent(None, Qt.Window)
+        w._mdi_geometry = QRect(0, 0, self.mdi.width() * 2 // 3, self.mdi.height() * 2 // 3)
+        geo = self.q.value("Image Viewer Geometry")
+        if isinstance(geo, QRect) and geo.isValid():
+            w.setGeometry(geo.translated(offset, offset))
+        else:
+            top_left = self.mdi.mapToGlobal(QPoint(0, 0))
+            w.setGeometry(QRect(top_left + QPoint(40 + offset, 40 + offset),
+                                QSize(max(480, self.mdi.width() * 2 // 3), max(360, self.mdi.height() * 2 // 3))))
+        w.show()
+        self._active_window = w
+        w.raise_()
+        w.activateWindow()
+
+    def _show_in_viewer(self, sheet_win, entry):
+        """Show ``entry`` in the contact sheet's floating image window (reused for every image)."""
+        w = sheet_win.viewer
+        if w is not None and w not in sheet_win.images:
+            w = sheet_win.viewer = None
+        if w is None:
+            w = sheet_win.viewer = ImageWindow(self, sheet_win, entry)
+            self._float_new(w)
+        else:
+            if w.entry is not entry:
+                if (w.entry.dirty and not any(o is not w and o.entry is w.entry for o in sheet_win.images)
+                        and not self.confirm_save([w.entry])):
+                    return w
+                w.set_entry(entry)
+            if w.isMinimized():
+                w.showNormal()
+            self._activate_image(w)
+            if w.rgb is not None:
+                return w
+        self._load_render(w)
+        self.selection_changed()
+        return w
 
     def open_image(self, entry, sheet_win):
         for w in sheet_win.images:
             if w.entry is entry:
-                if w.floating:
-                    self._document_activated(w)
-                    w.raise_()
-                    w.activateWindow()
-                else:
-                    self.mdi.setActiveSubWindow(w)
+                self._activate_image(w)
                 return w
+        if not sheet_win.standalone:
+            return self._show_in_viewer(sheet_win, entry)
         w = ImageWindow(self, sheet_win, entry)
         self.mdi.addSubWindow(w)
         w.resize(self.mdi.width() * 2 // 3, self.mdi.height() * 2 // 3)
         w.show()
+        self._load_render(w)
+        return w
+
+    def _load_render(self, w):
+        entry = w.entry
         if entry.is_raw and entry.raw is None:
             task = Task(entry, _decode_job, entry.path)
 
             def decoded(e, raw):
-                e.raw, e.meta = raw, raw.metadata
-                self.render_window(w)
+                e.meta = raw.metadata
+                shown = [iw for iw in w.sheet_win.images if iw.entry is e]
+                if not shown:
+                    return              # the viewer moved on to another image meanwhile
+                e.raw = raw
+                for iw in shown:
+                    self.render_window(iw)
             task.signals.done.connect(decoded)
             task.signals.failed.connect(lambda e, msg: D.message(self, self.res, self.res.s(60002) + "\n" + msg))
             self.pool.start(task)
@@ -1986,17 +2064,6 @@ class MainWindow(QMainWindow):
             p, self.player = self.player, None
             p.stop()
         self.update_commands()
-
-    # ---------------------------------------------------------- help
-    def help_topics(self):
-        chm = profiles.help_file(self.res.language)
-        if chm is None:
-            D.message(self, self.res, self.res.s(61703))
-            return
-        if sys.platform == "win32":
-            os.startfile(str(chm))
-        else:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(chm)))
 
     def open_url(self, sid):
         QDesktopServices.openUrl(QUrl(self.res.s(sid)))
