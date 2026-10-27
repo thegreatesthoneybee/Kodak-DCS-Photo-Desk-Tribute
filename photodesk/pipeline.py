@@ -694,22 +694,70 @@ def finish(img, settings, caps=None, scale=1.0):
     return img
 
 
+LENS_GRID = 64                       # lens drift is measured on a LENS_GRID x LENS_GRID Lab thumbnail
+_LENS_RINGS, _LENS_SECTORS = 6, 8
+_ly, _lx = np.mgrid[0:LENS_GRID, 0:LENS_GRID].astype(np.float32)
+_LENS_C = (LENS_GRID - 1) / 2
+_LENS_R2 = ((_lx - _LENS_C) ** 2 + (_ly - _LENS_C) ** 2) / (2 * _LENS_C ** 2)   # 0 centre .. 1 corner
+_LENS_RING = np.minimum((_LENS_R2 * _LENS_RINGS).astype(int), _LENS_RINGS - 1)
+_LENS_SECTOR = ((np.arctan2(_ly - _LENS_C, _lx - _LENS_C) + np.pi) / (2 * np.pi) * _LENS_SECTORS).astype(int) \
+    % _LENS_SECTORS
+del _ly, _lx
+
+
+def _lens_lab(img):
+    return cv2.cvtColor(np.ascontiguousarray(img, np.float32), cv2.COLOR_RGB2Lab)
+
+
+def _lens_drift(small):
+    """a*/b* drift (LENS_GRID x LENS_GRID x 2) of a Lab thumbnail: the chroma change fitted as a
+    quadratic function of the radius, zero at the centre."""
+    out = np.empty(small.shape[:2] + (2,), np.float32)
+    for i, c in enumerate((1, 2)):
+        ch = small[..., c]
+        center = np.median(ch[_LENS_R2 < 0.1])
+        a = np.polyfit(_LENS_R2.ravel(), (ch - center).ravel(), 2)
+        out[..., i] = np.polyval(a, _LENS_R2) - np.polyval(a, 0)
+    return out
+
+
 def lens_optimize(img, strength):
     """Remove the radial hue shift some lenses introduce (corner colour cast)."""
     h, w = img.shape[:2]
-    lab = cv2.cvtColor(img, cv2.COLOR_RGB2Lab)
-    small = cv2.resize(lab, (64, 64), interpolation=cv2.INTER_AREA)
-    yy, xx = np.mgrid[0:64, 0:64].astype(np.float32)
-    r2 = ((xx - 31.5) ** 2 + (yy - 31.5) ** 2) / (2 * 31.5 ** 2)
-    k = np.float32(strength / 99)
-    for c in (1, 2):
-        ch = small[..., c]
-        center = np.median(ch[r2 < 0.1])
-        # Fit the chroma drift as a quadratic function of the radius and remove it.
-        a = np.polyfit(r2.ravel(), (ch - center).ravel(), 2)
-        drift = np.polyval(a, r2) - np.polyval(a, 0)
-        lab[..., c] -= k * cv2.resize(drift.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+    lab = _lens_lab(img)
+    drift = _lens_drift(cv2.resize(lab, (LENS_GRID, LENS_GRID), interpolation=cv2.INTER_AREA))
+    lab[..., 1:] -= np.float32(strength / 99) * cv2.resize(drift, (w, h), interpolation=cv2.INTER_LINEAR)
     return np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
+
+
+def lens_auto(img):
+    """Lens Optimization strength (0..99) that best removes the corner colour cast of img, the image
+    rendered without lens optimization; None when it has too few near-neutral areas to measure.
+
+    lens_optimize removes the drift fitted over every pixel, which coloured subjects also bend. The
+    cast is therefore measured on near-neutral areas only, as the median a*/b* of each ring (robust
+    median over angular sectors) relative to the centre, and the strength leaving the least residual
+    is chosen.
+    """
+    small = cv2.resize(_lens_lab(img), (LENS_GRID, LENS_GRID), interpolation=cv2.INTER_AREA)
+    drift = _lens_drift(small)
+    neutral = (np.hypot(small[..., 1], small[..., 2]) < 20) & (small[..., 0] > 10) & (small[..., 0] < 97)
+    rings = []                       # per ring: the sector masks holding enough neutral pixels
+    for i in range(_LENS_RINGS):
+        masks = (neutral & (_LENS_RING == i) & (_LENS_SECTOR == j) for j in range(_LENS_SECTORS))
+        rings.append([m for m in masks if m.sum() >= 4])
+    if len(rings[0]) < 3 or sum(len(r) >= 3 for r in rings[1:]) < 2:
+        return None
+    ab = small[..., 1:]
+    best, best_cost = 0, None
+    for k in range(100):
+        v = ab - np.float32(k / 99) * drift          # what lens_optimize(img, k) leaves in a*/b*
+        level = [np.median([np.median(v[m], axis=0) for m in r], axis=0) if len(r) >= 3 else None
+                 for r in rings]
+        cost = sum(float(np.sum((x - level[0]) ** 2)) for x in level[1:] if x is not None)
+        if best_cost is None or cost < best_cost - 1e-6:
+            best, best_cost = k, cost
+    return best
 
 
 def _mix(a, b, w):

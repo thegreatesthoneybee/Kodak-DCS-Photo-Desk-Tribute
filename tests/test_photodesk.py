@@ -177,6 +177,30 @@ def test_white_point_follows_balance_method():
     assert not np.allclose(pipeline.white_balance(raw, a.copy(white_point=t + 1000)), pipeline.white_balance(raw, a))
 
 
+def test_lens_auto_measures_corner_cast():
+    import cv2
+    h, w = 200, 300
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    r2 = ((xx - (w - 1) / 2) ** 2 / ((w - 1) / 2) ** 2 + (yy - (h - 1) / 2) ** 2 / ((h - 1) / 2) ** 2) / 2
+    lab = np.zeros((h, w, 3), np.float32)
+    lab[..., 0] = 40 + 30 * (xx / w)                 # neutral grey ramp ...
+    lab[..., 1] = 12 * r2                            # ... with a magenta/yellow corner cast
+    lab[..., 2] = 9 * r2
+    img = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
+    k = pipeline.lens_auto(img)
+    assert 80 <= k <= 99
+    # the chosen strength removes the cast it measured
+    rest = cv2.cvtColor(pipeline.lens_optimize(img, k), cv2.COLOR_RGB2Lab)
+    corner = np.abs(rest[:10, :10, 1:]).mean()
+    assert corner < 0.25 * np.abs(lab[:10, :10, 1:]).mean()
+    # an even grey has no cast, a saturated image cannot be measured
+    flat = np.full((h, w, 3), 0.4, np.float32)
+    assert pipeline.lens_auto(flat) == 0
+    red = np.zeros((h, w, 3), np.float32)
+    red[..., 0] = 0.9
+    assert pipeline.lens_auto(red) is None
+
+
 def test_noise_presets_and_ranges():
     v = {"noise_type": "advanced", "noise_radius": 1, "noise_strength": 0, "noise_luma": 0}
     presets = pipeline.noise_presets()

@@ -42,7 +42,7 @@ Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon)에서 네이
   - 노출 보정 ±2EV(Pro Back은 ±1EV), 자동 노출 조정.
   - 톤(쉐도우/중간 톤/하이라이트 EV).
   - Look: 시스템 프로파일 폴더의 Custom Look도 포함합니다. DCS 3xx/5xx/6xx는 4가지, 620x는 6가지로 제한됩니다.
-  - 렌즈 최적화(14nx, SLR/n, SLR/c).
+  - 렌즈 최적화(14nx, SLR/n, SLR/c). 자동 버튼은 사진의 무채색 영역에서 가장자리 색 번짐을 재서 강도를 정합니다(원본은 카메라 값을 되돌리기만 함). 잴 곳이 없는 사진은 카메라 값을 씁니다.
   - 노이즈 제거: 카메라별 종류(Basic/Advanced/Moiré/Expert)를 따릅니다.
   - 샤프닝.
   - 촬영 시 설정 사용, 자동 씬 밸런스.

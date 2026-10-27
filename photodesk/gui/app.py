@@ -1986,8 +1986,19 @@ class MainWindow(QMainWindow):
         self._adjust(D.ColorBalanceDialog, "color_balance")
 
     def lens_dialog(self):
-        if all(e.caps.lens_optimization for e in self._raw_selection()):
-            self._adjust(D.LensDialog, "lens")
+        sel = self._raw_selection()
+        if sel and all(e.caps.lens_optimization for e in sel):
+            focus = self.focused() if self.focused() in sel else sel[0]
+            self._adjust(D.LensDialog, "lens", lambda: self._auto_lens(focus))
+
+    def _auto_lens(self, e):
+        """Lens Optimization strength measured on the image; the camera's when it cannot be measured."""
+        raw = e.small or e.raw
+        k = None
+        if raw is not None:
+            img = pipeline.render(raw, e.settings.copy(lens_optimization=0, crop=None), quality="faster")
+            k = pipeline.lens_auto(img)
+        return pipeline.capture_settings(e.path).lens_optimization if k is None else k
 
     def noise_dialog(self):
         self._adjust(D.NoiseDialog, "noise")

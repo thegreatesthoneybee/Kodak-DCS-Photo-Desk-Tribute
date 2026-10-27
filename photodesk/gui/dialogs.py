@@ -299,12 +299,17 @@ class LensDialog(AdjustDialog):
     rid, preview_id, capture_id = 1137, 1362, 1335
     fields = ("lens_optimization",)
 
+    def __init__(self, res, parent, settings, preview, auto, mixed=False, capture=None):
+        self.auto = auto
+        super().__init__(res, parent, settings, preview, mixed, capture)
+
     def setup(self, s):
         if not hasattr(self, "st"):
             self.st = Linked(self.b[1359], self.b[1360], self.b[1361], 0, 99, 0, on_change=self.changed,
                              invalid=self.invalid)
-            # Auto: the strength the camera set (help: "may be the same as ... At Capture").
-            self.b[1272].clicked.connect(lambda: self.st.set(self.capture.lens_optimization, notify=True))
+            # Auto measures the corner colour cast on the image (Photo Desk itself only restored the
+            # camera's strength, the same as At Capture).
+            self.b[1272].clicked.connect(lambda: self.st.set(self.auto(), notify=True))
         self.st.set(s.lens_optimization)
 
     def values(self):
