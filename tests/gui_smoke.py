@@ -57,6 +57,10 @@ def main(folder, shot):
     w.show()
     menus = [a.text() for a in w.menuBar().actions()]
     sw = w.open_folder(folder)
+    w.set_window_floating(sw, True)
+    assert sw.isWindow() and sw not in w.mdi.subWindowList()
+    w.set_window_floating(sw, False)
+    assert not sw.isWindow() and sw in w.mdi.subWindowList()
     entry = sw.sheet.entries[0]
     wait(app, lambda: entry.thumb is not None)
     sw.view.setCurrentRow(0)
@@ -86,6 +90,10 @@ def main(folder, shot):
     # Open the full image rendering and use the crop tool programmatically.
     iw = w.open_image(entry, sw)
     wait(app, lambda: iw.view.image is not None, 180)
+    w.set_window_floating(iw, True)
+    assert iw.isWindow() and w.active_image() is iw
+    w.set_window_floating(iw, False)
+    assert not iw.isWindow() and w.active_image() is iw
     w.set_crop([entry], (0.1, 0.1, 0.6, 0.6))
     assert entry.settings.crop == (0.1, 0.1, 0.6, 0.6)
     w.mdi.setActiveSubWindow(iw)

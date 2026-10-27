@@ -9,11 +9,13 @@ selected language's text.
 import locale
 import os
 import re
+import subprocess
+import sys
 
 LANGUAGES = ("English", "Chinese", "French", "German", "Italian", "Japanese", "Korean",
              "Portugese", "Spanish", "Traditional Chinese")
 _LOCALE_PREFIX = {"zh_TW": "Traditional Chinese", "zh_HK": "Traditional Chinese", "zh": "Chinese",
-                  "fr": "French", "de": "German", "it": "Italian", "ja": "Japanese", "ko": "Korean",
+                  "en": "English", "fr": "French", "de": "German", "it": "Italian", "ja": "Japanese", "ko": "Korean",
                   "pt": "Portugese", "es": "Spanish"}
 
 
@@ -33,6 +35,18 @@ def system_language():
     env = os.environ.get("PHOTODESK_LANG")
     if env in LANGUAGES:
         return env
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["/usr/bin/defaults", "read", "-g", "AppleLanguages"],
+                capture_output=True, text=True, check=True, timeout=2,
+            )
+            for preferred in re.finditer(r'"([^"]+)"', result.stdout):
+                language = _language_from_locale(preferred.group(1))
+                if language:
+                    return language
+        except (OSError, subprocess.SubprocessError):
+            pass
     try:
         loc = locale.getlocale()[0] or ""
     except ValueError:
@@ -40,11 +54,18 @@ def system_language():
     if not loc and os.name == "nt":
         import ctypes
         loc = locale.windows_locale.get(ctypes.windll.kernel32.GetUserDefaultUILanguage(), "")
+    language = _language_from_locale(loc)
+    return language or "English"
+
+
+def _language_from_locale(loc):
     loc = loc.replace("-", "_")
+    if loc.startswith(("zh_Hant", "zh_TW", "zh_HK")):
+        return "Traditional Chinese"
     for prefix, lang in _LOCALE_PREFIX.items():
         if loc.startswith(prefix) or loc.lower().startswith(lang.lower()):
             return lang
-    return "English"
+    return None
 
 
 class Translator:

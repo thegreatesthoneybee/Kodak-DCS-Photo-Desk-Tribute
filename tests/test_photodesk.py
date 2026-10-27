@@ -46,6 +46,9 @@ def test_camera_looks():
     assert camera.capabilities("DCS315").noise_types == ("none", "basic")
     assert camera.capabilities("DCS Pro Back").balances == ("preset", "click")
     assert camera.capabilities("ProBack645").balances == ("preset", "click", "custom", "auto")
+    assert not camera.capabilities("ProBack645").white_point
+    assert camera.capabilities("DCS Pro 14N").white_point
+    assert camera.capabilities("DCS Pro SLR/n").white_point
     assert camera.capabilities("DCS560").noise_types == ("none", "basic", "advanced")
     assert camera.capabilities("DCS760C").noise_types == ("none", "basic", "advanced", "moire")
     assert camera.capabilities("ProBack645").noise_types == ("none", "basic", "advanced", "moire")
@@ -220,6 +223,85 @@ def test_translator():
     assert tr("Crop Aspect Ratio") == "트리밍 비율"
     assert tr("Untranslated") == "Untranslated"
     assert ui_strings.Translator(table, "English")("&Open...\tCtrl+O") == "&Open...\tCtrl+O"
+
+
+def test_system_language_uses_macos_preferred_language(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("PHOTODESK_LANG", raising=False)
+    monkeypatch.setattr(ui_strings.sys, "platform", "darwin")
+    monkeypatch.setattr(ui_strings.locale, "getlocale", lambda: ("en_US", "UTF-8"))
+    monkeypatch.setattr(
+        ui_strings.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout='(\n    "ko-KR"\n)\n'),
+    )
+    assert ui_strings.system_language() == "Korean"
+
+
+def test_gui_task_skips_stale_work_and_results():
+    from photodesk.gui.views import Task
+
+    called = []
+    stale = [True]
+    task = Task(None, lambda: called.append("work"), stale=lambda: stale[0])
+    task.run()
+    assert called == []
+
+    def finish_work():
+        called.append("work")
+        stale[0] = True
+        return "result"
+
+    stale[0] = False
+    task = Task(None, finish_work, stale=lambda: stale[0])
+    task.signals.done.connect(lambda *_: called.append("result"))
+    task.run()
+    assert called == ["work"]
+
+
+def test_histogram_overlays_channels_with_transparency():
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QApplication
+    from photodesk.gui.views import HistogramWidget
+
+    app = QApplication.instance() or QApplication([])
+    widget = HistogramWidget()
+    widget.resize(258, 100)
+    widget.channels = {"r": True, "g": True, "b": True}
+    widget.set_image(np.full((2, 2, 3), 100, dtype=np.uint8))
+    image = QImage(widget.size(), QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFFFF)
+    widget.render(image)
+    overlap = image.pixelColor(101, 50)
+    assert overlap.red() > 0 and overlap.green() > 0 and overlap.blue() > 0
+
+
+def test_windows_app_icon_contains_high_resolution_variants():
+    from PIL import Image
+
+    icon = Image.open(ROOT / "packaging/PhotoDesk.ico")
+    assert (256, 256) in {(w, h) for w, h, *_ in icon.info["sizes"]}
+
+
+def test_dark_appearance_recolors_icons_and_palette():
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QIcon, QImage, QPalette, QPixmap
+    from PySide6.QtWidgets import QApplication
+    from photodesk.gui.app import _dark_icon, apply_appearance
+
+    app = QApplication.instance() or QApplication([])
+    apply_appearance(app, "light")
+    light = app.palette().color(QPalette.ColorRole.Window)
+    apply_appearance(app, "dark")
+    dark = app.palette().color(QPalette.ColorRole.Window)
+    assert dark.lightness() < light.lightness()
+
+    pixels = QImage(16, 16, QImage.Format.Format_ARGB32)
+    pixels.fill(Qt.transparent)
+    pixels.setPixelColor(8, 8, QColor(20, 20, 20))
+    dark_pixel = _dark_icon(QIcon(QPixmap.fromImage(pixels))).pixmap(16, 16).toImage().pixelColor(8, 8)
+    assert dark_pixel.red() > 150
+    apply_appearance(app, "light")
 
 
 @need_installer

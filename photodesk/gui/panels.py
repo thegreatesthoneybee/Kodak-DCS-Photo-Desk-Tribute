@@ -49,15 +49,19 @@ class ImageControlsPanel(QWidget):
         b = self.b = R.build(res, self, 103)
         R.fix_combo_geometry(b, res)
         self._loading = False
-        b[1237].setPixmap(res.bitmap(256, transparent=False).scaled(b[1237].size(), Qt.KeepAspectRatio,
+        b[1237].setPixmap(res.bitmap(256, transparent=False).scaled(b[1237].size(), Qt.IgnoreAspectRatio,
                                                                     Qt.SmoothTransformation))
         # Tool strip (bitmap 146) in static 1040.
         strip = b[1040].geometry()
         self.tools = {}
+        tool_count = len(TOOL_STRIP)
         for i, cmd in enumerate(TOOL_STRIP):
             act = actions.get(cmd)
-            btn = icon_button(self, QRect(strip.x() + i * 22, strip.y(), 22, max(20, strip.height())),
+            left = strip.x() + i * strip.width() // tool_count
+            right = strip.x() + (i + 1) * strip.width() // tool_count
+            btn = icon_button(self, QRect(left, strip.y(), right - left, strip.height()),
                               res.strip(146, 16, i), res.tip(cmd)[1], checkable=i < 5)
+            btn.setIconSize(QSize(22, 22))
             if act is not None:
                 bind(btn, act)
             self.tools[cmd] = btn
@@ -299,15 +303,47 @@ class ImageInfoPanel(QWidget):
 class HistogramPanel(QWidget):
     """Dialog template 1124: output histogram with optional R, G, B."""
 
-    def __init__(self, res):
-        super().__init__()
+    def __init__(self, res, parent=None):
+        super().__init__(parent)
         b = self.b = R.build(res, self, 1124)
+        default_size = res.size(res.pe.dialog(1124).size)
+        self.setMinimumSize(*default_size)
+        self.resize(*default_size)
         self.graph = HistogramWidget()
         self.graph.setParent(self)
-        self.graph.setGeometry(b[1119].geometry())
+        self._graph_geometry = b[1119].geometry()
+        self._graph_right_margin = self.width() - self._graph_geometry.x() - self._graph_geometry.width()
+        self._graph_bottom_margin = self.height() - self._graph_geometry.y() - self._graph_geometry.height()
+        self.graph.setGeometry(self._graph_geometry)
         self.graph.show()
         for cid, ch in ((1120, "r"), (1121, "g"), (1122, "b")):
             b[cid].toggled.connect(lambda on, c=ch: self._toggle(c, on))
+        self.set_appearance("light")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        g = self._graph_geometry
+        self.graph.setGeometry(
+            g.x(), g.y(),
+            max(g.width(), self.width() - g.x() - self._graph_right_margin),
+            max(g.height(), self.height() - g.y() - self._graph_bottom_margin),
+        )
+
+    def set_appearance(self, appearance):
+        if appearance == "dark":
+            style = (
+                "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #c0c0c0; "
+                "border-radius: 2px; background-color: #292929; } "
+                "QCheckBox::indicator:checked { background-color: #3478d4; border-color: #a9ccff; }"
+            )
+        else:
+            style = (
+                "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #666666; "
+                "border-radius: 2px; background-color: #ffffff; } "
+                "QCheckBox::indicator:checked { background-color: #2673d9; border-color: #174e9e; }"
+            )
+        for cid in (1120, 1121, 1122):
+            self.b[cid].setStyleSheet(style)
 
     def _toggle(self, ch, on):
         self.graph.channels[ch] = on

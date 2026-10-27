@@ -3,7 +3,7 @@ import datetime
 import os
 
 from PySide6.QtCore import QDate, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPalette, QPixmap
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QTextEdit, QWidget,
 )
@@ -629,12 +629,34 @@ class RenameDialog(TemplateDialog):
 class PreferencesDialog(TemplateDialog):
     """Edit > Preferences: RGB working space, send-to folder, export size, TIFF and JPEG options."""
     rid = 214
+    APPEARANCE_LABELS = {
+        "Chinese": ("外观", "浅色", "深色"),
+        "French": ("Apparence", "Clair", "Sombre"),
+        "German": ("Darstellung", "Hell", "Dunkel"),
+        "Italian": ("Aspetto", "Chiaro", "Scuro"),
+        "Japanese": ("外観", "ライト", "ダーク"),
+        "Korean": ("화면 테마", "밝게", "어둡게"),
+        "Portugese": ("Aparência", "Claro", "Escuro"),
+        "Spanish": ("Apariencia", "Claro", "Oscuro"),
+        "Traditional Chinese": ("外觀", "淺色", "深色"),
+    }
 
-    def __init__(self, res, parent, opts, send_folder, spaces):
+    def __init__(self, res, parent, opts, send_folder, spaces, appearance="light"):
         super().__init__(res, parent)
         b = self.b
         self.opts = export.OutputOptions.from_json(opts.to_json())
         self.spaces = spaces
+        self.appearance = appearance
+        labels = self.APPEARANCE_LABELS.get(res.language, ("Appearance", "Light", "Dark"))
+        extra_height = res.size((0, 30))[1]
+        self.setFixedSize(self.width(), self.height() + extra_height)
+        label = QLabel(labels[0], self)
+        label.setGeometry(res.rect((14, 416, 68, 14)))
+        self.appearance_combo = QComboBox(self)
+        self.appearance_combo.setGeometry(res.rect((82, 414, 105, 16)))
+        self.appearance_combo.addItem(labels[1], "light")
+        self.appearance_combo.addItem(labels[2], "dark")
+        self.appearance_combo.setCurrentIndex(max(0, self.appearance_combo.findData(appearance)))
         b[1179].setEditable(False)
         for path, desc in spaces:
             b[1179].addItem(desc, path)
@@ -765,6 +787,7 @@ class PreferencesDialog(TemplateDialog):
         o.jpeg_quality = "best" if b[1006].isChecked() else "better" if b[1007].isChecked() else "good"
         o.embed_jpeg_profile = b[1181].isChecked()
         self.send_folder = b[1130].text().strip()
+        self.appearance = self.appearance_combo.currentData()
         super().accept()
 
 
@@ -971,7 +994,8 @@ class ReviewDialog(TemplateDialog):
         self.b[OK].clicked.connect(self.accept)
         self.area = self.b[1070]
         self.area.setAlignment(Qt.AlignCenter)
-        self.area.setStyleSheet("background: rgb(128,128,128)")
+        self.area.setBackgroundRole(QPalette.ColorRole.Dark)
+        self.area.setAutoFillBackground(True)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
         self._show()

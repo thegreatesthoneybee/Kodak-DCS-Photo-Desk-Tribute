@@ -31,7 +31,19 @@ def data_dir():
 
 
 def profile_dir():
-    return Path(os.environ.get("PHOTODESK_PROFILES", data_dir() / "profiles"))
+    configured = os.environ.get("PHOTODESK_PROFILES")
+    if configured:
+        return Path(configured)
+    bundled = bundled_profile_dir()
+    if bundled and (bundled / "ERIMM_PCS3.icm").is_file():
+        return bundled
+    return data_dir() / "profiles"
+
+
+def bundled_profile_dir():
+    if not getattr(sys, "frozen", False) or sys.platform != "darwin":
+        return None
+    return Path(sys.executable).resolve().parent.parent / "Resources" / "profiles"
 
 
 def _cabinet(installer_bytes):
@@ -60,7 +72,7 @@ def extract_profiles(installer_bytes):
 
 
 def install_from_installer(installer_path, dest=None):
-    dest = Path(dest) if dest else profile_dir()
+    dest = Path(dest) if dest else data_dir() / "profiles"
     profiles, ui = extract_profiles(Path(installer_path).read_bytes())
     dest.mkdir(parents=True, exist_ok=True)
     for name, data in profiles.items():

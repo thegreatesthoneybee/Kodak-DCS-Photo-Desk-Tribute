@@ -10,11 +10,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, QItemSelectionModel, QSettings, QSize, Qt, QThreadPool, QTimer, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QIcon, QImage, QKeySequence
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QItemSelectionModel, QPoint, QRect, QSettings, QSize, Qt, QThreadPool, QTimer, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QGuiApplication, QIcon, QImage, QKeySequence, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel, QMainWindow, QMdiArea, QMdiSubWindow, QMenu,
-    QMessageBox, QToolBar,
+    QMessageBox, QStyleFactory, QToolBar, QToolButton,
 )
 
 from .. import __version__, camera, export, pipeline, profiles, wbfile
@@ -33,6 +33,48 @@ BALANCE_CMD = {32812: "preset", 32816: "click", 32814: "custom", 32815: "auto"}
 LIGHTING_CMD = dict(zip((32787, 32788, 32789, 32790), pipeline.LIGHTINGS))
 CROP_CMD = dict(zip(range(33110, 33118), CROP_ITEMS))
 LOOK_BASE = 45000
+
+
+def apply_appearance(app, appearance):
+    style = QStyleFactory.create("Fusion")
+    if style:
+        app.setStyle(style)
+    palette = app.style().standardPalette()
+    if appearance == "dark":
+        colors = {
+            QPalette.ColorRole.Window: QColor(53, 53, 53),
+            QPalette.ColorRole.WindowText: QColor(235, 235, 235),
+            QPalette.ColorRole.Base: QColor(35, 35, 35),
+            QPalette.ColorRole.AlternateBase: QColor(53, 53, 53),
+            QPalette.ColorRole.ToolTipBase: QColor(245, 245, 220),
+            QPalette.ColorRole.ToolTipText: QColor(20, 20, 20),
+            QPalette.ColorRole.Text: QColor(235, 235, 235),
+            QPalette.ColorRole.Button: QColor(53, 53, 53),
+            QPalette.ColorRole.ButtonText: QColor(235, 235, 235),
+            QPalette.ColorRole.BrightText: QColor(255, 80, 80),
+            QPalette.ColorRole.Highlight: QColor(42, 130, 218),
+            QPalette.ColorRole.HighlightedText: QColor(255, 255, 255),
+            QPalette.ColorRole.PlaceholderText: QColor(150, 150, 150),
+        }
+        for role, color in colors.items():
+            palette.setColor(role, color)
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(130, 130, 130))
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(130, 130, 130))
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(130, 130, 130))
+    app.setPalette(palette)
+
+
+def _dark_icon(icon):
+    pixmap = icon.pixmap(32, 32)
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            if color.alpha() and max(color.red(), color.green(), color.blue()) < 150 and \
+                    max(color.red(), color.green(), color.blue()) - min(color.red(), color.green(), color.blue()) < 32:
+                value = 170 + round(max(color.red(), color.green(), color.blue()) * 0.25)
+                image.setPixelColor(x, y, QColor(value, value, value, color.alpha()))
+    return QIcon(QPixmap.fromImage(image))
 HELP_URLS = {33158: 62044, 33159: 62048, 33160: 62049, 33161: 62050, 33162: 62051, 33163: 62052,
              33164: 62053, 33165: 62054, 33167: 62061}
 MENU_CONTEXTS = ("File Menu", "Edit Menu", "View Menu", "Image Menu", "Info Menu", "Window Menu", "Help Menu")
@@ -95,7 +137,19 @@ def _export_job(path, dest, file_type, opts, settings, pdir):
 
 
 # ------------------------------------------------------------------ MDI children
-class SheetWindow(QMdiSubWindow):
+class DocumentSubWindow(QMdiSubWindow):
+    def __init__(self):
+        super().__init__()
+        self.floating = False
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() == QEvent.Type.WindowActivate and self.floating:
+            self.main._document_activated(self)
+        return handled
+
+
+class SheetWindow(DocumentSubWindow):
     """A contact sheet. A standalone sheet is never shown: it holds an image opened by itself
     (File > Open on a file) and goes away with that image's window."""
 
@@ -179,16 +233,18 @@ class SheetWindow(QMdiSubWindow):
         return False
 
     def closeEvent(self, ev):
-        if not self.main.confirm_save(self.sheet.dirty()):
+        if not self.main._closing_documents and not self.main.confirm_save(self.sheet.dirty()):
             ev.ignore()
             return
         for w in list(self.images):
             w.close()
-        self.main.sheets.remove(self)
+        if self in self.main.sheets:
+            self.main.sheets.remove(self)
+        self.main._document_closed(self)
         super().closeEvent(ev)
 
 
-class ImageWindow(QMdiSubWindow):
+class ImageWindow(DocumentSubWindow):
     """Full image rendering of one entry."""
 
     def __init__(self, main, sheet_win, entry):
@@ -205,7 +261,7 @@ class ImageWindow(QMdiSubWindow):
         self.view.crop_changed.connect(lambda c: main.set_crop([self.entry], c))
         self.view.hover.connect(main.show_pixel)
         self.view.crop_size.connect(main.show_size)
-        self.view.zoom_changed.connect(lambda z: main.show_zoom(z) if main.mdi.activeSubWindow() is self else None)
+        self.view.zoom_changed.connect(lambda z: main.show_zoom(z) if main.active_image() is self else None)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(lambda pos: main.context_menu(195, self.view.mapToGlobal(pos)))
         self.token = 0
@@ -222,7 +278,7 @@ class ImageWindow(QMdiSubWindow):
 
     def closeEvent(self, ev):
         sw = self.sheet_win
-        if sw.standalone:
+        if sw.standalone and not self.main._closing_documents:
             # No contact sheet behind this image: ask to save its changes here.
             if not self.main.confirm_save(sw.sheet.dirty()):
                 ev.ignore()
@@ -234,6 +290,7 @@ class ImageWindow(QMdiSubWindow):
             sw.images.remove(self)
         if not any(w.entry is self.entry for w in sw.images):
             self.entry.raw = None
+        self.main._document_closed(self)
         super().closeEvent(ev)
 
 
@@ -245,6 +302,9 @@ class MainWindow(QMainWindow):
         # PHOTODESK_SETTINGS: an .ini file instead of the user's settings (used by the GUI tests).
         ini = os.environ.get("PHOTODESK_SETTINGS")
         self.q = QSettings(ini, QSettings.IniFormat) if ini else QSettings("Kodak", "DCS Photo Desk")
+        self.appearance = self.q.value("Appearance", "light")
+        apply_appearance(QApplication.instance(), self.appearance)
+        self._light_icons = {}
         self.pdir = str(profiles.profile_dir())
         # Interactive renders (image windows, close-ups, review) use the global pool; contact sheet
         # thumbnails get their own pool so a large folder never queues ahead of what the user is viewing.
@@ -271,15 +331,17 @@ class MainWindow(QMainWindow):
         self.opts = export.OutputOptions.from_json(self.q.value("OutputOptions", {}) or {})
         self.preview_override = None
         self.closeups = []
+        self._active_window = None
+        self._closing_documents = False
         self.player = None
         self.looks = pipeline.available_looks(self.pdir) if profiles.is_installed() else []
         self.icons.look_labels = {name: pipeline.look_label(desc) for name, desc in self.looks}
         self.setWindowTitle(res.tr("DCS Photo Desk", ("About Box", "Common")))
         self.setWindowIcon(res.app_icon())
         self.mdi = QMdiArea()
-        self.mdi.setBackground(Qt.gray)
+        self.mdi.setBackground(self.palette().color(QPalette.ColorRole.Dark))
         self.setCentralWidget(self.mdi)
-        self.mdi.subWindowActivated.connect(lambda _: self.selection_changed())
+        self.mdi.subWindowActivated.connect(self._mdi_window_activated)
         self._actions()
         self._menus()
         self._toolbar()
@@ -289,6 +351,11 @@ class MainWindow(QMainWindow):
         self.update_commands()
         self.restoreGeometry(self.q.value("MainFrame Position", b""))
         self.restoreState(self.q.value("ControlBar States", b""))
+        histogram_size = self.q.value("Histogram Dock Size", QSize(), QSize)
+        if histogram_size.isValid():
+            self.hist_dock.resize(max(histogram_size.width(), self.hist_dock.minimumWidth()),
+                                  max(histogram_size.height(), self.hist_dock.minimumHeight()))
+        self._update_appearance_icons()
 
     # ---------------------------------------------------------- resources
     def _menu_texts(self):
@@ -378,7 +445,7 @@ class MainWindow(QMainWindow):
             32844: self.zoom_other, 32836: lambda: self.toggle_dock(self.controls_dock),
             32857: lambda: self.toggle_dock(self.info_dock), 33104: lambda: self.toggle_dock(self.hist_dock),
             32840: self.toggle_thumb_info, 59392: lambda: self.toolbar.setVisible(not self.toolbar.isVisible()),
-            59393: lambda: self.statusBar().setVisible(not self.statusBar().isVisible()),
+            59393: self.toggle_status_bar,
             33188: self.review, 33129: lambda: self.set_quality("faster"), 33128: lambda: self.set_quality("better"),
             32838: lambda: self.rotate(1), 32837: lambda: self.rotate(-1), 32806: self.exposure_dialog,
             33187: self.exposure_tone_dialog, 33131: self.auto_exposure, 33152: self.white_point_dialog,
@@ -410,6 +477,18 @@ class MainWindow(QMainWindow):
         self.recent_menu = None
         for top in res.menu(128):
             menu = self._submenu(top[1], top[2])
+            if top[1] == "&Window":
+                menu.addSeparator()
+                labels = ("별도 창으로 분리", "앱 창에 다시 넣기") if res.language == "Korean" else (
+                    "Float Active Window", "Move into Main Window")
+                self.float_window_action = QAction(labels[0], self)
+                self.reattach_window_action = QAction(labels[1], self)
+                self.float_window_action.triggered.connect(
+                    lambda _=False: self.set_window_floating(self.active_document(), True))
+                self.reattach_window_action.triggered.connect(
+                    lambda _=False: self.set_window_floating(self.active_document(), False))
+                menu.addAction(self.float_window_action)
+                menu.addAction(self.reattach_window_action)
             bar.addMenu(menu)
 
     def _submenu(self, title, items):
@@ -479,8 +558,7 @@ class MainWindow(QMainWindow):
     def _toolbar(self):
         tb = self.toolbar = QToolBar(self.res.tr("Toolbar", ("View Menu", "Common")), self)
         tb.setObjectName("Toolbar")
-        w, h = self.res.pe.toolbar(128)[0]
-        tb.setIconSize(QSize(w, h))
+        tb.setIconSize(QSize(22, 22))
         for cmd, _ in self.res.toolbar():
             if cmd == 0:
                 tb.addSeparator()
@@ -502,7 +580,8 @@ class MainWindow(QMainWindow):
         self.info.annotation.connect(lambda e, t: self.edit("annotation", entries=[e], annotation=t))
         self.info.play.connect(self._play)
         self.info.stop.connect(self.stop_sounds)
-        self.hist = HistogramPanel(res)
+        self.hist = HistogramPanel(res, self)
+        self.hist.set_appearance(self.appearance)
         ctx = ("Image Controls Panel", "Image Info Panel", "Histogram Panel", "View Menu")
         self.controls_dock = self._dock(res.tr("Image Controls", ctx), self.controls, Qt.RightDockWidgetArea, 32836)
         self.info_dock = self._dock(res.tr("Image Info", ctx), self.info, Qt.RightDockWidgetArea, 32857)
@@ -522,6 +601,25 @@ class MainWindow(QMainWindow):
         self.acts[cmd].setChecked(True)
         return d
 
+    def _update_appearance_icons(self):
+        targets = [*self.acts.values(), *self.findChildren(QToolButton)]
+        for target in targets:
+            icon = target.icon()
+            if icon.isNull():
+                continue
+            if target not in self._light_icons:
+                self._light_icons[target] = icon
+            original = self._light_icons[target]
+            target.setIcon(_dark_icon(original) if self.appearance == "dark" else original)
+
+    def set_appearance(self, appearance):
+        self.appearance = appearance if appearance in ("light", "dark") else "light"
+        self.q.setValue("Appearance", self.appearance)
+        apply_appearance(QApplication.instance(), self.appearance)
+        self.hist.set_appearance(self.appearance)
+        self.mdi.setBackground(self.palette().color(QPalette.ColorRole.Dark))
+        self._update_appearance_icons()
+
     def _status(self):
         sb = self.statusBar()
         self.st_count, self.st_pixel, self.st_xy, self.st_size, self.st_zoom = (QLabel() for _ in range(5))
@@ -534,10 +632,18 @@ class MainWindow(QMainWindow):
             lbl.setFrameShadow(QLabel.Sunken)
             sb.addPermanentWidget(lbl)
         sb.showMessage(self.res.tr("Ready", ("Common", "Common Strings")))
+        visible = self.q.value("Show Status Bar", True, bool)
+        sb.setVisible(visible)
+        self.acts[59393].setChecked(visible)
+
+    def toggle_status_bar(self):
+        visible = self.acts[59393].isChecked()
+        self.statusBar().setVisible(visible)
+        self.q.setValue("Show Status Bar", visible)
 
     # ---------------------------------------------------------- state
     def active_sheet(self):
-        w = self.mdi.activeSubWindow()
+        w = self.active_document()
         if isinstance(w, SheetWindow):
             return w
         if isinstance(w, ImageWindow):
@@ -545,8 +651,59 @@ class MainWindow(QMainWindow):
         return next((sw for sw in self.sheets if not sw.standalone), None)
 
     def active_image(self):
-        w = self.mdi.activeSubWindow()
+        w = self.active_document()
         return w if isinstance(w, ImageWindow) else None
+
+    def active_document(self):
+        if self._active_window is not None and self.is_open_document(self._active_window):
+            return self._active_window
+        return self.mdi.activeSubWindow()
+
+    def is_open_document(self, window):
+        if getattr(window, "floating", False):
+            return any(window is sheet or window in sheet.images for sheet in self.sheets)
+        return window in self.mdi.subWindowList()
+
+    def _mdi_window_activated(self, window):
+        if window is not None:
+            self._active_window = window
+        self.selection_changed()
+
+    def _document_activated(self, window):
+        self._active_window = window
+        self.selection_changed()
+
+    def _document_closed(self, window):
+        if self._active_window is window:
+            self._active_window = self.mdi.activeSubWindow()
+            if self._active_window is window:
+                self._active_window = None
+        self.selection_changed()
+
+    def set_window_floating(self, window, floating):
+        if window is None or window.floating == floating:
+            return
+        if floating:
+            window._mdi_geometry = window.geometry()
+            global_pos = window.mapToGlobal(QPoint(0, 0))
+            size = window.size()
+            self.mdi.removeSubWindow(window)
+            window.setParent(None, Qt.Window)
+            window.floating = True
+            window.setWindowState(Qt.WindowNoState)
+            window.setGeometry(QRect(global_pos, size))
+        else:
+            window.hide()
+            window.floating = False
+            self.mdi.addSubWindow(window)
+            window.setGeometry(window._mdi_geometry)
+        self._active_window = window
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        if not floating:
+            self.mdi.setActiveSubWindow(window)
+        self.selection_changed()
 
     def selection(self):
         """Selected entries: the image window's entry, or the contact sheet selection."""
@@ -591,7 +748,7 @@ class MainWindow(QMainWindow):
         sheet = self.active_sheet() is not None
         focus = self.focused()
         enable = {
-            32868: has, 57602: self.mdi.activeSubWindow() is not None, 57603: has, 57604: has, 32861: has,
+            32868: has, 57602: self.active_document() is not None, 57603: has, 57604: has, 32861: has,
             57607: sheet, 57609: sheet, 33108: has, 33106: has, 32870: has and self.active_image() is None,
             57634: focus is not None, 32865: focus is not None, 32866: has and self.clipboard is not None,
             33196: has and self.clipboard is not None, 57642: sheet, 32858: sheet, 32859: sheet, 32860: sheet,
@@ -616,6 +773,9 @@ class MainWindow(QMainWindow):
             act = self.acts.get(cmd)
             if act is not None and act.data() != "unimplemented":
                 act.setEnabled(bool(on))
+        active_window = self.active_document()
+        self.float_window_action.setEnabled(active_window is not None and not active_window.floating)
+        self.reattach_window_action.setEnabled(active_window is not None and active_window.floating)
         if self.look_menu is not None:
             self.look_menu.setEnabled(raw)
             for name, act in self.look_acts.items():
@@ -687,7 +847,12 @@ class MainWindow(QMainWindow):
         folder = Path(folder)
         for sw in self.sheets:
             if sw.sheet.folder == folder and not sw.standalone:
-                self.mdi.setActiveSubWindow(sw)
+                if sw.floating:
+                    self._document_activated(sw)
+                    sw.raise_()
+                    sw.activateWindow()
+                else:
+                    self.mdi.setActiveSubWindow(sw)
                 return sw
         sheet = Sheet(folder)
         if self.q.value("Last Thumbnail Sort Order", "name") == "date":
@@ -752,7 +917,12 @@ class MainWindow(QMainWindow):
     def open_image(self, entry, sheet_win):
         for w in sheet_win.images:
             if w.entry is entry:
-                self.mdi.setActiveSubWindow(w)
+                if w.floating:
+                    self._document_activated(w)
+                    w.raise_()
+                    w.activateWindow()
+                else:
+                    self.mdi.setActiveSubWindow(w)
                 return w
         w = ImageWindow(self, sheet_win, entry)
         self.mdi.addSubWindow(w)
@@ -793,7 +963,7 @@ class MainWindow(QMainWindow):
 
     def _show_render(self, token, img):
         w, n = token
-        if n != w.token or w not in self.mdi.subWindowList():
+        if n != w.token or not self.is_open_document(w):
             return
         e = w.entry
         meta = e.meta or {}
@@ -812,7 +982,7 @@ class MainWindow(QMainWindow):
         self.selection_changed()
 
     def close_active(self):
-        w = self.mdi.activeSubWindow()
+        w = self.active_document()
         if w:
             w.close()
 
@@ -1303,11 +1473,14 @@ class MainWindow(QMainWindow):
 
     def preferences(self):
         spaces = pipeline.working_spaces(self.pdir)
-        dlg = D.PreferencesDialog(self.res, self, self.opts, self.q.value("Send Files To Path", ""), spaces)
+        dlg = D.PreferencesDialog(self.res, self, self.opts, self.q.value("Send Files To Path", ""), spaces,
+                                 self.appearance)
         if dlg.exec() == D.QDialog.Accepted:
             self.opts = dlg.opts
             self.q.setValue("OutputOptions", self.opts.to_json())
             self.q.setValue("Send Files To Path", dlg.send_folder)
+            if dlg.appearance != self.appearance:
+                self.set_appearance(dlg.appearance)
             for sw in self.sheets:
                 for w in sw.images:
                     self.render_window(w)
@@ -1833,11 +2006,17 @@ class MainWindow(QMainWindow):
             if not self.confirm_save(sw.sheet.dirty()):
                 ev.ignore()
                 return
+        self._closing_documents = True
+        for sw in list(self.sheets):
+            sw.close()
         self.mdi.subWindowActivated.disconnect()
+        if self.hist_dock.isFloating():
+            self.q.setValue("Histogram Dock Size", self.hist_dock.size())
         self.q.setValue("MainFrame Position", self.saveGeometry())
         self.q.setValue("ControlBar States", self.saveState())
         for cu in list(self.closeups):
             cu.close()
+        self.q.sync()
         super().closeEvent(ev)
 
 
@@ -1921,6 +2100,9 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DCS Photo Desk")
     app.setOrganizationName("Kodak")
+    ini = os.environ.get("PHOTODESK_SETTINGS")
+    settings = QSettings(ini, QSettings.IniFormat) if ini else QSettings("Kodak", "DCS Photo Desk")
+    apply_appearance(app, settings.value("Appearance", "light"))
     try:
         res = R.Resources.load()
     except R.MissingResources:

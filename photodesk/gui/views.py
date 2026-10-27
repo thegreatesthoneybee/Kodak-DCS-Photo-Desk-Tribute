@@ -1,7 +1,7 @@
 """Contact sheet, full image rendering, close-up and histogram widgets."""
 import numpy as np
 from PySide6.QtCore import QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDrag, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QDrag, QImage, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QListWidget, QListWidgetItem, QScrollArea, QStyle, QStyledItemDelegate,
                                QToolTip, QWidget)
 
@@ -58,6 +58,9 @@ class Task(QRunnable):
         except Exception as e:  # reported to the UI through the failed signal
             outcome = (self.signals.failed, f"{type(e).__name__}: {e}")
         else:
+            if self.stale and self.stale():
+                Task._alive.discard(self)
+                return
             outcome = (self.signals.done, result)
         try:
             outcome[0].emit(self.token, outcome[1])
@@ -132,13 +135,13 @@ class ThumbDelegate(QStyledItemDelegate):
         r = option.rect.adjusted(2, 2, -2, -2)
         selected = option.state & QStyle.State_Selected
         p.save()
-        p.fillRect(r, QColor(192, 192, 192))
+        p.fillRect(r, v.palette().color(QPalette.ColorRole.Base))
         # The selected thumbnail with the focus is outlined in yellow, other selected ones in red.
         focus = index.row() == v.currentRow()
         if selected:
             pen = QPen(QColor(255, 255, 0) if focus else QColor(255, 0, 0), 3)
         else:
-            pen = QPen(QColor(128, 128, 128), 1)
+            pen = QPen(v.palette().color(QPalette.ColorRole.Mid), 1)
         p.setPen(pen)
         p.drawRect(r.adjusted(1, 1, -1, -1))
         info = v.show_info and v.zoom >= 50
@@ -219,7 +222,6 @@ class ContactSheetView(QListWidget):
         self.setSelectionMode(QListWidget.ExtendedSelection)
         self.setUniformItemSizes(True)
         self.setSpacing(2)
-        self.setStyleSheet("QListWidget { background: rgb(128,128,128); }")
         self.setItemDelegate(ThumbDelegate(self))
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -370,7 +372,7 @@ class ImageCanvas(QWidget):
     def paintEvent(self, e):
         v = self.view
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(128, 128, 128))
+        p.fillRect(self.rect(), v.palette().color(QPalette.ColorRole.Dark))
         if v.image is None:
             return
         target = v.image_rect()
@@ -409,7 +411,6 @@ class ImageView(QScrollArea):
         self.canvas = ImageCanvas(self)
         self.setWidget(self.canvas)
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("QScrollArea { background: rgb(128,128,128); }")
         self.image = None              # QImage of the uncropped oriented render
         self.array = None
         self.full_size = (1, 1)        # full image size (pixels) of the oriented, uncropped image
@@ -623,18 +624,21 @@ class HistogramWidget(QWidget):
 
     def paintEvent(self, e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(255, 255, 255))
-        p.setPen(QColor(0, 0, 0))
+        palette = self.palette()
+        p.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
+        p.setPen(palette.color(QPalette.ColorRole.Text))
         p.drawRect(self.rect().adjusted(0, 0, -1, -1))
         if self.hist is None:
             return
         peak = max(1, max(h[1:255].max() for h in self.hist))
         w, h = self.width() - 2, self.height() - 2
-        layers = [(self.hist[0], QColor(0, 0, 0))]
-        for i, (k, col) in enumerate((("r", QColor(255, 0, 0)), ("g", QColor(0, 170, 0)), ("b", QColor(0, 0, 255)))):
+        layers = [(self.hist[0], palette.color(QPalette.ColorRole.Text))]
+        colors = (("r", QColor(190, 0, 0)), ("g", QColor(0, 120, 0)), ("b", QColor(0, 0, 210)))
+        for i, (k, col) in enumerate(colors):
             if self.channels[k]:
                 layers.append((self.hist[i + 1], col))
         for hist, col in layers:
+            col.setAlpha(150)
             p.setPen(col)
             for x in range(w):
                 v = hist[x * 256 // w]
@@ -670,24 +674,27 @@ class EVHistogram(QWidget):
 
     def paintEvent(self, e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(255, 255, 255))
-        p.setPen(QColor(0, 0, 0))
+        palette = self.palette()
+        p.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
+        p.setPen(palette.color(QPalette.ColorRole.Text))
         p.drawRect(self.rect().adjusted(0, 0, -1, -1))
         gh = self.height() - 14
         if self.hist is not None:
             hist, edges = self.hist
             peak = max(1, hist.max())
-            p.setPen(QColor(64, 64, 64))
+            p.setPen(palette.color(QPalette.ColorRole.Mid))
             for v, a, b in zip(hist, edges[:-1], edges[1:]):
                 x0, x1 = int(self._x(a)), int(self._x(b))
                 bh = int(v / peak * (gh - 4))
                 for x in range(x0, max(x0 + 1, x1)):
                     p.drawLine(x, gh, x, gh - bh)
-        for ev, col in zip(self.tone, (QColor(0, 0, 0), QColor(128, 128, 128), QColor(255, 255, 255))):
+        for ev, col in zip(self.tone, (palette.color(QPalette.ColorRole.Text),
+                                       palette.color(QPalette.ColorRole.Mid),
+                                       palette.color(QPalette.ColorRole.Base))):
             x = self._x(ev)
             pts = [QPointF(x, gh + 1), QPointF(x - 5, gh + 12), QPointF(x + 5, gh + 12)]
             p.setBrush(col)
-            p.setPen(QColor(0, 0, 0))
+            p.setPen(palette.color(QPalette.ColorRole.Text))
             p.drawPolygon(pts)
 
     def mousePressEvent(self, e):
@@ -722,7 +729,7 @@ class CloseUpView(QWidget):
 
     def paintEvent(self, e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(128, 128, 128))
+        p.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Dark))
         if self.image is not None:
             x = (self.width() - self.image.width()) // 2
             y = (self.height() - self.image.height()) // 2
