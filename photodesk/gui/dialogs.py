@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QTextEdit, QWidget,
 )
 
-from .. import export, iptc, pipeline
+from .. import __version__, export, iptc, pipeline
 from . import res as R
 from .views import EVHistogram, to_qimage
 
@@ -1085,7 +1085,14 @@ class AboutDialog(TemplateDialog):
 
     def __init__(self, res, parent):
         super().__init__(res, parent)
+        self.setWindowTitle("About PhotoDesk (Tribute)")
+        self.setFixedHeight(self.height() + res.size((0, 26))[1])
         self.b.all[0][1].setPixmap(res.app_icon().pixmap(32, 32))
+        self.b.all[1][1].setText(f"PhotoDesk (Tribute) v{__version__} — Based on Kodak DCS Photo Desk 4.3")
+        self.b.all[1][1].setGeometry(res.rect((40, 8, 264, 10)))
+        self.b.all[2][1].setText("Created by GO BANGWON (Korea)")
+        self.b.all[2][1].setGeometry(res.rect((40, 24, 200, 9)))
+        self.b[OK].setGeometry(res.rect((247, 49, 50, 14)))
 
 
 class Splash(QDialog):
