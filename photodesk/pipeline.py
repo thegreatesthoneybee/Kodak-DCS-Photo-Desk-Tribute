@@ -579,12 +579,27 @@ def working_spaces(directory=None):
     return found
 
 
+def space_setting(path, directory=None):
+    """How a chosen working space is stored: the file name for a profile of the profile directory
+    (which moves with the app: macOS runs downloaded apps from a new random path each launch),
+    the full path for a system profile."""
+    p = Path(path)
+    d = Path(directory) if directory else profiles.profile_dir()
+    return p.name if (d / p.name).is_file() and p.parent.resolve() == d.resolve() else str(p)
+
+
 def resolve_space(space, directory=None):
-    """Accept a profile path or a file name in the profile directory."""
+    """Profile file of a stored working space: a path, or a file name in the profile directory or
+    the system colour folders. A path that no longer exists (an app that moved since it was saved)
+    is looked up by its file name, and the default working space used if it is gone."""
     p = Path(space)
     if p.is_file():
         return str(p)
-    return str(Path(directory or profiles.profile_dir()) / space)
+    d = Path(directory) if directory else profiles.profile_dir()
+    for candidate in [d / p.name] + [q for q in profiles.system_color_dirs_profiles() if q.name == p.name]:
+        if candidate.is_file():
+            return str(candidate)
+    return str(d / DEFAULT_WORKING_SPACE)
 
 
 @functools.lru_cache(maxsize=16)

@@ -778,8 +778,8 @@ class PreferencesDialog(TemplateDialog):
         b[1179].setEditable(False)
         for path, desc in spaces:
             b[1179].addItem(desc, path)
-        idx = next((i for i, (p, _) in enumerate(spaces) if p.endswith(self.opts.working_space)
-                    or p == self.opts.working_space), 0)
+        current = pipeline.resolve_space(self.opts.working_space)
+        idx = next((i for i, (p, _) in enumerate(spaces) if os.path.normcase(p) == os.path.normcase(current)), 0)
         b[1179].setCurrentIndex(idx)
         b[1130].setText(send_folder or "")
         b[1131].clicked.connect(self._choose)
@@ -894,7 +894,8 @@ class PreferencesDialog(TemplateDialog):
             return
         o.resolution = r
         o.resolution_unit = "cm" if b[1375].currentIndex() == 1 else "in"
-        o.working_space = b[1179].currentData() or o.working_space
+        if b[1179].currentData():
+            o.working_space = pipeline.space_setting(b[1179].currentData())
         o.resize = b[1338].isChecked()
         o.scale_style = ("percent" if b[1366].isChecked() else "fill" if b[1365].isChecked()
                          else "fit_trim" if b[1363].isChecked() else "fit_fill")

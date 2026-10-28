@@ -358,6 +358,9 @@ class MainWindow(QMainWindow):
         self.crop_other = (self.q.value("Constrained Crop Width X 10000", 40000, int) / 10000,
                            self.q.value("Constrained Crop Height X 10000", 60000, int) / 10000)
         self.opts = export.OutputOptions.from_json(self.q.value("OutputOptions", {}) or {})
+        # Older versions stored the full path of a bundled profile, which breaks once the app moves.
+        self.opts.working_space = pipeline.space_setting(pipeline.resolve_space(self.opts.working_space, self.pdir),
+                                                         self.pdir)
         self.preview_override = None
         self.closeups = []
         self._active_window = None

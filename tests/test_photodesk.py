@@ -562,6 +562,23 @@ def test_working_spaces(profile_dir):
     np.testing.assert_allclose(white, 1.0, atol=2e-3)
 
 
+def test_working_space_survives_app_move(tmp_path):
+    # macOS runs a downloaded app from a new random path each launch (App Translocation): a stored
+    # bundled profile must be found again in the current profile directory.
+    old, new = tmp_path / "old/profiles", tmp_path / "new/profiles"
+    for d in (old, new):
+        d.mkdir(parents=True)
+        (d / "KODAK_sRGB.icm").write_bytes(b"x")
+        (d / pipeline.DEFAULT_WORKING_SPACE).write_bytes(b"x")
+    assert pipeline.space_setting(str(new / "KODAK_sRGB.icm"), new) == "KODAK_sRGB.icm"
+    assert pipeline.resolve_space("KODAK_sRGB.icm", new) == str(new / "KODAK_sRGB.icm")
+    stale = str(tmp_path / "gone/profiles/KODAK_sRGB.icm")
+    assert pipeline.resolve_space(stale, new) == str(new / "KODAK_sRGB.icm")
+    # a profile outside the profile directory keeps its path; an unknown one falls back to sRGB
+    assert pipeline.space_setting(str(old / "KODAK_sRGB.icm"), new) == str(old / "KODAK_sRGB.icm")
+    assert pipeline.resolve_space(str(tmp_path / "gone/Missing.icc"), new) == str(new / pipeline.DEFAULT_WORKING_SPACE)
+
+
 @need_sample
 def test_decode_sample(raw):
     assert raw.make == "Kodak" and raw.model == "ProBack645"
