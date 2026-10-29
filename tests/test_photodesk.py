@@ -184,6 +184,8 @@ def test_stored_process_levels_reject_invalid_blocks(tmp_path, monkeypatch):
     assert camera.stored_process_levels(path) is None
     struct.pack_into(">I", data, 4, 3)
     assert camera.stored_process_levels(path) is None
+    struct.pack_into(">i", data, 72, 2)
+    assert camera.stored_process_levels(path) == (-9.5, -0.2, 4.0)
 
 
 def test_stored_process_levels_little_endian_and_sidecar(tmp_path, monkeypatch):
@@ -208,9 +210,17 @@ def test_saved_kelvin_tuple_normalizes_preset_illumination(tmp_path, monkeypatch
     data = bytearray(112)
     struct.pack_into("<II", data, 4, 2, 112)
     struct.pack_into("<III", data, 16, 3200, 1, 3)
+    struct.pack_into("<3h", data, 60, -100, 4, 100)
     monkeypatch.setattr(camera, "read_kodak_tags", lambda *args: {5011: tuple(data)})
     params = camera.stored_process_parameters(path)
     assert (params["white_point"], params["kelvin_mode"], params["kelvin_illumination"]) == (3200, 1, "Tungsten")
+    assert params["color_balance"] == (-100, 4, 100)
+    monkeypatch.setattr(camera, "read_make_model", lambda *_: ("Kodak", "DCS Pro SLR/n"))
+    monkeypatch.setattr(camera, "capture_info", lambda *_: {"model": "DCS Pro SLR/n"})
+    monkeypatch.setattr(camera, "balance_curves", lambda *_: {})
+    assert pipeline.load_settings(path).color_balance == (-100, 4, 100)
+    struct.pack_into("<h", data, 60, -101)
+    assert camera.stored_process_parameters(path)["color_balance"] == (0, 0, 0)
     struct.pack_into("<III", data, 16, 5200, 5, 2)
     params = camera.stored_process_parameters(path)
     assert (params["kelvin_mode"], params["kelvin_illumination"]) == (5, "Fluorescent")
@@ -262,6 +272,13 @@ def test_saved_kelvin_uses_its_own_illumination(monkeypatch):
     np.testing.assert_allclose(pipeline.white_balance(raw, settings), [3.0, 3.0, 1.0])
 
 
+def test_invalid_preset_factor_triplet_is_ignored(monkeypatch):
+    monkeypatch.setattr(camera, "read_kodak_tags", lambda *_: {2130: (1.0, 0.099, 1.0), 2131: (1.0, 0.1, 1.0)})
+    factors = camera.balance_factors("sample.dcr")
+    assert factors["Daylight"] == (1.0, 1.0, 1.0)
+    assert factors["Tungsten"] == (1.0, 0.1, 1.0)
+
+
 def test_saved_auto_kelvin_uses_capture_calibration(tmp_path, monkeypatch):
     import shutil
     if not SLR_C_SAMPLE.is_file():
@@ -275,7 +292,9 @@ def test_saved_auto_kelvin_uses_capture_calibration(tmp_path, monkeypatch):
     raw = pipeline.decode(path, half_size=True)
     monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.array([1.2, 1.0, 1.3]))
     np.testing.assert_allclose(pipeline.white_balance(raw, settings), [2621 / 2048, 1.0, 2621 / 1934])
-    np.testing.assert_allclose(pipeline.auto_kelvin_factors(raw), [1, 0.98190867, 1.03181514], atol=1e-6)
+    temperature, factors = pipeline.auto_kelvin_calibration(raw)
+    assert temperature == 4818
+    np.testing.assert_allclose(factors, [1, 0.98190867, 1.03181514], atol=1e-6)
     np.testing.assert_allclose(pipeline.white_balance(raw, settings.copy(white_point=5000)),
                                [2577 / 2048, 1.0, 2577 / 1864])
     assert settings.copy(white_point=5300).saved_balance_point is None
@@ -303,6 +322,47 @@ def test_auto_kelvin_calibration_requires_valid_metadata(monkeypatch):
     assert camera.auto_kelvin_illumination("sample.dcr") is None
 
 
+@pytest.mark.parametrize("path,illumination,temperature,factors,point", [
+    (ROOT / "raw/SLRc/F5KG7096.DCR", "Fluorescent", 6174, (1, 0.98863626, 0.87797266), (2048, 2579, 1529)),
+    (ROOT / "raw/SLRn/GQ432034.DCR", "Daylight", 5782, (1, 0.97900057, 0.94161063), (2048, 2764, 1994)),
+])
+def test_custom_kelvin_calibration_from_capture(path, illumination, temperature, factors, point):
+    if not path.is_file():
+        pytest.skip("camera sample not available")
+    raw = pipeline.decode(path, half_size=True)
+    assert raw.custom_kelvin_illumination == illumination
+    actual_temperature, actual_factors = pipeline.custom_kelvin_calibration(raw)
+    assert actual_temperature == temperature
+    np.testing.assert_allclose(actual_factors, factors, atol=1e-6)
+    settings = pipeline.Settings(balance="custom", white_point=6000, kelvin_mode=4,
+                                 kelvin_illumination=illumination)
+    np.testing.assert_allclose(pipeline.white_balance(raw, settings), max(point) / np.asarray(point))
+
+
+def test_kelvin_mode_six_recomputes_factors():
+    if not SLR_C_SAMPLE.is_file():
+        pytest.skip("camera sample not available")
+    raw = pipeline.decode(SLR_C_SAMPLE, half_size=True)
+    settings = pipeline.Settings(white_point=5000, kelvin_mode=6, kelvin_illumination="Daylight")
+    np.testing.assert_allclose(pipeline.white_balance(raw, settings), [2526 / 2048, 1.0, 2526 / 1664])
+    assert not np.allclose(pipeline.white_balance(raw, settings.copy(white_point=5100)),
+                           pipeline.white_balance(raw, settings))
+
+
+@pytest.mark.parametrize("inverse,temperature", [
+    ((0, 1000, 4000), 2500), ((2000, 0, 4000), 3000), ((2000, 4000, 0), 3000),
+])
+def test_kelvin_inverse_selects_coefficient_branches(inverse, temperature):
+    from types import SimpleNamespace
+    curve = [0.0] * 27
+    curve[0], curve[4], curve[8] = 2048, 2000, 1800
+    curve[12], curve[16], curve[20] = inverse
+    raw = SimpleNamespace(balance_curves={"Daylight": curve}, balance_factors={"Daylight": (1, 1, 1)})
+    assert pipeline._kelvin_calibration(raw, "Daylight", (2048, 2048, 2048), 5)[0] == temperature
+    assert pipeline._kelvin_calibration(raw, "Daylight", (2048, 2048, 2048), 4) is None
+    assert pipeline._kelvin_calibration(raw, "Daylight", (1, 1, 1), 5) is None
+
+
 def test_stored_render_record_checks_size(tmp_path, monkeypatch):
     import struct
     path = tmp_path / "sample.dcr"
@@ -324,6 +384,18 @@ def test_stored_render_record_checks_size(tmp_path, monkeypatch):
     struct.pack_into("<I", data, 8, 36)
     del data[36:]
     assert camera.stored_render_parameters(path) == {"exposure": -0.5, "lighting": "Daylight"}
+
+
+def test_long_stored_records_read_only_supported_prefix(tmp_path):
+    import struct
+    path = tmp_path / "sample.dcr"
+    root = struct.pack("<H", 1) + struct.pack("<HHII", 0x8290, 4, 1, 26) + b"\0" * 4
+    kodak = (struct.pack("<H", 2) + struct.pack("<HHII", 1021, 7, 128, 56)
+             + struct.pack("<HHII", 5011, 7, 136, 184) + b"\0" * 4)
+    path.write_bytes(b"II*\0" + struct.pack("<I", 8) + root + kodak + bytes(range(128)) + bytes(range(136)))
+    tags = camera.read_kodak_tags(path, (1021, 5011))
+    assert tags[1021] == tuple(range(72))
+    assert tags[5011] == tuple(range(112))
 
 
 def test_pro_slr_color_balance_uses_camera_constants(monkeypatch):
@@ -565,6 +637,62 @@ def test_non_slr_scene_respects_tone_enable(monkeypatch):
     settings = pipeline.Settings(tone=(-9.5, -1.0, 3.4), tone_enabled=False)
     np.testing.assert_array_equal(pipeline.scene_linear(raw, settings), raw.camera_rgb)
     assert not np.allclose(pipeline.scene_linear(raw, settings.copy(tone_enabled=True)), raw.camera_rgb)
+
+
+def test_auto_balance_region_uses_whole_scene(monkeypatch):
+    import dataclasses
+    @dataclasses.dataclass
+    class Raw:
+        camera_rgb: np.ndarray
+        flip: int = 0
+        balance_points: dict = dataclasses.field(default_factory=dict)
+        caps: object = dataclasses.field(default_factory=lambda: type("Caps", (), {"pro_back": False})())
+    scene = np.empty((64, 64, 3), dtype=np.float32)
+    scene[:, :32] = (0.1, 0.5, 0.2)
+    scene[:, 32:] = (0.7, 0.2, 0.3)
+    raw = Raw(scene)
+    seen = []
+    def fake_render(sub, settings, *args):
+        seen.append(settings.auto_balance_wb)
+        return sub.camera_rgb
+    monkeypatch.setattr(pipeline, "render", fake_render)
+    settings = pipeline.Settings(balance="auto")
+    pipeline.render_region(raw, settings, (0, 0, 0.5, 1), margin=0)
+    np.testing.assert_allclose(seen[0], pipeline.auto_wb(scene))
+    assert not np.allclose(seen[0], pipeline.auto_wb(scene[:, :32]))
+    assert pipeline.Settings.from_json(settings.copy(auto_balance_wb=seen[0]).to_json()).auto_balance_wb == seen[0]
+
+
+def test_auto_balance_uses_recorded_camera_point():
+    if not SLR_C_SAMPLE.is_file():
+        pytest.skip("camera sample not available")
+    raw = pipeline.decode(SLR_C_SAMPLE, half_size=True)
+    settings = pipeline.Settings(balance="auto")
+    np.testing.assert_allclose(pipeline.method_wb(raw, settings), [2533 / 2048, 1, 2533 / 1798])
+    assert pipeline.balance_temperature(raw, settings) == 4800
+    scene_settings = settings.copy(auto_balance_wb=(1.1, 1.0, 1.2))
+    np.testing.assert_allclose(pipeline.method_wb(raw, scene_settings), [1.1, 1, 1.2])
+    raw.balance_points["camera_auto"] = (4095, 4095, 4095)
+    assert pipeline.camera_auto_wb(raw) is None
+
+
+def test_auto_scene_does_not_change_settings_when_decode_fails(monkeypatch):
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+    settings = pipeline.Settings(exposure=0.5)
+    entry = SimpleNamespace(raw=None, small=None, path="missing.dcr",
+                            caps=SimpleNamespace(auto_scene=True), settings=settings)
+    def apply(entries, kind, change):
+        candidate = entry.settings.copy()
+        change(entry, candidate)
+        assert candidate == settings
+        return []
+    sheet = SimpleNamespace(sheet=SimpleNamespace(apply=apply))
+    window = SimpleNamespace(active_sheet=lambda: sheet, _raw_selection=lambda: [entry],
+                             after_edit=lambda changed: None)
+    monkeypatch.setattr(pipeline, "decode", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("unreadable")))
+    MainWindow.auto_scene(window)
+    assert entry.settings is settings
 
 
 def test_histogram_exposure_before_clipping(monkeypatch):

@@ -1482,16 +1482,33 @@ class MainWindow(QMainWindow):
             changed = sw.sheet.set_fields(entries, kind, **fields)
         self.after_edit(changed)
 
-    def _set_balance_temperature(self, e, s):
+    def _set_balance_temperature(self, e, s, scene_auto=False):
         """White Point slider shows the colour temperature of the new balance (and starts from it)."""
         s.kelvin_mode = None
         s.kelvin_illumination = None
         s.saved_balance_point = None
+        s.auto_balance_wb = None
         raw = e.raw or e.small
         if raw is None:
             try:
                 raw = e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
             except Exception:
+                return
+        if s.balance == "auto" and scene_auto:
+            s.auto_balance_wb = tuple(float(v) for v in pipeline.auto_wb(raw.camera_rgb))
+        elif raw.caps.pro_slr and s.balance == "auto":
+            calibration = pipeline.auto_kelvin_calibration(raw)
+            if calibration is not None:
+                s.kelvin_mode = 5
+                s.kelvin_illumination = raw.auto_kelvin_illumination
+                s.saved_balance_point = tuple(float(v) for v in pipeline.camera_auto_point(raw))
+        elif raw.caps.pro_slr and s.balance == "custom":
+            calibration = pipeline.custom_kelvin_calibration(raw)
+            if calibration is not None:
+                s.kelvin_mode = 4
+                s.kelvin_illumination = raw.custom_kelvin_illumination
+                s.saved_balance_point = tuple(int(v) for v in raw.balance_points["custom"])
+                s.white_point = s.white_point_ref = ((calibration[0] + 50) // 100) * 100
                 return
         s.white_point = s.white_point_ref = pipeline.balance_temperature(raw, s)
 
@@ -2095,8 +2112,13 @@ class MainWindow(QMainWindow):
         sw = self.active_sheet()
         if sw:
             def change(e, s):
+                if e.raw is None and e.small is None:
+                    try:
+                        e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
+                    except Exception:
+                        return
                 s.balance = "auto"
-                self._set_balance_temperature(e, s)
+                self._set_balance_temperature(e, s, scene_auto=True)
                 raw = e.raw or e.small
                 if raw is not None:
                     s.exposure = pipeline.auto_exposure(raw, s)

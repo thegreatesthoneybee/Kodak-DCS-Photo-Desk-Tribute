@@ -206,8 +206,19 @@ def read_kodak_tags(path, tags):
             return out
         for tag, typ, cnt, val in entries(struct.unpack(bo + "I", kodak)[0]):
             code = _TIFF_INTS.get(typ)
-            if tag not in tags or code is None or (tag in (1021, 5011) and typ != 7) or \
-                    cnt > (112 if tag in (1021, 5011) else 64):
+            if tag not in tags or code is None or (tag in (1021, 5011) and typ != 7):
+                continue
+            if tag in (1021, 5011):
+                count = min(cnt, 72 if tag == 1021 else 112)
+                if cnt <= 4:
+                    raw = val[:count]
+                else:
+                    f.seek(struct.unpack(bo + "I", val)[0])
+                    raw = f.read(count)
+                if len(raw) == count:
+                    out[tag] = tuple(raw)
+                continue
+            if cnt > 64:
                 continue
             size = struct.calcsize(code) * cnt
             if size <= 4:
@@ -248,15 +259,15 @@ def stored_render_parameters(path):
 
 
 def stored_process_parameters(path):
-    """Read validated fields from Kodak's version 2 stored processing parameters."""
+    """Read validated fields from Kodak's version 2 or later processing record."""
     data = read_kodak_tags(path, (5011,)).get(5011, ())
-    if len(data) != 112:
+    if not data:
         return {}
     with open(path, "rb") as f:
         order = ">" if f.read(2) == b"MM" else "<"
-    data = bytes(data)
-    version, size = struct.unpack_from(order + "II", data, 4)
-    if version != 2 or size != 112:
+    data = bytes(data[:112]).ljust(112, b"\0")
+    version = struct.unpack_from(order + "I", data, 4)[0]
+    if version < 2:
         return {}
     result = {}
     temperature, mode, illuminant = struct.unpack_from(order + "III", data, 16)
@@ -264,6 +275,8 @@ def stored_process_parameters(path):
         result["white_point"] = temperature
         result["kelvin_mode"] = mode
         result["kelvin_illumination"] = ILLUMINANTS[mode if mode < 4 else illuminant]
+    color_balance = struct.unpack_from(order + "3h", data, 60)
+    result["color_balance"] = color_balance if all(-100 <= value <= 100 for value in color_balance) else (0, 0, 0)
     result["tone_enabled"] = bool(struct.unpack_from(order + "I", data, 92)[0])
     levels = []
     for offset in (68, 76, 84):
@@ -289,9 +302,11 @@ def balance_curves(path):
 def balance_factors(path):
     """Camera-recorded RGB correction factors for the four preset illuminants."""
     tags = read_kodak_tags(path, (2130, 2131, 2132, 2133))
-    return {name: tags[2130 + i] for i, name in enumerate(ILLUMINANTS)
-            if len(tags.get(2130 + i, ())) == 3
-            and all(math.isfinite(v) and v > 0 for v in tags[2130 + i])}
+    factors = {}
+    for i, name in enumerate(ILLUMINANTS):
+        values = tags.get(2130 + i, ())
+        factors[name] = values if len(values) == 3 and all(math.isfinite(v) and v >= 0.1 for v in values) else (1.0, 1.0, 1.0)
+    return factors
 
 
 def auto_kelvin_illumination(path):
@@ -308,6 +323,19 @@ def auto_kelvin_illumination(path):
             return None
     point = tags.get(2125, ())
     if len(point) != 3 or not all(1 <= value <= 10000 for value in point) or all(value == 4095 for value in point):
+        return None
+    return ILLUMINANTS[illumination[0]]
+
+
+def custom_kelvin_illumination(path):
+    """Return the recorded custom-balance illuminant when its point is usable."""
+    tags = read_kodak_tags(path, (1029, 2124, 3125))
+    illumination, point = tags.get(1029, ()), tags.get(2124, ())
+    if len(illumination) != 1 or not 0 <= illumination[0] < len(ILLUMINANTS):
+        return None
+    if not tags.get(3125) or not tags[3125][0] or len(point) != 3:
+        return None
+    if not all(10 <= value <= 10000 for value in point) or all(value == 4095 for value in point):
         return None
     return ILLUMINANTS[illumination[0]]
 

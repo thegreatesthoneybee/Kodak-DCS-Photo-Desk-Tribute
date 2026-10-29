@@ -97,6 +97,24 @@ def main(folder, shot):
     w.acts[57644].trigger()
     assert entry.settings.lighting == "Tungsten"
     w.acts[57643].trigger()
+    w.acts[32815].trigger()                    # Balance > Auto
+    assert entry.settings.balance == "auto" and entry.settings.auto_balance_wb is None
+    if entry.path.name.upper() == "F5KG7096.DCR":
+        assert entry.settings.kelvin_mode == 5 and entry.settings.white_point == 4800
+        assert entry.settings.saved_balance_point == (2048, 2533, 1798)
+    if entry.path.name.upper() == "GQ432034.DCR":
+        assert entry.settings.kelvin_mode == 5 and entry.settings.white_point == 5000
+    w.acts[57643].trigger()
+    assert entry.settings.balance == "preset" and entry.settings.auto_balance_wb is None
+    w.acts[32814].trigger()                    # Balance > Custom
+    assert entry.settings.balance == "custom"
+    if entry.path.name.upper() == "F5KG7096.DCR":
+        assert entry.settings.kelvin_mode == 4 and entry.settings.white_point == 6200
+        assert entry.settings.saved_balance_point == (696, 888, 532)
+    if entry.path.name.upper() == "GQ432034.DCR":
+        assert entry.settings.kelvin_mode == 4 and entry.settings.white_point == 5800
+    w.acts[57643].trigger()
+    assert entry.settings.balance == "preset"
     w.acts[32855].trigger()                    # Tag
     assert entry.settings.tagged
     w.acts[32838].trigger()                    # Rotate CW

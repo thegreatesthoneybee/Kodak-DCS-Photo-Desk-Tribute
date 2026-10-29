@@ -87,6 +87,7 @@ class Settings:
     look: str = DEFAULT_LOOK
     balance: str = "preset"
     click_wb: tuple = (1.0, 1.0, 1.0)   # camera RGB multipliers from the Click Balance tool
+    auto_balance_wb: tuple = None       # scene-wide balance calculated when Auto is selected
     white_point: int = WHITE_POINT_DEFAULT
     # Colour temperature the balance method's own balance corresponds to; White Point re-balances
     # from it, so white_point == white_point_ref leaves the balance as the method set it.
@@ -115,7 +116,7 @@ class Settings:
 
     def to_json(self):
         d = dataclasses.asdict(self)
-        for k in ("click_wb", "color_balance", "tone", "crop", "saved_balance_point"):
+        for k in ("click_wb", "auto_balance_wb", "color_balance", "tone", "crop", "saved_balance_point"):
             if d[k] is not None:
                 d[k] = list(d[k])
         return d
@@ -125,6 +126,7 @@ class Settings:
         known = {f.name for f in dataclasses.fields(cls)}
         s = cls(**{k: v for k, v in d.items() if k in known})
         s.click_wb = tuple(float(v) for v in s.click_wb)
+        s.auto_balance_wb = tuple(float(v) for v in s.auto_balance_wb) if s.auto_balance_wb is not None else None
         s.color_balance = tuple(int(v) for v in s.color_balance)
         s.tone = tuple(float(v) for v in s.tone)
         s.saved_balance_point = tuple(s.saved_balance_point) if s.saved_balance_point is not None else None
@@ -147,6 +149,8 @@ class Settings:
             changes["kelvin_mode"] = None
             if "kelvin_illumination" not in changes:
                 changes["kelvin_illumination"] = None
+        if "balance" in changes and changes["balance"] != self.balance and "auto_balance_wb" not in changes:
+            changes["auto_balance_wb"] = None
         return dataclasses.replace(Settings.from_json(self.to_json()), **changes)
 
     def sharpening_on(self):
@@ -250,6 +254,8 @@ def load_settings(raw_path):
     levels = params.get("tone")
     if levels is not None and validate_tone(levels) is None:
         settings.tone = levels
+    if "color_balance" in params:
+        settings.color_balance = params["color_balance"]
     if "tone_enabled" in params:
         settings.tone_enabled = params["tone_enabled"]
     if "white_point" in params and camera.balance_curves(raw_path).get(params["kelvin_illumination"]):
@@ -295,6 +301,7 @@ class RawImage:
     balance_curves: dict = dataclasses.field(default_factory=dict)
     balance_factors: dict = dataclasses.field(default_factory=dict)
     auto_kelvin_illumination: str = None
+    custom_kelvin_illumination: str = None
 
     @property
     def caps(self):
@@ -335,7 +342,7 @@ def decode(path, half_size=False, algorithm="AHD"):
     return RawImage(path, make, model, cam, wb / wb[1], daylight / daylight[1], rgb_xyz,
                     camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h),
                     camera.balance_points(path), camera.balance_curves(path), camera.balance_factors(path),
-                    camera.auto_kelvin_illumination(path))
+                    camera.auto_kelvin_illumination(path), camera.custom_kelvin_illumination(path))
 
 
 def reduced(raw, long_edge):
@@ -467,6 +474,10 @@ def click_wb(cam, x, y, radius=2):
 def balance_temperature(raw, settings):
     """Colour temperature (K, rounded to 100 within WHITE_POINT_RANGE) whose Preset-style balance
     (Daylight balance shifted along the illuminant locus) is closest to the balance method's own."""
+    if settings.balance == "auto" and settings.auto_balance_wb is None and raw.caps.pro_slr:
+        calibration = auto_kelvin_calibration(raw)
+        if calibration is not None:
+            return ((calibration[0] + 50) // 100) * 100
     curve = raw.balance_curves.get(settings.lighting) if raw.caps.pro_slr else None
     if settings.balance == "preset" and curve:
         nominal = curve[25]
@@ -488,6 +499,27 @@ def balance_temperature(raw, settings):
     return best
 
 
+def camera_auto_point(raw):
+    """Return a valid camera Auto point in the applicable driver's coordinate scale."""
+    point = raw.balance_points.get("camera_auto")
+    if raw.caps.pro_back or point is None:
+        return None
+    point = np.floor(np.asarray(point, np.float64))
+    if not np.all(point >= 1) or np.all(point == 4095) or (raw.caps.pro_slr and np.any(point > 10000)):
+        return None
+    if raw.caps.pro_slr and auto_kelvin_calibration(raw) is not None:
+        point = np.floor(np.asarray(2048.0 * point / point[0], dtype=np.float32) + 0.5)
+    return point
+
+
+def camera_auto_wb(raw):
+    """Return valid camera-computed Auto multipliers for supported DCS images."""
+    point = camera_auto_point(raw)
+    if point is None:
+        return None
+    return np.max(point) / point if raw.caps.pro_slr else point_wb(point)
+
+
 def method_wb(raw, settings):
     """Balance of the balance method alone (before White Point and Colour Balance)."""
     if settings.balance == "click":
@@ -495,7 +527,12 @@ def method_wb(raw, settings):
     elif settings.balance == "custom":
         wb = custom_wb(raw)
     elif settings.balance == "auto":
-        wb = auto_wb(raw.camera_rgb)
+        if settings.auto_balance_wb is not None:
+            wb = np.asarray(settings.auto_balance_wb)
+        else:
+            wb = camera_auto_wb(raw)
+            if wb is None:
+                wb = auto_wb(raw.camera_rgb)
     else:
         wb = preset_wb(raw, settings.lighting)
     return wb
@@ -509,24 +546,58 @@ def kelvin_point(curve, temperature):
     return np.clip(np.floor(point + 0.5), 100, 10000)
 
 
-def auto_kelvin_factors(raw):
-    """Mode-5 factors for the documented daylight inverse-curve branch, if available."""
-    if getattr(raw, "auto_kelvin_illumination", None) != "Daylight":
+def auto_kelvin_calibration(raw):
+    """Mode-5 temperature and factors derived from the camera Auto point."""
+    return _kelvin_calibration(raw, getattr(raw, "auto_kelvin_illumination", None),
+                               raw.balance_points.get("camera_auto"), 5)
+
+
+def _kelvin_calibration(raw, illumination, point, mode):
+    curve = raw.balance_curves.get(illumination)
+    factors = getattr(raw, "balance_factors", {}).get(illumination)
+    if illumination not in camera.ILLUMINANTS or curve is None or len(curve) != 27 or point is None or mode not in (4, 5, 6):
         return None
-    curve = raw.balance_curves.get("Daylight")
-    point = raw.balance_points.get("camera_auto")
-    if curve is None or point is None or curve[12] != 0 or curve[16] == 0 or curve[20] == 0:
+    point = np.floor(np.asarray(point, dtype=np.float64))
+    if len(point) != 3 or not np.all(np.isfinite(point)) or not np.all((10 <= point) & (point <= 10000)):
         return None
-    point = np.asarray(point, dtype=np.float32)
+    point = point.astype(np.float32)
     norm = np.asarray(2048.0 * point / point[0], dtype=np.float32)
-    words = np.floor(norm + 0.5)
-    inverse_input = np.floor(2048.0 * words / words[0]) / 100.0
-    estimates = [sum(curve[i + j] * inverse_input[k] ** j for j in range(4))
-                 for k, i in ((1, 16), (2, 20))]
-    if not all(np.isfinite(value) and 100 <= value <= 11000 for value in estimates):
+    words = np.floor(norm + 0.5) % 65536
+    if mode != 5:
+        if factors is None or len(factors) != 3 or not np.all(np.isfinite(factors)) or not np.all(
+            np.asarray(factors) >= 0.1
+        ) or not np.all((10 <= words) & (words <= 10000)):
+            return None
+        words = np.floor(words / np.asarray(factors, dtype=np.float32) + 0.5) % 65536
+    if words[0] == 0:
         return None
-    reference = kelvin_point(curve, int(sum(estimates) / 2))
-    return np.asarray(norm / reference, dtype=np.float32) if reference is not None else None
+    inverse_input = (np.floor(2048.0 * words / words[0]) % 65536).astype(np.float64) * 0.01
+    coefficients = np.asarray(curve, dtype=np.float32)
+    estimates = [sum(float(coefficients[i + j]) * inverse_input[k] ** j for j in range(4))
+                 for k, i in enumerate((12, 16, 20))]
+    estimates = np.asarray(estimates, dtype=np.float32)
+    if not np.all(np.isfinite(estimates)) or np.count_nonzero((estimates < 100) | (estimates > 11000)) > 1:
+        return None
+    first, second = ((1, 2) if curve[12] == 0 else (0, 2) if curve[16] == 0 else (0, 1))
+    if mode != 5:
+        bounds = ((0.6, 1.3), (0.56, 1.11), (0.71, 1.43), (0.9, 1.8))
+        lo, hi = (float(np.float32(value)) for value in bounds[camera.ILLUMINANTS.index(illumination)])
+        if estimates[second] == 0 or not lo <= float(estimates[first]) / float(estimates[second]) <= hi:
+            return None
+    temperature = int(np.clip((float(estimates[first]) + float(estimates[second])) / 2, 100, 11000))
+    reference = kelvin_point(curve, temperature)
+    if reference is None:
+        return None
+    return temperature, np.asarray(norm / reference, dtype=np.float32)
+
+
+def custom_kelvin_calibration(raw):
+    """Mode-4 temperature and factors derived from the captured Custom point."""
+    illumination = getattr(raw, "custom_kelvin_illumination", None)
+    day_curve = raw.balance_curves.get("Daylight")
+    if day_curve is None or not 2000 <= day_curve[25] <= 11000:
+        return None
+    return _kelvin_calibration(raw, illumination, raw.balance_points.get("custom"), 4)
 
 
 def white_balance(raw, settings):
@@ -536,12 +607,21 @@ def white_balance(raw, settings):
     if raw.caps.pro_slr and settings.saved_balance_point is not None:
         point = np.asarray(settings.saved_balance_point, np.float64)
         wb = np.max(point) / point
-    elif settings.balance == "preset" and curve:
+    elif curve and (settings.balance == "preset" or settings.kelvin_mode in (4, 5, 6)):
         point = kelvin_point(curve, settings.white_point)
-        factors = (auto_kelvin_factors(raw) if settings.kelvin_mode == 5 and illumination == "Daylight"
-                   else getattr(raw, "balance_factors", {}).get(illumination)
-                   if settings.kelvin_mode is None or settings.kelvin_mode < 4
-                   else None)
+        if settings.kelvin_mode == 4:
+            calibration = custom_kelvin_calibration(raw)
+            factors = calibration[1] if calibration is not None else None
+        elif settings.kelvin_mode == 5:
+            calibration = auto_kelvin_calibration(raw)
+            factors = calibration[1] if calibration is not None else None
+        elif settings.kelvin_mode == 6:
+            calibration = _kelvin_calibration(raw, illumination, point, 6) if point is not None else None
+            factors = calibration[1] if calibration is not None else None
+        elif settings.kelvin_mode is None or settings.kelvin_mode < 4:
+            factors = getattr(raw, "balance_factors", {}).get(illumination)
+        else:
+            factors = None
         if point is not None and (factors is not None or settings.kelvin_mode is None):
             factors = np.asarray(factors if factors is not None else (1, 1, 1))
             point = np.floor(point * factors + 0.5)
@@ -851,6 +931,8 @@ def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="
 
 def render_region(raw, settings, rect, space=DISPLAY_SPACE, profile_directory=None, margin=16):
     """Render the normalised rect (x0, y0, x1, y1) of the oriented, uncropped image at full quality."""
+    if settings.balance == "auto" and settings.auto_balance_wb is None and camera_auto_wb(raw) is None:
+        settings = settings.copy(auto_balance_wb=tuple(float(v) for v in auto_wb(raw.camera_rgb)))
     turns = ({0: 0, 3: 2, 5: 3, 6: 1}.get(raw.flip, 0) + settings.rotation) % 4
     x0, y0, x1, y1 = rotate_crop(rect, (4 - turns) % 4)
     h, w = raw.camera_rgb.shape[:2]
