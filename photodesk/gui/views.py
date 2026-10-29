@@ -711,7 +711,7 @@ class EVHistogram(QWidget):
 
     def mouseMoveEvent(self, e):
         if self._drag is not None:
-            ev = round(self._ev(e.position().x()), 1)
+            ev = pipeline.tone_marker_value(self._ev(e.position().x()))
             self.moved.emit(self._drag, ev)
 
     def mouseReleaseEvent(self, e):

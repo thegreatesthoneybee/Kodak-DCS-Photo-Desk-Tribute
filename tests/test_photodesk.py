@@ -85,6 +85,11 @@ def test_tone_curve_ignores_controls_when_disabled(monkeypatch, tmp_path):
     assert not np.array_equal(enabled_curve, neutral_curve)
 
 
+@pytest.mark.parametrize("value,expected", [(1.25, 1.3), (-1.25, -1.2), (1.0, 1.0), (0.0, 0.0)])
+def test_tone_marker_midpoints_round_toward_positive_infinity(value, expected):
+    assert pipeline.tone_marker_value(value) == float(np.float32(expected))
+
+
 @pytest.mark.parametrize("source,tone", [
     ("DCSProSLRnDaylight.icm", "DCSProSLRnToneCurve.icm"),
     ("DCSProSLRcDaylight.icm", "DCSProSLRcToneCurve.icm"),

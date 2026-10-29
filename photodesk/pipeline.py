@@ -17,6 +17,7 @@ IPTC data.
 import dataclasses
 import functools
 import json
+import math
 from pathlib import Path
 
 import cv2
@@ -658,6 +659,12 @@ def tone_map_ev(ev, tone):
     """Piecewise-linear EV remap putting shadow/midtone/highlight on their defaults."""
     return np.interp(ev, tone, TONE_DEFAULT, left=None, right=None) + np.where(
         ev < tone[0], ev - tone[0], np.where(ev > tone[2], ev - tone[2], 0))
+
+
+def tone_marker_value(value):
+    """Round a binary32 tone marker to a tenth, with midpoint ties toward positive infinity."""
+    value = float(np.float32(value))
+    return float(np.float32(math.floor(value * 10 + 0.5) / 10))
 
 
 @functools.lru_cache(maxsize=32)
