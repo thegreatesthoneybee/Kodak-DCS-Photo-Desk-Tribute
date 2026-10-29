@@ -319,6 +319,8 @@ def test_auto_kelvin_calibration_requires_valid_metadata(monkeypatch):
     assert camera.auto_capture_settings("sample.dcr") == ("Daylight", -1.0)
     tags[3110] = (3171,)
     assert camera.auto_capture_settings("sample.dcr") == ("Daylight", 1.0)
+    tags[3110] = (2961,)
+    assert camera.auto_capture_settings("sample.dcr")[1] == float(np.float32(0.3))
     tags[2011] = (0,) * 9
     assert camera.auto_capture_settings("sample.dcr") == (None, None)
     tags[2011] = (1,) * 9

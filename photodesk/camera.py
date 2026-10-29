@@ -333,7 +333,8 @@ def auto_capture_settings(path):
     source = (tags.get(3110) or (0,))[0] or 2571
     reference = (tags.get(3122) or (0,))[0]
     difference = (source - reference) * 0.0033222591362126247
-    exposure = math.trunc((difference + (0.05 if difference > 0 else -0.05)) * 10) * 0.1
+    steps = math.trunc((difference + (0.05 if difference > 0 else -0.05)) * 10)
+    exposure = struct.unpack("<f", struct.pack("<f", steps * 0.10000000149011612))[0]
     return ILLUMINANTS[illumination[0]], max(-2.0, min(2.0, exposure))
 
 
