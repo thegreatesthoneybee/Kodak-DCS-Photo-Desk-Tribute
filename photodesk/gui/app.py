@@ -1484,14 +1484,14 @@ class MainWindow(QMainWindow):
 
     def _set_balance_temperature(self, e, s):
         """White Point slider shows the colour temperature of the new balance (and starts from it)."""
+        s.kelvin_mode = None
+        s.saved_balance_point = None
         raw = e.raw or e.small
         if raw is None:
             try:
                 raw = e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
             except Exception:
                 return
-        s.kelvin_mode = None
-        s.saved_balance_point = None
         s.white_point = s.white_point_ref = pipeline.balance_temperature(raw, s)
 
     def after_edit(self, changed):

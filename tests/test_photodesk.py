@@ -210,6 +210,7 @@ def test_stored_process_levels_from_slrn_sample():
     np.testing.assert_allclose(settings.tone, (-9.5, -0.2, 4.0), atol=1e-5)
     assert settings.white_point == 5000
     raw = pipeline.decode(path, half_size=True)
+    np.testing.assert_allclose(raw.balance_factors["Daylight"], (1.0, 0.965, 0.98), atol=1e-6)
     assert settings.saved_balance_point == (2048, 2532, 1771)
     np.testing.assert_allclose(pipeline.white_balance(raw, settings), [2532 / 2048, 1.0, 2532 / 1771])
     assert not np.allclose(pipeline.white_balance(raw, settings),
@@ -226,9 +227,11 @@ def test_kelvin_point_quantizes_and_clamps(monkeypatch):
     raw = SimpleNamespace(caps=SimpleNamespace(pro_slr=True), balance_curves={"Daylight": curve})
     monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.ones(3))
     np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()), [100.0, 20.0, 1.0])
+    raw.balance_factors = {"Daylight": (1.0, 0.965, 0.98)}
+    np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()), [98.0, 9800 / 483, 1.0])
 
 
-def test_saved_nonpreset_kelvin_does_not_apply_preset_curve(tmp_path, monkeypatch):
+def test_saved_auto_kelvin_uses_capture_calibration(tmp_path, monkeypatch):
     import shutil
     if not SLR_C_SAMPLE.is_file():
         pytest.skip("SLR/c sample not available")
@@ -241,9 +244,31 @@ def test_saved_nonpreset_kelvin_does_not_apply_preset_curve(tmp_path, monkeypatc
     raw = pipeline.decode(path, half_size=True)
     monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.array([1.2, 1.0, 1.3]))
     np.testing.assert_allclose(pipeline.white_balance(raw, settings), [2621 / 2048, 1.0, 2621 / 1934])
+    np.testing.assert_allclose(pipeline.auto_kelvin_factors(raw), [1, 0.98190867, 1.03181514], atol=1e-6)
+    np.testing.assert_allclose(pipeline.white_balance(raw, settings.copy(white_point=5000)),
+                               [2577 / 2048, 1.0, 2577 / 1864])
     assert settings.copy(white_point=5300).saved_balance_point is None
+    assert settings.copy(balance="auto").saved_balance_point is None
+    assert settings.copy(lighting="Tungsten").saved_balance_point is None
+    assert settings.copy(click_wb=(1.1, 1.0, 1.2)).saved_balance_point is None
+    assert settings.copy(balance="auto").kelvin_mode is None
+    assert settings.copy(lighting="Tungsten").kelvin_mode is None
+    assert settings.copy(white_point=5000).kelvin_mode == 5
+    assert settings.copy(exposure=0).saved_balance_point == settings.saved_balance_point
     pipeline.save_settings(path, settings)
     assert pipeline.load_settings(path).kelvin_mode == 5
+
+
+def test_auto_kelvin_calibration_requires_valid_metadata(monkeypatch):
+    tags = {1019: (0,), 2121: (2048, 1956, 1050), 2122: (2048, 2631, 1646),
+            2125: (4695, 5872, 4265), 3125: (1,)}
+    monkeypatch.setattr(camera, "read_kodak_tags", lambda *args: tags)
+    assert camera.auto_kelvin_illumination("sample.dcr") == "Daylight"
+    tags[3125] = (0,)
+    assert camera.auto_kelvin_illumination("sample.dcr") is None
+    tags[3125] = (1,)
+    tags[2125] = (4095, 4095, 4095)
+    assert camera.auto_kelvin_illumination("sample.dcr") is None
 
 
 def test_stored_render_record_checks_size(tmp_path, monkeypatch):
@@ -253,14 +278,20 @@ def test_stored_render_record_checks_size(tmp_path, monkeypatch):
     data = bytearray(72)
     struct.pack_into("<II", data, 4, 1, 72)
     struct.pack_into("<i", data, 32, -500000)
+    struct.pack_into("<I", data, 36, 1)
     struct.pack_into("<3H", data, 40, 2048, 2500, 1800)
     struct.pack_into("<I", data, 0, sum(data[4:]))
     monkeypatch.setattr(camera, "read_kodak_tags", lambda *args: {1021: tuple(data)})
-    assert camera.stored_render_parameters(path) == {"exposure": -0.5, "balance_point": (2048, 2500, 1800)}
+    assert camera.stored_render_parameters(path) == {"exposure": -0.5, "lighting": "Tungsten", "balance_point": (2048, 2500, 1800)}
     data[0] ^= 1  # The original accumulates the checksum but does not reject on mismatch.
+    assert camera.stored_render_parameters(path)["exposure"] == -0.5
+    struct.pack_into("<I", data, 4, 7)
     assert camera.stored_render_parameters(path)["exposure"] == -0.5
     struct.pack_into("<I", data, 8, 73)
     assert camera.stored_render_parameters(path) == {}
+    struct.pack_into("<I", data, 8, 36)
+    del data[36:]
+    assert camera.stored_render_parameters(path) == {"exposure": -0.5, "lighting": "Daylight"}
 
 
 def test_pro_slr_color_balance_uses_camera_constants(monkeypatch):
@@ -463,6 +494,17 @@ def test_pro_slr_tone_lookup_has_bounded_monotonic_curve():
     default = pipeline.pro_slr_tone_lut((-9.535300254821777, 0.0, 3.464400053024292))
     np.testing.assert_allclose(default[1:4090], np.arange(1, 4090) / 4095, atol=1 / 4095)
     assert lut[371] != pytest.approx(default[371], abs=1 / 4095)
+    assert default[4091] == default[4090] == default[4095]
+
+
+def test_tone_integer_table_rounded_boundaries_and_tail():
+    identity = ((0, 0, 1), (1, 1, 1), (2, 2, 1), (3, 3, 1))
+    np.testing.assert_array_equal(pipeline.tone_integer_table(identity, end=9, output_max=7),
+                                  [1, 1, 2, 3, 4, 5, 6, 7, 7, 7])
+    np.testing.assert_array_equal(pipeline.tone_integer_table(identity, end=9, output_max=7, scale=2),
+                                  [2, 2, 4, 6, 8, 10, 12, 14, 14, 14])
+    np.testing.assert_array_equal(pipeline.tone_integer_table(((0, 0, 0), (2, 4, 0)), end=3, output_max=100),
+                                  [1, 1, 4, 12])
 
 
 def test_pro_slr_scene_applies_lookup_per_channel(monkeypatch):
@@ -481,6 +523,16 @@ def test_pro_slr_scene_applies_lookup_per_channel(monkeypatch):
     disabled = settings.copy(exposure=0, tone_enabled=False)
     np.testing.assert_array_equal(pipeline.scene_linear(raw, disabled), raw.camera_rgb)
     assert disabled.copy(tone=(-9.5, -0.3, 4.0)).tone_enabled
+
+
+def test_non_slr_scene_respects_tone_enable(monkeypatch):
+    from types import SimpleNamespace
+    raw = SimpleNamespace(camera_rgb=np.array([[[0.1, 0.3, 0.7]]], dtype=np.float32),
+                          caps=SimpleNamespace(pro_slr=False))
+    monkeypatch.setattr(pipeline, "white_balance", lambda *_: np.ones(3))
+    settings = pipeline.Settings(tone=(-9.5, -1.0, 3.4), tone_enabled=False)
+    np.testing.assert_array_equal(pipeline.scene_linear(raw, settings), raw.camera_rgb)
+    assert not np.allclose(pipeline.scene_linear(raw, settings.copy(tone_enabled=True)), raw.camera_rgb)
 
 
 def test_histogram_exposure_before_clipping(monkeypatch):

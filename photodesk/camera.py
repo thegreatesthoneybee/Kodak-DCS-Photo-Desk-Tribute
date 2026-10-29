@@ -1,5 +1,6 @@
 """DCS camera models: TIFF Make/Model reading, source-correction profiles and capabilities."""
 import dataclasses
+import math
 import struct
 
 # Order of the Image > Lighting menu.
@@ -205,7 +206,8 @@ def read_kodak_tags(path, tags):
             return out
         for tag, typ, cnt, val in entries(struct.unpack(bo + "I", kodak)[0]):
             code = _TIFF_INTS.get(typ)
-            if tag not in tags or code is None or cnt > (112 if tag in (1021, 5011) and typ == 7 else 64):
+            if tag not in tags or code is None or (tag in (1021, 5011) and typ != 7) or \
+                    cnt > (112 if tag in (1021, 5011) else 64):
                 continue
             size = struct.calcsize(code) * cnt
             if size <= 4:
@@ -222,19 +224,24 @@ def read_kodak_tags(path, tags):
 
 
 def stored_render_parameters(path):
-    """Read the 72-byte Kodak processing record's exposure and selected RGB point."""
+    """Read the Kodak processing record's exposure and selected RGB point."""
     data = read_kodak_tags(path, (1021,)).get(1021, ())
-    if len(data) != 72:
+    if not data:
         return {}
     with open(path, "rb") as f:
         order = ">" if f.read(2) == b"MM" else "<"
-    data = bytes(data)
-    _, version, size = struct.unpack_from(order + "III", data)
-    if version != 1 or size != 72:
+    # The original reads at most 72 bytes into a zero-filled buffer, then checks the
+    # record's declared size. It does not reject an unknown version or checksum.
+    data = bytes(data[:72]).ljust(72, b"\0")
+    size = struct.unpack_from(order + "I", data, 8)[0]
+    if size > 72:
         return {}
     exposure = struct.unpack_from(order + "i", data, 32)[0] / 1_000_000
+    illumination = struct.unpack_from(order + "I", data, 36)[0]
     point = struct.unpack_from(order + "3H", data, 40)
     result = {"exposure": exposure}
+    if illumination < len(ILLUMINANTS):
+        result["lighting"] = ILLUMINANTS[illumination]
     if all(1 <= value <= 10000 for value in point):
         result["balance_point"] = point
     return result
@@ -276,6 +283,31 @@ def balance_curves(path):
     tags = read_kodak_tags(path, (2140, 2141, 2142, 2143))
     return {name: tags[2140 + i] for i, name in enumerate(ILLUMINANTS)
             if len(tags.get(2140 + i, ())) == 27}
+
+
+def balance_factors(path):
+    """Camera-recorded RGB correction factors for the four preset illuminants."""
+    tags = read_kodak_tags(path, (2130, 2131, 2132, 2133))
+    return {name: tags[2130 + i] for i, name in enumerate(ILLUMINANTS)
+            if len(tags.get(2130 + i, ())) == 3
+            and all(math.isfinite(v) and v > 0 for v in tags[2130 + i])}
+
+
+def auto_kelvin_illumination(path):
+    """Return the captured-auto calibration illuminant when its metadata is usable."""
+    tags = read_kodak_tags(path, (1019, 2121, 2122, 2125, 3125))
+    illumination = tags.get(1019, ())
+    if len(illumination) != 1 or illumination[0] >= len(ILLUMINANTS) or illumination[0] < 0:
+        return None
+    if not tags.get(3125) or not tags[3125][0]:
+        return None
+    for tag in (2121, 2122, 2125):
+        point = tags.get(tag, ())
+        if len(point) != 3 or not all(1 <= value <= 10000 for value in point):
+            return None
+    if all(value == 4095 for value in tags[2125]):
+        return None
+    return ILLUMINANTS[illumination[0]]
 
 
 def balance_points(path):

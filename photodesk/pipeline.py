@@ -135,8 +135,15 @@ class Settings:
     def copy(self, **changes):
         if "tone" in changes and tuple(changes["tone"]) != tuple(self.tone) and "tone_enabled" not in changes:
             changes["tone_enabled"] = True
-        if "white_point" in changes and changes["white_point"] != self.white_point and "saved_balance_point" not in changes:
+        balance_fields = ("balance", "lighting", "white_point", "click_wb")
+        if "saved_balance_point" not in changes and any(
+            field in changes and changes[field] != getattr(self, field) for field in balance_fields
+        ):
             changes["saved_balance_point"] = None
+        if "kelvin_mode" not in changes and any(
+            field in changes and changes[field] != getattr(self, field) for field in ("balance", "lighting", "click_wb")
+        ):
+            changes["kelvin_mode"] = None
         return dataclasses.replace(Settings.from_json(self.to_json()), **changes)
 
     def sharpening_on(self):
@@ -255,6 +262,8 @@ def load_settings(raw_path):
         exposure = render_params.get("exposure")
         if exposure is not None and abs(exposure) <= caps.exposure_range:
             settings.exposure = exposure
+        if "lighting" in render_params:
+            settings.lighting = render_params["lighting"]
         settings.saved_balance_point = render_params.get("balance_point")
     return settings
 
@@ -285,6 +294,8 @@ class RawImage:
     # (camera.balance_points: lighting names, "custom", "camera_auto").
     balance_points: dict = dataclasses.field(default_factory=dict)
     balance_curves: dict = dataclasses.field(default_factory=dict)
+    balance_factors: dict = dataclasses.field(default_factory=dict)
+    auto_kelvin_illumination: str = None
 
     @property
     def caps(self):
@@ -324,7 +335,8 @@ def decode(path, half_size=False, algorithm="AHD"):
         metadata["gps"] = gps
     return RawImage(path, make, model, cam, wb / wb[1], daylight / daylight[1], rgb_xyz,
                     camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h),
-                    camera.balance_points(path), camera.balance_curves(path))
+                    camera.balance_points(path), camera.balance_curves(path), camera.balance_factors(path),
+                    camera.auto_kelvin_illumination(path))
 
 
 def reduced(raw, long_edge):
@@ -490,17 +502,48 @@ def method_wb(raw, settings):
     return wb
 
 
+def kelvin_point(curve, temperature):
+    x = temperature / 100.0
+    point = np.array([sum(curve[i + j] * x ** j for j in range(4)) for i in (0, 4, 8)])
+    if not np.all(np.isfinite(point)):
+        return None
+    return np.clip(np.floor(point + 0.5), 100, 10000)
+
+
+def auto_kelvin_factors(raw):
+    """Mode-5 factors for the documented daylight inverse-curve branch, if available."""
+    if getattr(raw, "auto_kelvin_illumination", None) != "Daylight":
+        return None
+    curve = raw.balance_curves.get("Daylight")
+    point = raw.balance_points.get("camera_auto")
+    if curve is None or point is None or curve[12] != 0 or curve[16] == 0 or curve[20] == 0:
+        return None
+    point = np.asarray(point, dtype=np.float32)
+    norm = np.asarray(2048.0 * point / point[0], dtype=np.float32)
+    words = np.floor(norm + 0.5)
+    inverse_input = np.floor(2048.0 * words / words[0]) / 100.0
+    estimates = [sum(curve[i + j] * inverse_input[k] ** j for j in range(4))
+                 for k, i in ((1, 16), (2, 20))]
+    if not all(np.isfinite(value) and 100 <= value <= 11000 for value in estimates):
+        return None
+    reference = kelvin_point(curve, int(sum(estimates) / 2))
+    return np.asarray(norm / reference, dtype=np.float32) if reference is not None else None
+
+
 def white_balance(raw, settings):
     wb = np.asarray(method_wb(raw, settings), np.float64)
     curve = raw.balance_curves.get(settings.lighting) if raw.caps.pro_slr else None
     if raw.caps.pro_slr and settings.saved_balance_point is not None:
         point = np.asarray(settings.saved_balance_point, np.float64)
         wb = np.max(point) / point
-    elif settings.balance == "preset" and curve and settings.kelvin_mode != 5:
-        x = settings.white_point / 100.0
-        point = np.array([sum(curve[i + j] * x ** j for j in range(4)) for i in (0, 4, 8)])
-        if np.all(np.isfinite(point)):
-            point = np.clip(np.floor(point + 0.5), 100, 10000)
+    elif settings.balance == "preset" and curve:
+        point = kelvin_point(curve, settings.white_point)
+        factors = (auto_kelvin_factors(raw) if settings.kelvin_mode == 5 and settings.lighting == "Daylight"
+                   else getattr(raw, "balance_factors", {}).get(settings.lighting) if settings.kelvin_mode != 5
+                   else None)
+        if point is not None and (factors is not None or settings.kelvin_mode != 5):
+            factors = np.asarray(factors if factors is not None else (1, 1, 1))
+            point = np.floor(point * factors + 0.5)
             wb = np.max(point) / point
         elif settings.white_point != settings.white_point_ref:
             wb = wb * cct_shift(raw, settings.white_point_ref, settings.white_point)
@@ -536,12 +579,12 @@ def tone_map_ev(ev, tone):
 
 @functools.lru_cache(maxsize=32)
 def pro_slr_tone_lut(tone):
-    """Approximate the Pro SLR exposure table in its 12-bit, log2 code domain.
+    """Build the Pro SLR tone table in its 12-bit, log2 code domain.
 
-    The camera DLL builds four Hermite knots from the current and reference levels. LibRaw's
-    decoded input and the original sensor pipeline do not necessarily have identical scaling.
+    LibRaw's decoded input and the original sensor pipeline do not necessarily have identical
+    scaling, and Python floating-point calculations do not reproduce x87 precision exactly.
     """
-    source = np.asarray(tone, dtype=np.float64)
+    source = np.asarray(tone, dtype=np.float32).astype(np.float64)
     reference = np.asarray(PRO_SLR_TONE_REFERENCE)
     offset = 8.533673272
     slopes = np.diff(reference) / np.diff(source)
@@ -550,19 +593,38 @@ def pro_slr_tone_lut(tone):
     y = np.array([reference[0], (reference[0] + reference[1]) / 2,
                   (reference[1] + reference[2]) / 2, reference[2]]) + offset
     m = np.array([slopes[0], slopes[0], slopes[1], slopes[1]])
-    codes = np.arange(4096, dtype=np.float64)
-    log_codes = np.log2(np.maximum(codes, 1))
-    result = np.full_like(codes, y[0])
-    result[log_codes >= x[-1]] = y[-1]
-    for i in range(3):
-        mask = (log_codes >= x[i]) & (log_codes < x[i + 1])
-        width = x[i + 1] - x[i]
-        t = (log_codes[mask] - x[i]) / width
-        result[mask] = ((2 * t ** 3 - 3 * t ** 2 + 1) * y[i]
-                        + (t ** 3 - 2 * t ** 2 + t) * width * m[i]
-                        + (-2 * t ** 3 + 3 * t ** 2) * y[i + 1]
-                        + (t ** 3 - t ** 2) * width * m[i + 1])
-    return np.clip(np.floor(2 ** result + 0.5), 0, 4095).astype(np.float32) / 4095
+    return tone_integer_table(tuple(zip(x, y, m))).astype(np.float32) / 4095
+
+
+def tone_integer_table(points, end=4095, output_max=4095, scale=1.0):
+    """Apply the camera DLL's rounded knot boundaries and integer output rules."""
+    out = np.empty(end + 1, dtype=np.uint16)
+    scale = float(np.float32(scale))
+    upper = output_max * scale
+    boundary = max(0, int(2 ** points[0][0] + 0.5))
+    last = max(0, int(scale * 2 ** points[0][1] + 0.5))
+    i = min(boundary, end + 1)
+    out[:i] = last
+    for (x0, y0, m0), (x1, y1, m1) in zip(points, points[1:]):
+        h = x1 - x0
+        secant = (y1 - y0) / h
+        c2 = (3 * secant - 2 * m0 - m1) / h
+        c3 = (m0 + m1 - 2 * secant) / (h * h)
+        stop = min(int(2 ** x1 + 0.5), end + 1)
+        if stop <= i:
+            continue
+        codes = np.arange(i, stop, dtype=np.float64)
+        t = np.log2(np.maximum(codes, 1)) - x0
+        t[codes == 0] = 0
+        y = ((c3 * t + c2) * t + m0) * t + y0
+        values = scale * np.exp2(y)
+        values = np.where(values > upper, np.trunc(upper), values)
+        quantized = np.floor(np.maximum(values, 0) + 0.5).astype(np.uint16)
+        out[i:stop] = quantized
+        last = int(quantized[-1])
+        i = stop
+    out[i:] = last
+    return out
 
 
 def validate_tone(tone):
@@ -760,7 +822,7 @@ def scene_linear(raw, settings):
             indices = np.floor(np.clip(lin, 0, 1) * 4095 + 0.5).astype(np.uint16)
             return pro_slr_tone_lut(tuple(settings.tone))[indices]
         return np.clip(lin, 0, 1, out=lin)
-    if tuple(settings.tone) != TONE_DEFAULT:
+    if settings.tone_enabled and tuple(settings.tone) != TONE_DEFAULT:
         y = np.maximum(scene_luminance(lin), 1e-7)
         ev = np.log2(y / MID_GREY)
         lin *= (2.0 ** (tone_map_ev(ev, settings.tone) - ev)).astype(np.float32)[..., None]
