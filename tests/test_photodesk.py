@@ -67,6 +67,22 @@ def test_custom_looks_in_system_folders(profile_dir, tmp_path, monkeypatch):
     assert pipeline.look_path("MyCustomLook.icm", profile_dir) == tmp_path / "MyCustomLook.icm"
     ev, curve = pipeline.tone_curve(pipeline.Settings(), "MyCustomLook.icm", profile_dir, n=16)
     assert len(ev) == len(curve) == 16 and np.isfinite(curve).all()
+    disabled = pipeline.Settings(tone=(-9.5, -1.0, 3.4), tone_enabled=False)
+    _, disabled_curve = pipeline.tone_curve(disabled, "MyCustomLook.icm", profile_dir, n=16)
+    _, neutral_curve = pipeline.tone_curve(pipeline.Settings(tone_enabled=False), "MyCustomLook.icm", profile_dir, n=16)
+    np.testing.assert_array_equal(disabled_curve, neutral_curve)
+
+
+def test_tone_curve_ignores_controls_when_disabled(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    monkeypatch.setattr(pipeline, "_profile", lambda path: SimpleNamespace(lut=lambda tag: lambda values: values))
+    neutral = pipeline.Settings(tone_enabled=False)
+    adjusted = pipeline.Settings(tone=(-9.5, -1.0, 3.4), tone_enabled=False)
+    _, neutral_curve = pipeline.tone_curve(neutral, "look.icm", tmp_path)
+    _, disabled_curve = pipeline.tone_curve(adjusted, "look.icm", tmp_path)
+    _, enabled_curve = pipeline.tone_curve(adjusted.copy(tone_enabled=True), "look.icm", tmp_path)
+    np.testing.assert_array_equal(disabled_curve, neutral_curve)
+    assert not np.array_equal(enabled_curve, neutral_curve)
 
 
 @pytest.mark.parametrize("source,tone", [
@@ -694,6 +710,9 @@ def test_auto_balance_uses_recorded_camera_point():
     assert pipeline.balance_temperature(raw, settings) == 4800
     assert pipeline.auto_exposure(raw, settings) == -1.0
     assert pipeline.auto_exposure(raw, settings.copy(color_balance=(100, 0, 0))) == -1.0
+    raw.balance_curves.clear()
+    assert pipeline.auto_kelvin_calibration(raw) is None
+    assert pipeline.auto_exposure(raw, settings) == -1.0
     scene_settings = settings.copy(auto_balance_wb=(1.1, 1.0, 1.2))
     np.testing.assert_allclose(pipeline.method_wb(raw, scene_settings), [1.1, 1, 1.2])
     raw.balance_points["camera_auto"] = (4095, 4095, 4095)
@@ -736,6 +755,34 @@ def test_auto_exposure_changes_only_exposure():
     window = SimpleNamespace(active_sheet=lambda: sheet, _raw_selection=lambda: [entry],
                              after_edit=lambda changed: None)
     MainWindow.auto_exposure(window)
+
+
+def test_pro_auto_exposure_does_not_require_kelvin_calibration():
+    from types import SimpleNamespace
+    raw = SimpleNamespace(caps=SimpleNamespace(pro_slr=True), auto_scene_exposure=-0.7)
+    assert pipeline.auto_exposure(raw, pipeline.Settings()) == -0.7
+    raw.auto_scene_exposure = None
+    assert pipeline.auto_exposure(raw, pipeline.Settings()) is None
+
+
+def test_auto_scene_retains_settings_when_calibration_unavailable():
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+    if not SLR_C_SAMPLE.is_file():
+        pytest.skip("camera sample not available")
+    raw = pipeline.decode(SLR_C_SAMPLE, half_size=True)
+    raw.balance_curves.clear()
+    original = pipeline.Settings(balance="preset", exposure=0.5)
+    entry = SimpleNamespace(raw=raw, small=None, settings=original, caps=raw.caps)
+    def apply(entries, kind, change):
+        candidate = entry.settings.copy()
+        change(entry, candidate)
+        assert candidate == original
+        return [entry]
+    sheet = SimpleNamespace(sheet=SimpleNamespace(apply=apply))
+    window = SimpleNamespace(active_sheet=lambda: sheet, _raw_selection=lambda: [entry],
+                             after_edit=lambda changed: None)
+    MainWindow.auto_scene(window)
 
 
 def test_histogram_exposure_before_clipping(monkeypatch):

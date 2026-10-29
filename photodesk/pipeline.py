@@ -724,7 +724,7 @@ def validate_tone(tone):
 def auto_exposure(raw, settings):
     """Use the Pro camera's Auto result or estimate exposure for other camera families."""
     if raw.caps.pro_slr:
-        return raw.auto_scene_exposure if auto_kelvin_calibration(raw) is not None else None
+        return raw.auto_scene_exposure
     lin = np.clip(raw.camera_rgb[::4, ::4] * white_balance(raw, settings).astype(np.float32), 0, 1)
     y = scene_luminance(lin).ravel()
     y = y[(y > 1e-4) & (y < 0.95)]
@@ -749,7 +749,7 @@ def tone_curve(settings, look, profile_directory=None, n=256, lo=-10.0, hi=6.0):
     """Output L* (0..100) as a function of scene EV for the look and tone settings."""
     d = Path(profile_directory or profiles.profile_dir())
     ev = np.linspace(lo, hi, n)
-    mapped = tone_map_ev(ev, settings.tone)
+    mapped = tone_map_ev(ev, settings.tone) if settings.tone_enabled else ev
     scene = (0.18 * 2.0 ** mapped).astype(np.float32)
     lab = icc.lab_decode(_profile(str(look_path(look, d))).lut("A2B0")(erimm_encode(np.repeat(scene[:, None], 3, 1))))
     return ev, lab[:, 0]

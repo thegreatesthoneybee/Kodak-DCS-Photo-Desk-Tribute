@@ -2122,7 +2122,7 @@ class MainWindow(QMainWindow):
                 raw = e.raw or e.small
                 if raw.caps.pro_slr:
                     exposure = pipeline.auto_exposure(raw, s)
-                    if exposure is None:
+                    if exposure is None or pipeline.auto_kelvin_calibration(raw) is None:
                         return
                     s.lighting = raw.auto_kelvin_illumination
                     s.balance = "auto"
