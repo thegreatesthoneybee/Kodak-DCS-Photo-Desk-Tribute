@@ -1602,6 +1602,9 @@ class MainWindow(QMainWindow):
                 for w in sw.images:
                     if w.entry is e:
                         self.render_window(w)
+            for cu in self.closeups:
+                if cu.entry is e:
+                    self._update_closeup(cu)
 
     def select_all(self):
         sw = self.active_sheet()
@@ -1870,7 +1873,7 @@ class MainWindow(QMainWindow):
             return
         # Applied to the selected images captured on the same camera (same serial number) as the
         # clicked image, which may itself be an unselected reference (gray card) shot.
-        entries = [e for e in self.selection() if e.is_raw and e.serial == entry.serial] or [entry]
+        entries = [e for e in self.selection() if e.is_raw and e.serial == entry.serial]
         self.edit("click_balance", entries, balance="click", click_wb=wb)
 
     def show_closeup(self, entry, x, y):
@@ -1912,6 +1915,8 @@ class MainWindow(QMainWindow):
                         sw.view.setCurrentRow(i)
 
     def _update_closeup(self, cu):
+        cu._render_token = getattr(cu, "_render_token", 0) + 1
+        token = cu._render_token
         e = cu.entry
         if e is None:
             return
@@ -1931,7 +1936,8 @@ class MainWindow(QMainWindow):
             rect = cu.region(cu.full_size)
             space = pipeline.resolve_space(self.opts.working_space, self.pdir)
             t = Task(cu, _region_job, e.raw, e.settings, rect, self.pdir, space)
-            t.signals.done.connect(lambda c, img: self._closeup_ready(c, img))
+            t.signals.done.connect(lambda c, img: self._closeup_ready(c, img)
+                                   if c._render_token == token else None)
             self.pool.start(t)
             return
         self._closeup_ready(cu, region)

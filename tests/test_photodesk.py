@@ -978,6 +978,68 @@ def test_gui_task_skips_stale_work_and_results():
     assert called == ["work"]
 
 
+def test_click_balance_does_not_edit_an_unselected_reference(monkeypatch):
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+
+    raw = SimpleNamespace(camera_rgb=np.ones((16, 16, 3), np.float32), flip=0)
+    reference = SimpleNamespace(is_raw=True, raw=raw, small=raw, serial="camera-a",
+                                settings=SimpleNamespace(rotation=0))
+    selected = SimpleNamespace(is_raw=True, serial="camera-b")
+    edits = []
+    window = SimpleNamespace(selection=lambda: [selected], edit=lambda *args, **kw: edits.append((args, kw)))
+    monkeypatch.setattr(pipeline, "click_wb", lambda *args, **kw: (1.0, 1.0, 1.0))
+
+    MainWindow.click_balance(window, reference, 0.5, 0.5)
+
+    assert len(edits) == 1 and edits[0][0][1] == []
+    matching = SimpleNamespace(is_raw=True, serial="camera-a")
+    window.selection = lambda: [selected, matching]
+    MainWindow.click_balance(window, reference, 0.5, 0.5)
+    assert edits[-1][0][1] == [matching]
+
+
+def test_preview_refresh_updates_matching_closeups():
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+
+    entry, other = object(), object()
+    matching, unrelated = SimpleNamespace(entry=entry), SimpleNamespace(entry=other)
+    calls = []
+    window = SimpleNamespace(sheets=[], closeups=[matching, unrelated],
+                             refresh_thumb=lambda item: calls.append(("thumb", item)),
+                             _update_closeup=lambda item: calls.append(("closeup", item)))
+    MainWindow._preview_refresh(window, [entry])
+    assert calls == [("thumb", entry), ("closeup", matching)]
+
+
+def test_closeup_discards_stale_preview_results(monkeypatch):
+    from types import SimpleNamespace
+    from photodesk.gui import app as gui_app
+
+    tasks, displayed = [], []
+
+    class FakeTask:
+        def __init__(self, *args):
+            self.signals = SimpleNamespace(done=SimpleNamespace(connect=lambda callback: setattr(self, "done", callback)))
+            tasks.append(self)
+
+    raw = SimpleNamespace(camera_rgb=np.zeros((8, 8, 3), np.float32), flip=0)
+    entry = SimpleNamespace(is_raw=True, raw=raw, meta={}, settings=SimpleNamespace(rotation=0))
+    closeup = SimpleNamespace(entry=entry, region=lambda size: (0, 0, 1, 1))
+    window = SimpleNamespace(opts=SimpleNamespace(working_space="test"), pdir="test",
+                             pool=SimpleNamespace(start=lambda task: None),
+                             _closeup_ready=lambda cu, image: displayed.append(image))
+    monkeypatch.setattr(gui_app, "Task", FakeTask)
+    monkeypatch.setattr(pipeline, "resolve_space", lambda *args: "test")
+
+    gui_app.MainWindow._update_closeup(window, closeup)
+    gui_app.MainWindow._update_closeup(window, closeup)
+    tasks[1].done(closeup, "new")
+    tasks[0].done(closeup, "old")
+    assert displayed == ["new"]
+
+
 def test_histogram_overlays_channels_with_transparency():
     from PySide6.QtGui import QImage
     from PySide6.QtWidgets import QApplication
