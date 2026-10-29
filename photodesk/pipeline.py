@@ -754,14 +754,27 @@ def ev_histogram(raw, settings, bins=128, lo=-10.0, hi=6.0):
     return hist, edges
 
 
-def tone_curve(settings, look, profile_directory=None, n=256, lo=-10.0, hi=6.0):
-    """Output L* (0..100) as a function of scene EV for the look and tone settings."""
-    d = Path(profile_directory or profiles.profile_dir())
-    ev = np.linspace(lo, hi, n)
-    mapped = tone_map_ev(ev, settings.tone) if settings.tone_enabled else ev
-    scene = (0.18 * 2.0 ** mapped).astype(np.float32)
-    lab = icc.lab_decode(_profile(str(look_path(look, d))).lut("A2B0")(erimm_encode(np.repeat(scene[:, None], 3, 1))))
-    return ev, lab[:, 0]
+def tone_curve(raw, settings, space=DISPLAY_SPACE, profile_directory=None, n=256, lo=-12.0, hi=6.0):
+    """Approximate weighted output RGB over the scene-EV domain using the active render chain.
+
+    This is an approximation of the current renderer, not Kodak pixel parity. Exposure is removed
+    so the curve shares the histogram's scene-EV axis without applying exposure twice.
+    """
+    if raw is None:
+        return None
+    pdir = str(profile_directory or profiles.profile_dir())
+    ev = np.linspace(lo, hi, n, dtype=np.float32)
+    scene = (np.float32(MID_GREY) * np.exp2(ev)).astype(np.float32)
+    render_settings = settings.copy(exposure=0)
+    wb = white_balance(raw, render_settings).astype(np.float32)
+    camera_rgb = (scene[:, None] / wb[None, :])[None, :, :]
+    lin = scene_linear(raw, render_settings, camera_rgb=camera_rgb)
+    source = source_profile_for(raw, render_settings, pdir)
+    if source is None:
+        lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
+    lut = color_lut(source, render_settings.look, resolve_space(space, pdir), pdir)
+    rgb = icc.trilinear(lut, lin, power=1 / LUT_INPUT_GAMMA)[0]
+    return ev, rgb @ np.array([0.299, 0.587, 0.114], np.float32)
 
 
 # ------------------------------------------------------------------ colour LUT
@@ -906,9 +919,13 @@ def source_profile_for(raw, settings, profile_directory):
     return source
 
 
-def scene_linear(raw, settings):
-    """White-balanced camera RGB with exposure and tone applied (float32, clipped to 1)."""
-    lin = raw.camera_rgb * white_balance(raw, settings).astype(np.float32)
+def scene_linear(raw, settings, camera_rgb=None):
+    """White-balanced camera RGB with exposure and tone applied (float32, clipped to 1).
+
+    ``camera_rgb`` optionally supplies samples while retaining ``raw`` as the balance/driver context.
+    """
+    cam = raw.camera_rgb if camera_rgb is None else camera_rgb
+    lin = cam * white_balance(raw, settings).astype(np.float32)
     lin *= np.float32(2.0 ** settings.exposure)
     if raw.caps.pro_slr:
         if settings.tone_enabled and any(abs(float(np.float32(value)) - reference) > PRO_SLR_TONE_THRESHOLD

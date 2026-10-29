@@ -65,24 +65,75 @@ def test_custom_looks_in_system_folders(profile_dir, tmp_path, monkeypatch):
     names = [n for n, _ in pipeline.available_looks(profile_dir)]
     assert "MyCustomLook.icm" in names and "monitor.icm" not in names and "DCSProductLook.icm" in names
     assert pipeline.look_path("MyCustomLook.icm", profile_dir) == tmp_path / "MyCustomLook.icm"
-    ev, curve = pipeline.tone_curve(pipeline.Settings(), "MyCustomLook.icm", profile_dir, n=16)
-    assert len(ev) == len(curve) == 16 and np.isfinite(curve).all()
-    disabled = pipeline.Settings(tone=(-9.5, -1.0, 3.4), tone_enabled=False)
-    _, disabled_curve = pipeline.tone_curve(disabled, "MyCustomLook.icm", profile_dir, n=16)
-    _, neutral_curve = pipeline.tone_curve(pipeline.Settings(tone_enabled=False), "MyCustomLook.icm", profile_dir, n=16)
-    np.testing.assert_array_equal(disabled_curve, neutral_curve)
+
+
+def _tone_curve_raw():
+    return pipeline.RawImage(Path("tone-curve-test.dcr"), "Kodak", "DCS660M",
+                             np.full((2, 2, 3), 0.1, np.float32), np.ones(3), np.ones(3),
+                             np.zeros((3, 3)), np.eye(3, dtype=np.float32), 0, {})
+
+
+def _stub_tone_curve_renderer(monkeypatch):
+    calls = []
+    axis = np.linspace(0, 1, pipeline.LUT_SIZE, dtype=np.float32)
+    identity = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), -1)
+
+    monkeypatch.setattr(pipeline, "white_balance", lambda *_: np.ones(3, np.float32))
+    monkeypatch.setattr(pipeline, "source_profile_for", lambda _raw, settings, _pdir:
+                        f"{settings.lighting}-source.icm")
+    monkeypatch.setattr(pipeline, "resolve_space", lambda space, _pdir: str(space))
+
+    def color_lut(source, look, space, pdir):
+        calls.append((source, look, space, pdir))
+        scale = 0.6 if space == "wide-space.icm" else 1.0
+        if look == "other-look.icm":
+            scale *= 0.8
+        if source == "Tungsten-source.icm":
+            scale *= 0.7
+        return identity * scale
+
+    monkeypatch.setattr(pipeline, "color_lut", color_lut)
+    return _tone_curve_raw(), calls
+
+
+def test_tone_curve_uses_renderer_tone_and_selected_output_profile(monkeypatch, tmp_path):
+    raw, calls = _stub_tone_curve_renderer(monkeypatch)
+    settings = pipeline.Settings(look="selected-look.icm")
+    ev, neutral = pipeline.tone_curve(raw, settings, "srgb-space.icm", tmp_path, n=64)
+    _, adjusted = pipeline.tone_curve(raw, settings.copy(tone=(-9.5, -1.0, 3.4)),
+                                      "srgb-space.icm", tmp_path, n=64)
+    _, wide = pipeline.tone_curve(raw, settings, "wide-space.icm", tmp_path, n=64)
+    _, other_look = pipeline.tone_curve(raw, settings.copy(look="other-look.icm"),
+                                        "srgb-space.icm", tmp_path, n=64)
+    _, other_source = pipeline.tone_curve(raw, settings.copy(lighting="Tungsten"),
+                                          "srgb-space.icm", tmp_path, n=64)
+
+    assert len(ev) == len(neutral) == 64 and np.isfinite(neutral).all()
+    assert not np.array_equal(adjusted, neutral)
+    assert not np.array_equal(wide, neutral)
+    assert not np.array_equal(other_look, neutral)
+    assert not np.array_equal(other_source, neutral)
+    assert calls[0] == ("Daylight-source.icm", "selected-look.icm", "srgb-space.icm", str(tmp_path))
 
 
 def test_tone_curve_ignores_controls_when_disabled(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-    monkeypatch.setattr(pipeline, "_profile", lambda path: SimpleNamespace(lut=lambda tag: lambda values: values))
+    raw, _ = _stub_tone_curve_renderer(monkeypatch)
     neutral = pipeline.Settings(tone_enabled=False)
     adjusted = pipeline.Settings(tone=(-9.5, -1.0, 3.4), tone_enabled=False)
-    _, neutral_curve = pipeline.tone_curve(neutral, "look.icm", tmp_path)
-    _, disabled_curve = pipeline.tone_curve(adjusted, "look.icm", tmp_path)
-    _, enabled_curve = pipeline.tone_curve(adjusted.copy(tone_enabled=True), "look.icm", tmp_path)
+    _, neutral_curve = pipeline.tone_curve(raw, neutral, "srgb-space.icm", tmp_path, n=32)
+    _, disabled_curve = pipeline.tone_curve(raw, adjusted, "srgb-space.icm", tmp_path, n=32)
+    _, enabled_curve = pipeline.tone_curve(raw, adjusted.copy(tone_enabled=True), "srgb-space.icm", tmp_path, n=32)
     np.testing.assert_array_equal(disabled_curve, neutral_curve)
     assert not np.array_equal(enabled_curve, neutral_curve)
+    assert pipeline.tone_curve(None, adjusted, "srgb-space.icm", tmp_path) is None
+
+
+def test_tone_curve_uses_output_rgb_weights(monkeypatch, tmp_path):
+    raw, _ = _stub_tone_curve_renderer(monkeypatch)
+    monkeypatch.setattr(icc, "trilinear", lambda lut, values, power: np.broadcast_to(
+        np.array([1.0, 0.0, 0.0], np.float32), values.shape))
+    _, values = pipeline.tone_curve(raw, pipeline.Settings(), "srgb-space.icm", tmp_path, n=4)
+    np.testing.assert_allclose(values, 0.299)
 
 
 @pytest.mark.parametrize("value,expected", [(1.25, 1.3), (-1.25, -1.2), (1.0, 1.0), (0.0, 0.0)])
@@ -942,6 +993,29 @@ def test_histogram_overlays_channels_with_transparency():
     widget.render(image)
     overlap = image.pixelColor(101, 50)
     assert overlap.red() > 0 and overlap.green() > 0 and overlap.blue() > 0
+
+
+def test_ev_histogram_curve_data_handles_available_and_missing_data():
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QApplication
+    from photodesk.gui.views import EVHistogram
+
+    app = QApplication.instance() or QApplication([])
+    widget = EVHistogram()
+    ev = np.array([-12.0, -3.0, 6.0], np.float32)
+    output = np.array([0.02, 0.4, 0.98], np.float32)
+    widget.resize(258, 100)
+    widget.set_curve((ev, output))
+    np.testing.assert_array_equal(widget.curve[0], ev)
+    np.testing.assert_array_equal(widget.curve[1], output)
+    image = QImage(widget.size(), QImage.Format.Format_RGB32)
+    widget.render(image)
+    assert any(image.pixelColor(x, y).blue() > image.pixelColor(x, y).red() + 100
+               for x in range(1, 257) for y in range(1, 85))
+    widget.set_curve(None)
+    assert widget.curve is None
+    widget.set_curve(([0.0, 1.0], [0.5]))
+    assert widget.curve is None
 
 
 def test_windows_app_icon_contains_high_resolution_variants():

@@ -229,8 +229,8 @@ class ExposureToneDialog(ExposureDialog):
     rid, preview_id, capture_id = 281, 1336, 1335
     fields = ("exposure", "tone")
 
-    def __init__(self, res, parent, settings, preview, rng, auto, hist, mixed=False, capture=None):
-        self.hist_fn = hist
+    def __init__(self, res, parent, settings, preview, rng, auto, hist, mixed=False, capture=None, curve=None):
+        self.hist_fn, self.curve_fn = hist, curve
         super().__init__(res, parent, settings, preview, rng, auto, mixed, capture)
 
     def setup(self, s):
@@ -243,6 +243,7 @@ class ExposureToneDialog(ExposureDialog):
             self.graph.moved.connect(self._marker)
             for cid in (1314, 1316, 1318):
                 self.b[cid].editingFinished.connect(self._tone_edited)
+        self.tone_settings = s
         super().setup(s)
         self.tone = list(s.tone)
         self._show_tone()
@@ -258,6 +259,7 @@ class ExposureToneDialog(ExposureDialog):
         for cid, v in zip((1314, 1316, 1318), self.tone):
             self.b[cid].setText(f"{v:.1f}")
         self.graph.set_tone(self.tone)
+        self.graph.set_curve(self.curve_fn(tuple(self.tone), self.tone_settings) if self.curve_fn else None)
 
     def _check(self, tone):
         err = pipeline.validate_tone(tone)

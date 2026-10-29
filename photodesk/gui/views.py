@@ -660,6 +660,7 @@ class EVHistogram(QWidget):
     def __init__(self):
         super().__init__()
         self.hist = None
+        self.curve = None
         self.tone = list(pipeline.TONE_DEFAULT)
         self._drag = None
 
@@ -669,6 +670,19 @@ class EVHistogram(QWidget):
 
     def set_tone(self, tone):
         self.tone = list(tone)
+        self.update()
+
+    def set_curve(self, curve):
+        if curve is None:
+            self.curve = None
+        else:
+            try:
+                ev, output = (np.asarray(v, dtype=np.float32).reshape(-1) for v in curve)
+                valid = (len(ev) >= 2 and len(ev) == len(output)
+                         and np.isfinite(ev).all() and np.isfinite(output).all())
+            except (TypeError, ValueError):
+                valid = False
+            self.curve = (ev, output) if valid else None
         self.update()
 
     def _x(self, ev):
@@ -693,6 +707,14 @@ class EVHistogram(QWidget):
                 bh = int(v / peak * (gh - 4))
                 for x in range(x0, max(x0 + 1, x1)):
                     p.drawLine(x, gh, x, gh - bh)
+        if self.curve is not None:
+            ev, output = self.curve
+            p.setPen(QPen(QColor(20, 110, 220), 2))
+            for i in range(len(ev) - 1):
+                x0, x1 = self._x(ev[i]), self._x(ev[i + 1])
+                y0 = gh - float(np.clip(output[i], 0, 1)) * (gh - 4)
+                y1 = gh - float(np.clip(output[i + 1], 0, 1)) * (gh - 4)
+                p.drawLine(QPointF(x0, y0), QPointF(x1, y1))
         for ev, col in zip(self.tone, (palette.color(QPalette.ColorRole.Text),
                                        palette.color(QPalette.ColorRole.Mid),
                                        palette.color(QPalette.ColorRole.Base))):

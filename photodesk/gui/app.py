@@ -2003,13 +2003,21 @@ class MainWindow(QMainWindow):
         e = (self._raw_selection() or [None])[0]
         if not e:
             return
-
         def hist(ev):
             raw = e.small or e.raw
             if raw is None:
                 return None
             return pipeline.ev_histogram(raw, e.settings.copy(exposure=ev), lo=-12, hi=6)
-        self._adjust(D.ExposureToneDialog, "exposure_tone", e.caps.exposure_range, lambda: self._auto_ev(e), hist)
+
+        def curve(tone, base_settings):
+            raw = e.small or e.raw
+            if raw is None:
+                return None
+            settings = base_settings.copy(exposure=0, tone=tone)
+            return pipeline.tone_curve(raw, settings, self.opts.working_space, self.pdir, lo=-12, hi=6)
+
+        self._adjust(D.ExposureToneDialog, "exposure_tone", e.caps.exposure_range, lambda: self._auto_ev(e), hist,
+                     curve=curve)
 
     def auto_exposure(self):
         sw = self.active_sheet()
