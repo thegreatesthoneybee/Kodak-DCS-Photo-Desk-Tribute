@@ -287,7 +287,7 @@ class RawImage:
     path: Path
     make: str
     model: str
-    camera_rgb: np.ndarray      # float32 HxWx3 linear, not white balanced, 1.0 = sensor clip
+    camera_rgb: np.ndarray      # float32 HxWx3 linear, unbalanced; Pro SLR uses the 12-bit code range
     as_shot_wb: np.ndarray      # camera RGB multipliers (G = 1)
     daylight_wb: np.ndarray
     rgb_xyz: np.ndarray         # LibRaw XYZ(D65)->camera matrix (zero when unknown)
@@ -314,6 +314,8 @@ def decode(path, half_size=False, algorithm="AHD"):
     make, model = camera.read_make_model(path)
     with rawpy.imread(str(path)) as r:
         full_w, full_h = r.sizes.width, r.sizes.height   # before postprocess, which halves them
+        native_scale = (camera.capabilities(model).pro_slr and 0 < r.white_level <= 4095
+                        and all(level == 0 for level in r.black_level_per_channel))
         params = dict(
             output_color=rawpy.ColorSpace.raw, gamma=(1, 1), no_auto_bright=True,
             output_bps=16, user_wb=[1, 1, 1, 1], user_flip=0, half_size=half_size,
@@ -321,7 +323,9 @@ def decode(path, half_size=False, algorithm="AHD"):
             demosaic_algorithm=rawpy.DemosaicAlgorithm[algorithm],
         )
         cam = r.postprocess(**params).astype(np.float32)
-        cam *= np.float32(1 / 65535)
+        # LibRaw expands the decoded saturation endpoint to 65535; retain the
+        # 12-bit code-domain scale without changing AHD's interpolation domain.
+        cam *= np.float32((r.white_level / 4095 if native_scale else 1) / 65535)
         daylight = np.array(r.daylight_whitebalance[:3], np.float64)
         if not np.all(daylight > 0):
             daylight = np.ones(3)

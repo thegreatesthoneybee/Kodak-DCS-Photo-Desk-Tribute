@@ -700,6 +700,18 @@ def test_auto_balance_uses_recorded_camera_point():
     assert pipeline.camera_auto_wb(raw) is None
 
 
+@pytest.mark.parametrize("path,maximum", [
+    (ROOT / "raw/SLRc/F5KG7096.DCR", 1.0),
+    (ROOT / "raw/SLRn/GQ432034.DCR", 3700 / 4095),
+])
+@pytest.mark.parametrize("half_size", [True, False])
+def test_pro_sensor_values_keep_native_twelve_bit_scale(path, maximum, half_size):
+    if not path.is_file():
+        pytest.skip("camera sample not available")
+    raw = pipeline.decode(path, half_size=half_size)
+    assert float(raw.camera_rgb.max()) == pytest.approx(maximum, abs=2 / 65535)
+
+
 def test_auto_scene_does_not_change_settings_when_decode_fails(monkeypatch):
     from types import SimpleNamespace
     from photodesk.gui.app import MainWindow
