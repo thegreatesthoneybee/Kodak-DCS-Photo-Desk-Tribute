@@ -90,6 +90,10 @@ def test_tone_marker_midpoints_round_toward_positive_infinity(value, expected):
     assert pipeline.tone_marker_value(value) == float(np.float32(expected))
 
 
+def test_tone_marker_preserves_negative_zero():
+    assert np.signbit(pipeline.tone_marker_value(-0.0))
+
+
 @pytest.mark.parametrize("source,tone", [
     ("DCSProSLRnDaylight.icm", "DCSProSLRnToneCurve.icm"),
     ("DCSProSLRcDaylight.icm", "DCSProSLRcToneCurve.icm"),

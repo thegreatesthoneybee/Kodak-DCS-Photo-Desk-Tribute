@@ -664,6 +664,8 @@ def tone_map_ev(ev, tone):
 def tone_marker_value(value):
     """Round a binary32 tone marker to a tenth, with midpoint ties toward positive infinity."""
     value = float(np.float32(value))
+    if value == 0:
+        return value
     return float(np.float32(math.floor(value * 10 + 0.5) / 10))
 
 
