@@ -229,7 +229,9 @@ def read_kodak_tags(path, tags):
             if len(raw) == size:
                 v = struct.unpack(bo + code * cnt, raw)
                 if len(code) == 2:
-                    v = tuple(n / d if d else 0.0 for n, d in zip(v[::2], v[1::2]))
+                    if any(d == 0 for d in v[1::2]):
+                        continue
+                    v = tuple(n / d for n, d in zip(v[::2], v[1::2]))
                 out[tag] = v
     return out
 
@@ -309,22 +311,34 @@ def balance_factors(path):
     return factors
 
 
-def auto_kelvin_illumination(path):
-    """Return the captured-auto calibration illuminant when its metadata is usable."""
-    tags = read_kodak_tags(path, (1019, 2121, 2122, 2125, 3125))
+def auto_capture_settings(path):
+    """Return a usable camera Auto illuminant and its recorded scene exposure."""
+    tags = read_kodak_tags(path, (1019, 2011, 2012, 2121, 2122, 2125, 3110, 3122, 3125))
     illumination = tags.get(1019, ())
     if len(illumination) != 1 or illumination[0] >= len(ILLUMINANTS) or illumination[0] < 0:
-        return None
+        return None, None
     if not tags.get(3125) or not tags[3125][0]:
-        return None
+        return None, None
+    for tag in (2011, 2012):
+        matrix = tags.get(tag, ())
+        if len(matrix) != 9 or not all(math.isfinite(value) for value in matrix) or not any(matrix):
+            return None, None
     for tag in (2121, 2122):
         point = tags.get(tag, ())
-        if len(point) != 3 or not all(value > 0 for value in point):
-            return None
+        if len(point) != 3 or not all(value >= 2 for value in point):
+            return None, None
     point = tags.get(2125, ())
-    if len(point) != 3 or not all(1 <= value <= 10000 for value in point) or all(value == 4095 for value in point):
-        return None
-    return ILLUMINANTS[illumination[0]]
+    if len(point) != 3 or not all(10 <= value <= 10000 for value in point) or all(value == 4095 for value in point):
+        return None, None
+    source = (tags.get(3110) or (0,))[0] or 2571
+    reference = (tags.get(3122) or (0,))[0]
+    difference = (source - reference) * 0.0033222591362126247
+    exposure = math.trunc((difference + (0.05 if difference > 0 else -0.05)) * 10) * 0.1
+    return ILLUMINANTS[illumination[0]], max(-2.0, min(2.0, exposure))
+
+
+def auto_kelvin_illumination(path):
+    return auto_capture_settings(path)[0]
 
 
 def custom_kelvin_illumination(path):

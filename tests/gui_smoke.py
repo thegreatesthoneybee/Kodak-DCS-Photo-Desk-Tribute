@@ -115,6 +115,17 @@ def main(folder, shot):
         assert entry.settings.kelvin_mode == 4 and entry.settings.white_point == 5800
     w.acts[57643].trigger()
     assert entry.settings.balance == "preset"
+    if entry.path.name.upper() in ("F5KG7096.DCR", "GQ432034.DCR"):
+        w.acts[32803].trigger()                # Auto Scene Balance and Exposure
+        assert entry.settings.balance == "auto" and entry.settings.exposure == -1.0
+        assert entry.settings.lighting == "Daylight"
+        w.acts[57643].trigger()
+        assert entry.settings.balance == "preset"
+        original = entry.settings.copy()
+        w.acts[33131].trigger()                # Automatic Exposure Adjustment
+        assert entry.settings == original.copy(exposure=-1.0)
+        w.acts[57643].trigger()
+        assert entry.settings == original
     w.acts[32855].trigger()                    # Tag
     assert entry.settings.tagged
     w.acts[32838].trigger()                    # Rotate CW

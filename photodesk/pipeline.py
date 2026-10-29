@@ -302,6 +302,7 @@ class RawImage:
     balance_factors: dict = dataclasses.field(default_factory=dict)
     auto_kelvin_illumination: str = None
     custom_kelvin_illumination: str = None
+    auto_scene_exposure: float = None
 
     @property
     def caps(self):
@@ -339,10 +340,11 @@ def decode(path, half_size=False, algorithm="AHD"):
     gps = camera.read_gps(path)
     if gps:
         metadata["gps"] = gps
+    auto_illumination, auto_exposure = camera.auto_capture_settings(path)
     return RawImage(path, make, model, cam, wb / wb[1], daylight / daylight[1], rgb_xyz,
                     camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h),
                     camera.balance_points(path), camera.balance_curves(path), camera.balance_factors(path),
-                    camera.auto_kelvin_illumination(path), camera.custom_kelvin_illumination(path))
+                    auto_illumination, camera.custom_kelvin_illumination(path), auto_exposure)
 
 
 def reduced(raw, long_edge):
@@ -720,7 +722,9 @@ def validate_tone(tone):
 
 
 def auto_exposure(raw, settings):
-    """Exposure that places the log-average scene luminance on mid grey (limited to +-1 EV)."""
+    """Use the Pro camera's Auto result or estimate exposure for other camera families."""
+    if raw.caps.pro_slr:
+        return raw.auto_scene_exposure if auto_kelvin_calibration(raw) is not None else None
     lin = np.clip(raw.camera_rgb[::4, ::4] * white_balance(raw, settings).astype(np.float32), 0, 1)
     y = scene_luminance(lin).ravel()
     y = y[(y > 1e-4) & (y < 0.95)]

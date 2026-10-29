@@ -206,9 +206,14 @@ class ExposureDialog(AdjustDialog):
             self.b[33131].setText("")
             self.b[33131].setIcon(R.QIcon(self.res.bitmap(253)))
             self.b[33131].setToolTip(self.res.tip(33131)[1])
-            self.b[33131].clicked.connect(lambda: (self.ev.set(self.auto(), notify=True)))
+            self.b[33131].clicked.connect(self._auto)
         self.ev.set(s.exposure)
         self._ev_changed(notify=False)
+
+    def _auto(self):
+        value = self.auto()
+        if value is not None:
+            self.ev.set(value, notify=True)
 
     def _ev_changed(self, notify=True):
         v = self.ev.value()

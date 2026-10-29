@@ -312,9 +312,19 @@ def test_saved_auto_kelvin_uses_capture_calibration(tmp_path, monkeypatch):
 
 def test_auto_kelvin_calibration_requires_valid_metadata(monkeypatch):
     tags = {1019: (0,), 2121: (2048, 1956, 1050), 2122: (2048, 2631, 1646),
-            2125: (4695, 5872, 4265), 3125: (1,)}
+            2125: (4695, 5872, 4265), 2011: (1,) * 9, 2012: (1,) * 9,
+            3110: (2571,), 3122: (2871,), 3125: (1,)}
     monkeypatch.setattr(camera, "read_kodak_tags", lambda *args: tags)
     assert camera.auto_kelvin_illumination("sample.dcr") == "Daylight"
+    assert camera.auto_capture_settings("sample.dcr") == ("Daylight", -1.0)
+    tags[3110] = (3171,)
+    assert camera.auto_capture_settings("sample.dcr") == ("Daylight", 1.0)
+    tags[2011] = (0,) * 9
+    assert camera.auto_capture_settings("sample.dcr") == (None, None)
+    tags[2011] = (1,) * 9
+    tags[2121] = (2048, 1, 1050)
+    assert camera.auto_capture_settings("sample.dcr") == (None, None)
+    tags[2121] = (2048, 1956, 1050)
     tags[3125] = (0,)
     assert camera.auto_kelvin_illumination("sample.dcr") is None
     tags[3125] = (1,)
@@ -396,6 +406,16 @@ def test_long_stored_records_read_only_supported_prefix(tmp_path):
     tags = camera.read_kodak_tags(path, (1021, 5011))
     assert tags[1021] == tuple(range(72))
     assert tags[5011] == tuple(range(112))
+
+
+def test_invalid_camera_matrix_denominator_rejects_tag(tmp_path):
+    import struct
+    path = tmp_path / "sample.dcr"
+    root = struct.pack("<H", 1) + struct.pack("<HHII", 0x8290, 4, 1, 26) + b"\0" * 4
+    kodak = struct.pack("<H", 1) + struct.pack("<HHII", 2011, 10, 9, 44) + b"\0" * 4
+    matrix = struct.pack("<ii", 1, 0) + struct.pack("<ii", 0, 1) * 8
+    path.write_bytes(b"II*\0" + struct.pack("<I", 8) + root + kodak + matrix)
+    assert 2011 not in camera.read_kodak_tags(path, (2011,))
 
 
 def test_pro_slr_color_balance_uses_camera_constants(monkeypatch):
@@ -670,6 +690,8 @@ def test_auto_balance_uses_recorded_camera_point():
     settings = pipeline.Settings(balance="auto")
     np.testing.assert_allclose(pipeline.method_wb(raw, settings), [2533 / 2048, 1, 2533 / 1798])
     assert pipeline.balance_temperature(raw, settings) == 4800
+    assert pipeline.auto_exposure(raw, settings) == -1.0
+    assert pipeline.auto_exposure(raw, settings.copy(color_balance=(100, 0, 0))) == -1.0
     scene_settings = settings.copy(auto_balance_wb=(1.1, 1.0, 1.2))
     np.testing.assert_allclose(pipeline.method_wb(raw, scene_settings), [1.1, 1, 1.2])
     raw.balance_points["camera_auto"] = (4095, 4095, 4095)
@@ -693,6 +715,25 @@ def test_auto_scene_does_not_change_settings_when_decode_fails(monkeypatch):
     monkeypatch.setattr(pipeline, "decode", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("unreadable")))
     MainWindow.auto_scene(window)
     assert entry.settings is settings
+
+
+def test_auto_exposure_changes_only_exposure():
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+    if not SLR_C_SAMPLE.is_file():
+        pytest.skip("camera sample not available")
+    raw = pipeline.decode(SLR_C_SAMPLE, half_size=True)
+    original = pipeline.Settings(balance="custom", lighting="Tungsten", exposure=0.5, color_balance=(2, -3, 4))
+    entry = SimpleNamespace(raw=raw, small=None, settings=original)
+    def apply(entries, kind, change):
+        candidate = entry.settings.copy()
+        change(entry, candidate)
+        assert candidate == original.copy(exposure=-1.0)
+        return [entry]
+    sheet = SimpleNamespace(sheet=SimpleNamespace(apply=apply))
+    window = SimpleNamespace(active_sheet=lambda: sheet, _raw_selection=lambda: [entry],
+                             after_edit=lambda changed: None)
+    MainWindow.auto_exposure(window)
 
 
 def test_histogram_exposure_before_clipping(monkeypatch):

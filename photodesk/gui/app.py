@@ -1997,7 +1997,7 @@ class MainWindow(QMainWindow):
 
     def _auto_ev(self, e):
         raw = e.raw or e.small
-        return pipeline.auto_exposure(raw, e.settings) if raw is not None else 0.0
+        return pipeline.auto_exposure(raw, e.settings) if raw is not None else None
 
     def exposure_tone_dialog(self):
         e = (self._raw_selection() or [None])[0]
@@ -2017,7 +2017,9 @@ class MainWindow(QMainWindow):
             def change(e, s):
                 raw = e.raw or e.small
                 if raw is not None:
-                    s.exposure = pipeline.auto_exposure(raw, s)
+                    value = pipeline.auto_exposure(raw, s)
+                    if value is not None:
+                        s.exposure = value
             self.after_edit(sw.sheet.apply(self._raw_selection(), "auto_exposure", change))
 
     def white_point_dialog(self):
@@ -2117,9 +2119,18 @@ class MainWindow(QMainWindow):
                         e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
                     except Exception:
                         return
+                raw = e.raw or e.small
+                if raw.caps.pro_slr:
+                    exposure = pipeline.auto_exposure(raw, s)
+                    if exposure is None:
+                        return
+                    s.lighting = raw.auto_kelvin_illumination
+                    s.balance = "auto"
+                    self._set_balance_temperature(e, s)
+                    s.exposure = exposure
+                    return
                 s.balance = "auto"
                 self._set_balance_temperature(e, s, scene_auto=True)
-                raw = e.raw or e.small
                 if raw is not None:
                     s.exposure = pipeline.auto_exposure(raw, s)
             self.after_edit(sw.sheet.apply([e for e in self._raw_selection() if e.caps.auto_scene],
