@@ -166,7 +166,7 @@ def _ifd0_strings(path, tags):
     return vals
 
 
-_TIFF_INTS = {1: "B", 3: "H", 4: "I", 8: "h", 9: "i", 5: "II", 10: "ii"}   # 5/10: rationals
+_TIFF_INTS = {1: "B", 3: "H", 4: "I", 7: "B", 8: "h", 9: "i", 5: "II", 10: "ii"}   # 5/10: rationals
 KODAK_IFD = 0x8290
 # Kodak IFD tags 2654-2656: [56, 0, strength, 0] per channel, the Lens Optimization strength the
 # camera applied (DCSPro3SLR/DCSPro4SLR.dll read them and accept strengths of 0..99).
@@ -205,7 +205,7 @@ def read_kodak_tags(path, tags):
             return out
         for tag, typ, cnt, val in entries(struct.unpack(bo + "I", kodak)[0]):
             code = _TIFF_INTS.get(typ)
-            if tag not in tags or code is None or cnt > 64:
+            if tag not in tags or code is None or cnt > (112 if tag in (1021, 5011) and typ == 7 else 64):
                 continue
             size = struct.calcsize(code) * cnt
             if size <= 4:
@@ -219,6 +219,63 @@ def read_kodak_tags(path, tags):
                     v = tuple(n / d if d else 0.0 for n, d in zip(v[::2], v[1::2]))
                 out[tag] = v
     return out
+
+
+def stored_render_parameters(path):
+    """Read the 72-byte Kodak processing record's exposure and selected RGB point."""
+    data = read_kodak_tags(path, (1021,)).get(1021, ())
+    if len(data) != 72:
+        return {}
+    with open(path, "rb") as f:
+        order = ">" if f.read(2) == b"MM" else "<"
+    data = bytes(data)
+    _, version, size = struct.unpack_from(order + "III", data)
+    if version != 1 or size != 72:
+        return {}
+    exposure = struct.unpack_from(order + "i", data, 32)[0] / 1_000_000
+    point = struct.unpack_from(order + "3H", data, 40)
+    result = {"exposure": exposure}
+    if all(1 <= value <= 10000 for value in point):
+        result["balance_point"] = point
+    return result
+
+
+def stored_process_parameters(path):
+    """Read validated fields from Kodak's version 2 stored processing parameters."""
+    data = read_kodak_tags(path, (5011,)).get(5011, ())
+    if len(data) != 112:
+        return {}
+    with open(path, "rb") as f:
+        order = ">" if f.read(2) == b"MM" else "<"
+    data = bytes(data)
+    version, size = struct.unpack_from(order + "II", data, 4)
+    if version != 2 or size != 112:
+        return {}
+    result = {}
+    temperature, mode, illuminant = struct.unpack_from(order + "III", data, 16)
+    if mode in (0, 5) and illuminant == 0 and 2000 <= temperature <= 7500:
+        result["white_point"] = temperature
+        result["kelvin_mode"] = mode
+    result["tone_enabled"] = bool(struct.unpack_from(order + "I", data, 92)[0])
+    levels = []
+    for offset in (68, 76, 84):
+        numerator, denominator = struct.unpack_from(order + "ii", data, offset)
+        if denominator == 0:
+            return result
+        levels.append(numerator / denominator)
+    result["tone"] = tuple(levels)
+    return result
+
+
+def stored_process_levels(path):
+    return stored_process_parameters(path).get("tone")
+
+
+def balance_curves(path):
+    """Camera-recorded Kelvin polynomials for each illuminant (Kodak tags 2140–2143)."""
+    tags = read_kodak_tags(path, (2140, 2141, 2142, 2143))
+    return {name: tags[2140 + i] for i, name in enumerate(ILLUMINANTS)
+            if len(tags.get(2140 + i, ())) == 27}
 
 
 def balance_points(path):

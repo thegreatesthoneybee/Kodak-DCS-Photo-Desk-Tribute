@@ -908,9 +908,12 @@ class MainWindow(QMainWindow):
             entry.small, entry.meta, img = result
             entry.thumb = to_qimage(img)
             s = entry.settings
-            if entry.small is not None and s.white_point == s.white_point_ref:
-                # Show the loaded balance's temperature (the render is the same: no edit, not dirty).
-                s.white_point = s.white_point_ref = pipeline.balance_temperature(entry.small, s)
+            if entry.small is not None and s.kelvin_mode is None and s.white_point == s.white_point_ref:
+                # The camera's preset curve can depend on the displayed temperature itself.
+                temperature = pipeline.balance_temperature(entry.small, s)
+                if temperature != s.white_point:
+                    s.white_point = s.white_point_ref = temperature
+                    self.refresh_thumb(entry)
             sw.view.refresh_entry(entry)
             if entry is self.focused():
                 self.info.set_entry(entry)
@@ -1461,6 +1464,20 @@ class MainWindow(QMainWindow):
                     setattr(s, k, v)
                 self._set_balance_temperature(e, s)
             changed = sw.sheet.apply(entries, kind, change)
+        elif kind == "exposure_tone":
+            def change(e, s):
+                if "tone" in fields and tuple(fields["tone"]) != tuple(s.tone):
+                    s.tone_enabled = True
+                for k, v in fields.items():
+                    setattr(s, k, v)
+            changed = sw.sheet.apply(entries, kind, change)
+        elif kind == "white_point":
+            def change(e, s):
+                if "white_point" in fields and fields["white_point"] != s.white_point:
+                    s.saved_balance_point = None
+                for k, v in fields.items():
+                    setattr(s, k, v)
+            changed = sw.sheet.apply(entries, kind, change)
         else:
             changed = sw.sheet.set_fields(entries, kind, **fields)
         self.after_edit(changed)
@@ -1473,6 +1490,8 @@ class MainWindow(QMainWindow):
                 raw = e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
             except Exception:
                 return
+        s.kelvin_mode = None
+        s.saved_balance_point = None
         s.white_point = s.white_point_ref = pipeline.balance_temperature(raw, s)
 
     def after_edit(self, changed):

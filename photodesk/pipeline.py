@@ -49,6 +49,8 @@ WHITE_POINT_DEFAULT = 5000
 WHITE_POINT_RANGE = (2000, 7500)
 TONE_DEFAULT = (-9.5, 0.0, 3.4)
 TONE_MIN_GAP = 2.0
+PRO_SLR_TONE_REFERENCE = (-9.535300254821777, 0.0, 3.464400053024292)
+PRO_SLR_TONE_THRESHOLD = float(np.float32(0.1))
 # Sharpening dialog presets (amount, radius, threshold) as built into Photo Desk 4.3 (DCS SDK
 # defaults and DCSProBack.dll preset tables: amount 0..20, radius in 0.1 steps, threshold 0..255).
 SHARPEN_PRESETS = {"none": (0.0, 0.0, 0), "low": (5.0, 1.0, 2), "medium": (10.0, 1.0, 2),
@@ -89,9 +91,12 @@ class Settings:
     # Colour temperature the balance method's own balance corresponds to; White Point re-balances
     # from it, so white_point == white_point_ref leaves the balance as the method set it.
     white_point_ref: int = WHITE_POINT_DEFAULT
+    kelvin_mode: int = None             # saved non-preset Kelvin mode, when restored from the RAW
+    saved_balance_point: tuple = None  # RGB neutral point restored from the camera processing record
     color_balance: tuple = (0, 0, 0)    # R, G, B in -100..100
     exposure: float = 0.0               # EV
     tone: tuple = TONE_DEFAULT          # shadow, midtone, highlight EV
+    tone_enabled: bool = True
     lens_optimization: int = 0          # 0..99
     noise_type: str = "none"
     noise_radius: int = 3               # 1..10
@@ -109,7 +114,7 @@ class Settings:
 
     def to_json(self):
         d = dataclasses.asdict(self)
-        for k in ("click_wb", "color_balance", "tone", "crop"):
+        for k in ("click_wb", "color_balance", "tone", "crop", "saved_balance_point"):
             if d[k] is not None:
                 d[k] = list(d[k])
         return d
@@ -121,12 +126,17 @@ class Settings:
         s.click_wb = tuple(float(v) for v in s.click_wb)
         s.color_balance = tuple(int(v) for v in s.color_balance)
         s.tone = tuple(float(v) for v in s.tone)
+        s.saved_balance_point = tuple(s.saved_balance_point) if s.saved_balance_point is not None else None
         s.crop = tuple(float(v) for v in s.crop) if s.crop else None
         s.rotation %= 4
         s.iptc = dict(s.iptc)
         return s
 
     def copy(self, **changes):
+        if "tone" in changes and tuple(changes["tone"]) != tuple(self.tone) and "tone_enabled" not in changes:
+            changes["tone_enabled"] = True
+        if "white_point" in changes and changes["white_point"] != self.white_point and "saved_balance_point" not in changes:
+            changes["saved_balance_point"] = None
         return dataclasses.replace(Settings.from_json(self.to_json()), **changes)
 
     def sharpening_on(self):
@@ -218,7 +228,35 @@ def load_settings(raw_path):
     sc = sidecar_path(raw_path)
     if sc.is_file():
         return Settings.from_json(json.loads(sc.read_text("utf-8")))
-    return capture_settings(raw_path)
+    settings = capture_settings(raw_path)
+    try:
+        params = camera.stored_process_parameters(raw_path)
+        render_params = camera.stored_render_parameters(raw_path)
+        _, model = camera.read_make_model(raw_path)
+    except OSError:
+        params = {}
+        render_params = {}
+        model = None
+    levels = params.get("tone")
+    if levels is not None and validate_tone(levels) is None:
+        settings.tone = levels
+    if "tone_enabled" in params:
+        settings.tone_enabled = params["tone_enabled"]
+    if "white_point" in params and camera.balance_curves(raw_path).get("Daylight"):
+        mode = params["kelvin_mode"]
+        if mode == 5:
+            settings.kelvin_mode = mode
+            settings.white_point = settings.white_point_ref = params["white_point"]
+        elif settings.balance == "preset" and settings.lighting == "Daylight":
+            settings.white_point = params["white_point"]
+            settings.white_point_ref = LIGHTING_CCT["Daylight"]
+    caps = camera.capabilities(model)
+    if caps.pro_slr:
+        exposure = render_params.get("exposure")
+        if exposure is not None and abs(exposure) <= caps.exposure_range:
+            settings.exposure = exposure
+        settings.saved_balance_point = render_params.get("balance_point")
+    return settings
 
 
 def save_settings(raw_path, settings):
@@ -246,6 +284,7 @@ class RawImage:
     # Neutral camera RGB the camera recorded for each of its balance settings
     # (camera.balance_points: lighting names, "custom", "camera_auto").
     balance_points: dict = dataclasses.field(default_factory=dict)
+    balance_curves: dict = dataclasses.field(default_factory=dict)
 
     @property
     def caps(self):
@@ -285,7 +324,7 @@ def decode(path, half_size=False, algorithm="AHD"):
         metadata["gps"] = gps
     return RawImage(path, make, model, cam, wb / wb[1], daylight / daylight[1], rgb_xyz,
                     camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h),
-                    camera.balance_points(path))
+                    camera.balance_points(path), camera.balance_curves(path))
 
 
 def reduced(raw, long_edge):
@@ -417,6 +456,11 @@ def click_wb(cam, x, y, radius=2):
 def balance_temperature(raw, settings):
     """Colour temperature (K, rounded to 100 within WHITE_POINT_RANGE) whose Preset-style balance
     (Daylight balance shifted along the illuminant locus) is closest to the balance method's own."""
+    curve = raw.balance_curves.get(settings.lighting) if raw.caps.pro_slr else None
+    if settings.balance == "preset" and curve:
+        nominal = curve[25]
+        if WHITE_POINT_RANGE[0] <= nominal <= WHITE_POINT_RANGE[1]:
+            return int(round(nominal / 100) * 100)
     wb = np.asarray(method_wb(raw, settings), np.float64)
     day = np.asarray(raw.daylight_wb, np.float64)
     if not np.any(raw.rgb_xyz) or not np.all(wb > 0):
@@ -448,11 +492,29 @@ def method_wb(raw, settings):
 
 def white_balance(raw, settings):
     wb = np.asarray(method_wb(raw, settings), np.float64)
-    if settings.white_point != settings.white_point_ref:
+    curve = raw.balance_curves.get(settings.lighting) if raw.caps.pro_slr else None
+    if raw.caps.pro_slr and settings.saved_balance_point is not None:
+        point = np.asarray(settings.saved_balance_point, np.float64)
+        wb = np.max(point) / point
+    elif settings.balance == "preset" and curve and settings.kelvin_mode != 5:
+        x = settings.white_point / 100.0
+        point = np.array([sum(curve[i + j] * x ** j for j in range(4)) for i in (0, 4, 8)])
+        if np.all(np.isfinite(point)):
+            point = np.clip(np.floor(point + 0.5), 100, 10000)
+            wb = np.max(point) / point
+        elif settings.white_point != settings.white_point_ref:
+            wb = wb * cct_shift(raw, settings.white_point_ref, settings.white_point)
+    elif settings.white_point != settings.white_point_ref:
         wb = wb * cct_shift(raw, settings.white_point_ref, settings.white_point)
-    gains = 2.0 ** (np.asarray(settings.color_balance, np.float64) / 100)
+    controls = np.asarray(settings.color_balance, np.float64)
+    if raw.caps.pro_slr:
+        gains = 10.0 ** (0.0030103 * controls) if np.all(np.abs(controls) <= 100) else np.ones(3)
+        weights = [0.299, 0.587, 0.114]
+    else:
+        gains = 2.0 ** (controls / 100)
+        weights = [0.3, 0.59, 0.11]
     # Colour balance preserves overall luminance.
-    gains /= gains @ np.array([0.3, 0.59, 0.11])
+    gains /= gains @ np.array(weights)
     return wb * gains
 
 
@@ -470,6 +532,37 @@ def tone_map_ev(ev, tone):
     """Piecewise-linear EV remap putting shadow/midtone/highlight on their defaults."""
     return np.interp(ev, tone, TONE_DEFAULT, left=None, right=None) + np.where(
         ev < tone[0], ev - tone[0], np.where(ev > tone[2], ev - tone[2], 0))
+
+
+@functools.lru_cache(maxsize=32)
+def pro_slr_tone_lut(tone):
+    """Approximate the Pro SLR exposure table in its 12-bit, log2 code domain.
+
+    The camera DLL builds four Hermite knots from the current and reference levels. LibRaw's
+    decoded input and the original sensor pipeline do not necessarily have identical scaling.
+    """
+    source = np.asarray(tone, dtype=np.float64)
+    reference = np.asarray(PRO_SLR_TONE_REFERENCE)
+    offset = 8.533673272
+    slopes = np.diff(reference) / np.diff(source)
+    x = np.array([source[0], (source[0] + source[1]) / 2,
+                  (source[1] + source[2]) / 2, source[2]]) + offset
+    y = np.array([reference[0], (reference[0] + reference[1]) / 2,
+                  (reference[1] + reference[2]) / 2, reference[2]]) + offset
+    m = np.array([slopes[0], slopes[0], slopes[1], slopes[1]])
+    codes = np.arange(4096, dtype=np.float64)
+    log_codes = np.log2(np.maximum(codes, 1))
+    result = np.full_like(codes, y[0])
+    result[log_codes >= x[-1]] = y[-1]
+    for i in range(3):
+        mask = (log_codes >= x[i]) & (log_codes < x[i + 1])
+        width = x[i + 1] - x[i]
+        t = (log_codes[mask] - x[i]) / width
+        result[mask] = ((2 * t ** 3 - 3 * t ** 2 + 1) * y[i]
+                        + (t ** 3 - 2 * t ** 2 + t) * width * m[i]
+                        + (-2 * t ** 3 + 3 * t ** 2) * y[i + 1]
+                        + (t ** 3 - t ** 2) * width * m[i + 1])
+    return np.clip(np.floor(2 ** result + 0.5), 0, 4095).astype(np.float32) / 4095
 
 
 def validate_tone(tone):
@@ -497,8 +590,9 @@ def auto_exposure(raw, settings):
 
 def ev_histogram(raw, settings, bins=128, lo=-10.0, hi=6.0):
     """Histogram of scene EV (relative to mid grey) with exposure compensation applied."""
-    lin = np.clip(raw.camera_rgb[::2, ::2] * white_balance(raw, settings).astype(np.float32), 0, 1)
-    y = scene_luminance(lin).ravel() * np.float32(2.0 ** settings.exposure)
+    lin = raw.camera_rgb[::2, ::2] * white_balance(raw, settings).astype(np.float32)
+    lin = np.clip(lin * np.float32(2.0 ** settings.exposure), 0, 1)
+    y = scene_luminance(lin).ravel()
     ev = np.log2(np.maximum(y, 1e-6) / MID_GREY)
     hist, edges = np.histogram(ev, bins, (lo, hi))
     return hist, edges
@@ -510,7 +604,7 @@ def tone_curve(settings, look, profile_directory=None, n=256, lo=-10.0, hi=6.0):
     ev = np.linspace(lo, hi, n)
     mapped = tone_map_ev(ev, settings.tone)
     scene = (0.18 * 2.0 ** mapped).astype(np.float32)
-    lab = icc.lab_decode(_profile(str(d / look)).lut("A2B0")(erimm_encode(np.repeat(scene[:, None], 3, 1))))
+    lab = icc.lab_decode(_profile(str(look_path(look, d))).lut("A2B0")(erimm_encode(np.repeat(scene[:, None], 3, 1))))
     return ev, lab[:, 0]
 
 
@@ -625,7 +719,14 @@ def color_lut(source_name, look_name, space_path, profile_directory):
         erimm = _profile(str(d / "ERIMM_PCS3.icm")).lut("B2A0")(icc.xyz_encode(scene_xyz))
     else:
         erimm = erimm_encode(scene_xyz @ XYZ50_TO_PROPHOTO.T.astype(np.float32))
-    out_xyz = icc.lab_to_xyz(icc.lab_decode(_profile(str(look_path(look_name, d))).lut("A2B0")(erimm)))
+    out_lab = _profile(str(look_path(look_name, d))).lut("A2B0")(erimm)
+    tone_profiles = (("DCSProSLRn", "DCSProSLRnToneCurve.icm"),
+                     ("DCSProSLRc", "DCSProSLRcToneCurve.icm"),
+                     ("DCSPro14", "DCSPro14ToneCurve.icm"))
+    tone_profile = next((name for prefix, name in tone_profiles if source_name and source_name.startswith(prefix)), None)
+    if tone_profile:
+        out_lab = _profile(str(d / tone_profile)).lut("A2B0")(out_lab)
+    out_xyz = icc.lab_to_xyz(icc.lab_decode(out_lab))
     rgb = _profile(space_path).encoder()(out_xyz)
     return np.clip(rgb, 0, 1).astype(np.float32).reshape(LUT_SIZE, LUT_SIZE, LUT_SIZE, 3)
 
@@ -653,6 +754,12 @@ def scene_linear(raw, settings):
     """White-balanced camera RGB with exposure and tone applied (float32, clipped to 1)."""
     lin = raw.camera_rgb * white_balance(raw, settings).astype(np.float32)
     lin *= np.float32(2.0 ** settings.exposure)
+    if raw.caps.pro_slr:
+        if settings.tone_enabled and any(abs(float(np.float32(value)) - reference) > PRO_SLR_TONE_THRESHOLD
+               for value, reference in zip(settings.tone, PRO_SLR_TONE_REFERENCE)):
+            indices = np.floor(np.clip(lin, 0, 1) * 4095 + 0.5).astype(np.uint16)
+            return pro_slr_tone_lut(tuple(settings.tone))[indices]
+        return np.clip(lin, 0, 1, out=lin)
     if tuple(settings.tone) != TONE_DEFAULT:
         y = np.maximum(scene_luminance(lin), 1e-7)
         ev = np.log2(y / MID_GREY)

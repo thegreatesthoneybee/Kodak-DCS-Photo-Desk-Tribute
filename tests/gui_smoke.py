@@ -67,14 +67,33 @@ def main(folder, shot):
     sw.view.item(0).setSelected(True)
     app.processEvents()
     assert w.controls.b[1173].currentData() == "preset"
+    if entry.path.name.upper() == "GQ432034.DCR":
+        assert entry.settings.white_point == 5000
+        assert entry.settings.saved_balance_point == (2048, 2532, 1771)
+        assert "5000" in w.controls.b[1041].text()
+    if entry.path.name.upper() == "F5KG7096.DCR":
+        from photodesk import pipeline
+        from photodesk.gui.app import to_qimage
+        assert entry.settings.white_point == 5200
+        assert entry.settings.exposure == 0.5
+        assert entry.settings.saved_balance_point == (2048, 2621, 1934)
+        assert "5200" in w.controls.b[1041].text()
+        expected = to_qimage(pipeline.render(entry.small, entry.settings.copy(crop=None),
+                                             profile_directory=w.pdir, quality="faster"))
+        wait(app, lambda: entry.thumb == expected)
     # Edit through the panel and the menu, then undo/redo.
     before = entry.thumb
     w.acts[32788].trigger()                    # Lighting > Tungsten
     assert entry.settings.lighting == "Tungsten"
+    if entry.path.name.upper() == "F5KG7096.DCR":
+        assert entry.settings.kelvin_mode is None and entry.settings.saved_balance_point is None
     wait(app, lambda: entry.thumb is not before)   # thumbnail re-rendered in the background
     undo_text = w.acts[57643].text()
     w.acts[57643].trigger()
     assert entry.settings.lighting == "Daylight"
+    if entry.path.name.upper() == "F5KG7096.DCR":
+        assert entry.settings.kelvin_mode == 5 and entry.settings.white_point == 5200
+        assert entry.settings.saved_balance_point == (2048, 2621, 1934)
     w.acts[57644].trigger()
     assert entry.settings.lighting == "Tungsten"
     w.acts[57643].trigger()

@@ -65,6 +65,30 @@ def test_custom_looks_in_system_folders(profile_dir, tmp_path, monkeypatch):
     names = [n for n, _ in pipeline.available_looks(profile_dir)]
     assert "MyCustomLook.icm" in names and "monitor.icm" not in names and "DCSProductLook.icm" in names
     assert pipeline.look_path("MyCustomLook.icm", profile_dir) == tmp_path / "MyCustomLook.icm"
+    ev, curve = pipeline.tone_curve(pipeline.Settings(), "MyCustomLook.icm", profile_dir, n=16)
+    assert len(ev) == len(curve) == 16 and np.isfinite(curve).all()
+
+
+@pytest.mark.parametrize("source,tone", [
+    ("DCSProSLRnDaylight.icm", "DCSProSLRnToneCurve.icm"),
+    ("DCSProSLRcDaylight.icm", "DCSProSLRcToneCurve.icm"),
+    ("DCSPro14Daylight.icm", "DCSPro14ToneCurve.icm"),
+])
+def test_camera_color_chain_uses_tone_profile_except_linear(profile_dir, monkeypatch, source, tone):
+    seen = []
+    original = pipeline._profile
+    def track(path):
+        seen.append(Path(path).name)
+        return original(path)
+    monkeypatch.setattr(pipeline, "_profile", track)
+    pipeline.color_lut.cache_clear()
+    space = str(profile_dir / "sRGB Color Space Profile.icm")
+    pipeline.color_lut(source, "DCSProductLook.icm", space, str(profile_dir))
+    assert tone in seen
+    seen.clear()
+    pipeline.color_lut(source, "DCSProductLook.icm", None, str(profile_dir))
+    assert tone not in seen
+    pipeline.color_lut.cache_clear()
 
 
 def _srgb_lab(img, profile_dir, fx=.18, fy=.37):
@@ -141,6 +165,113 @@ def test_lens_strength_recorded_by_camera():
 
 
 DCS560_SAMPLE = ROOT / "raw/560/3R7D2667.TIF"
+
+
+def test_stored_process_levels_reject_invalid_blocks(tmp_path, monkeypatch):
+    import struct
+    path = tmp_path / "sample.dcr"
+    path.write_bytes(b"MM")
+    data = bytearray(112)
+    struct.pack_into(">II", data, 4, 2, 112)
+    for offset, pair in zip((68, 76, 84), ((-19, 2), (-1, 5), (4, 1))):
+        struct.pack_into(">ii", data, offset, *pair)
+    monkeypatch.setattr(camera, "read_kodak_tags", lambda *args: {5011: tuple(data)})
+    assert camera.stored_process_levels(path) == (-9.5, -0.2, 4.0)
+    assert camera.stored_process_parameters(path)["tone_enabled"] is False
+    struct.pack_into(">I", data, 92, 1)
+    assert camera.stored_process_parameters(path)["tone_enabled"] is True
+    struct.pack_into(">i", data, 72, 0)
+    assert camera.stored_process_levels(path) is None
+    struct.pack_into(">I", data, 4, 3)
+    assert camera.stored_process_levels(path) is None
+
+
+def test_stored_process_levels_little_endian_and_sidecar(tmp_path, monkeypatch):
+    import struct
+    path = tmp_path / "sample.dcr"
+    path.write_bytes(b"II")
+    data = bytearray(112)
+    struct.pack_into("<II", data, 4, 2, 112)
+    for offset, pair in zip((68, 76, 84), ((-19, 2), (-1, 5), (4, 1))):
+        struct.pack_into("<ii", data, offset, *pair)
+    monkeypatch.setattr(camera, "read_kodak_tags", lambda *args: {5011: tuple(data)})
+    assert camera.stored_process_levels(path) == (-9.5, -0.2, 4.0)
+    saved = pipeline.Settings(tone=(-8.0, 0.0, 3.0))
+    pipeline.save_settings(path, saved)
+    assert pipeline.load_settings(path).tone == saved.tone
+
+
+def test_stored_process_levels_from_slrn_sample():
+    path = ROOT / "raw/SLRn/GQ432034.DCR"
+    if not path.is_file():
+        pytest.skip("SLR/n sample not available")
+    np.testing.assert_allclose(camera.stored_process_levels(path), (-9.5, -0.2, 4.0), atol=1e-5)
+    settings = pipeline.load_settings(path)
+    np.testing.assert_allclose(settings.tone, (-9.5, -0.2, 4.0), atol=1e-5)
+    assert settings.white_point == 5000
+    raw = pipeline.decode(path, half_size=True)
+    assert settings.saved_balance_point == (2048, 2532, 1771)
+    np.testing.assert_allclose(pipeline.white_balance(raw, settings), [2532 / 2048, 1.0, 2532 / 1771])
+    assert not np.allclose(pipeline.white_balance(raw, settings),
+                           pipeline.white_balance(raw, settings.copy(white_point=5500)))
+    for lighting, expected in (("Daylight", 5500), ("Tungsten", 3200),
+                               ("Fluorescent", 5000), ("Flash", 5500)):
+        assert pipeline.balance_temperature(raw, settings.copy(lighting=lighting)) == expected
+
+
+def test_kelvin_point_quantizes_and_clamps(monkeypatch):
+    from types import SimpleNamespace
+    curve = [0.0] * 27
+    curve[0], curve[4], curve[8] = -50.0, 500.49, 20000.0
+    raw = SimpleNamespace(caps=SimpleNamespace(pro_slr=True), balance_curves={"Daylight": curve})
+    monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.ones(3))
+    np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()), [100.0, 20.0, 1.0])
+
+
+def test_saved_nonpreset_kelvin_does_not_apply_preset_curve(tmp_path, monkeypatch):
+    import shutil
+    if not SLR_C_SAMPLE.is_file():
+        pytest.skip("SLR/c sample not available")
+    path = tmp_path / SLR_C_SAMPLE.name
+    shutil.copy2(SLR_C_SAMPLE, path)
+    settings = pipeline.load_settings(path)
+    assert (settings.kelvin_mode, settings.white_point, settings.white_point_ref) == (5, 5200, 5200)
+    assert settings.saved_balance_point == (2048, 2621, 1934)
+    assert settings.exposure == 0.5
+    raw = pipeline.decode(path, half_size=True)
+    monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.array([1.2, 1.0, 1.3]))
+    np.testing.assert_allclose(pipeline.white_balance(raw, settings), [2621 / 2048, 1.0, 2621 / 1934])
+    assert settings.copy(white_point=5300).saved_balance_point is None
+    pipeline.save_settings(path, settings)
+    assert pipeline.load_settings(path).kelvin_mode == 5
+
+
+def test_stored_render_record_checks_size(tmp_path, monkeypatch):
+    import struct
+    path = tmp_path / "sample.dcr"
+    path.write_bytes(b"II")
+    data = bytearray(72)
+    struct.pack_into("<II", data, 4, 1, 72)
+    struct.pack_into("<i", data, 32, -500000)
+    struct.pack_into("<3H", data, 40, 2048, 2500, 1800)
+    struct.pack_into("<I", data, 0, sum(data[4:]))
+    monkeypatch.setattr(camera, "read_kodak_tags", lambda *args: {1021: tuple(data)})
+    assert camera.stored_render_parameters(path) == {"exposure": -0.5, "balance_point": (2048, 2500, 1800)}
+    data[0] ^= 1  # The original accumulates the checksum but does not reject on mismatch.
+    assert camera.stored_render_parameters(path)["exposure"] == -0.5
+    struct.pack_into("<I", data, 8, 73)
+    assert camera.stored_render_parameters(path) == {}
+
+
+def test_pro_slr_color_balance_uses_camera_constants(monkeypatch):
+    from types import SimpleNamespace
+    raw = SimpleNamespace(caps=SimpleNamespace(pro_slr=True), balance_curves={})
+    monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.ones(3))
+    values = np.array([40, -20, 10])
+    adjustment = 10.0 ** (0.0030103 * values)
+    expected = adjustment / (adjustment @ np.array([0.299, 0.587, 0.114]))
+    np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings(color_balance=tuple(values))), expected)
+    np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings(color_balance=(101, 0, 0))), np.ones(3))
 
 
 @pytest.mark.skipif(not (DCS560_SAMPLE.is_file() and SAMPLE.is_file()), reason="samples not available")
@@ -322,6 +453,45 @@ def test_tone_validation_and_mapping():
     assert pipeline.validate_tone((-9.5, 2.0, 3.4)) == "Midtone value is too high."
     ev = np.array([-9.5, -1.0, 3.4])
     np.testing.assert_allclose(pipeline.tone_map_ev(ev, (-9.5, -1.0, 3.4)), [-9.5, 0.0, 3.4])
+
+
+def test_pro_slr_tone_lookup_has_bounded_monotonic_curve():
+    lut = pipeline.pro_slr_tone_lut((-9.5, -0.2, 4.0))
+    assert len(lut) == 4096
+    assert np.all(np.isfinite(lut)) and np.all(np.diff(lut) >= 0)
+    assert 0 <= lut[0] <= lut[-1] <= 1
+    default = pipeline.pro_slr_tone_lut((-9.535300254821777, 0.0, 3.464400053024292))
+    np.testing.assert_allclose(default[1:4090], np.arange(1, 4090) / 4095, atol=1 / 4095)
+    assert lut[371] != pytest.approx(default[371], abs=1 / 4095)
+
+
+def test_pro_slr_scene_applies_lookup_per_channel(monkeypatch):
+    from types import SimpleNamespace
+    raw = SimpleNamespace(camera_rgb=np.array([[[0.1, 0.3, 0.7]]], dtype=np.float32),
+                          caps=SimpleNamespace(pro_slr=True))
+    monkeypatch.setattr(pipeline, "white_balance", lambda *_: np.array([1.0, 1.0, 1.0]))
+    settings = pipeline.Settings(exposure=-1, tone=(-9.5, -0.2, 4.0))
+    indices = np.floor(raw.camera_rgb * 0.5 * 4095 + 0.5).astype(np.uint16)
+    np.testing.assert_array_equal(pipeline.scene_linear(raw, settings),
+                                  pipeline.pro_slr_tone_lut(settings.tone)[indices])
+    near_reference = list(pipeline.PRO_SLR_TONE_REFERENCE)
+    near_reference[1] += 0.05
+    unchanged = pipeline.scene_linear(raw, settings.copy(exposure=0, tone=tuple(near_reference)))
+    np.testing.assert_array_equal(unchanged, raw.camera_rgb)
+    disabled = settings.copy(exposure=0, tone_enabled=False)
+    np.testing.assert_array_equal(pipeline.scene_linear(raw, disabled), raw.camera_rgb)
+    assert disabled.copy(tone=(-9.5, -0.3, 4.0)).tone_enabled
+
+
+def test_histogram_exposure_before_clipping(monkeypatch):
+    from types import SimpleNamespace
+    raw = SimpleNamespace(camera_rgb=np.full((2, 2, 3), 0.75, dtype=np.float32))
+    monkeypatch.setattr(pipeline, "white_balance", lambda *_: np.full(3, 2.0))
+    settings = pipeline.Settings(exposure=-1.0)
+    hist, edges = pipeline.ev_histogram(raw, settings, bins=160, lo=-4, hi=4)
+    expected = np.log2(0.75 / pipeline.MID_GREY)
+    assert hist.sum() == 1
+    assert edges[np.argmax(hist)] <= expected < edges[np.argmax(hist) + 1]
 
 
 def test_crop_rotation_and_sequence_names():
