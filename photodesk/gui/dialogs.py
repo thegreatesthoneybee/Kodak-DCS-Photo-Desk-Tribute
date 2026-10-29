@@ -298,18 +298,18 @@ class WhitePointDialog(AdjustDialog):
     def setup(self, s):
         if not hasattr(self, "wp"):
             lo, hi = pipeline.WHITE_POINT_RANGE
-            self.wp = Linked(self.b[1212], None, None, lo, hi, 0, step=100, on_change=self._show)
+            self.wp = Linked(self.b[1212], None, None, lo // 100, hi // 100, 0, on_change=self._show)
             self.b[1217].setVisible(False)
-        self.wp.set(s.white_point)
+        self.wp.set(s.white_point // 100)
         self._show(False)
 
     def _show(self, notify=True):
-        self.b[1213].setText(f"{self.wp.value()}° K")
+        self.b[1213].setText(f"{self.wp.value() * 100}° K")
         if notify:
             self.changed()
 
     def values(self):
-        return {"white_point": int(round(self.wp.value() / 100) * 100)}
+        return {"white_point": self.wp.value() * 100}
 
 
 class ColorBalanceDialog(AdjustDialog):

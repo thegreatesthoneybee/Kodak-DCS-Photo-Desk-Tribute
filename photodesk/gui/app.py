@@ -197,6 +197,7 @@ class SheetWindow(DocumentSubWindow):
             if e.path in replaced:
                 e.thumb = e.small = None
                 e.settings = pipeline.load_settings(e.path)
+                e.settings_from_sidecar = pipeline.has_saved_settings(e.path)
         if [e.path for e in self.sheet.entries] == before and not replaced:
             return
         selected = {id(e) for e in self.view.selected_entries()}
@@ -902,18 +903,22 @@ class MainWindow(QMainWindow):
         return sw
 
     def _load_thumb(self, sw, e):
-        task = Task(e, _thumb_job, e.path, e.settings, self.pdir, e.is_raw)
+        settings = e.settings
+        task = Task(e, _thumb_job, e.path, settings, self.pdir, e.is_raw)
 
         def done(entry, result):
             entry.small, entry.meta, img = result
             entry.thumb = to_qimage(img)
             s = entry.settings
-            if entry.small is not None and s.kelvin_mode is None and s.white_point == s.white_point_ref:
+            if (entry.settings is settings and not entry.settings_from_sidecar and entry.small is not None and
+                    s.kelvin_mode is None and s.white_point == s.white_point_ref):
                 # The camera's preset curve can depend on the displayed temperature itself.
                 temperature = pipeline.balance_temperature(entry.small, s)
                 if temperature != s.white_point:
                     s.white_point = s.white_point_ref = temperature
                     self.refresh_thumb(entry)
+            elif entry.settings is not settings:
+                self.refresh_thumb(entry)
             sw.view.refresh_entry(entry)
             if entry is self.focused():
                 self.info.set_entry(entry)

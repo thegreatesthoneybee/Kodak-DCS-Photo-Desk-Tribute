@@ -978,6 +978,106 @@ def test_gui_task_skips_stale_work_and_results():
     assert called == ["work"]
 
 
+def test_sheet_tracks_sidecar_origin_when_loading_refreshing_and_renaming(tmp_path, monkeypatch):
+    from photodesk.gui.model import Sheet
+
+    first = tmp_path / "first.DCR"
+    first.write_bytes(b"")
+    pipeline.save_settings(first, pipeline.Settings(white_point=6100, white_point_ref=6100))
+    monkeypatch.setattr(camera, "read_make_model", lambda *_: ("Kodak", "test"))
+    monkeypatch.setattr(pipeline, "load_settings", lambda *_: pipeline.Settings())
+
+    sheet = Sheet(tmp_path)
+    first_entry = sheet.find(first)
+    assert first_entry.settings_from_sidecar
+
+    second = tmp_path / "second.DCR"
+    second.write_bytes(b"")
+    sheet.refresh()
+    second_entry = sheet.find(second)
+    assert not second_entry.settings_from_sidecar
+
+    third = tmp_path / "third.DCR"
+    third.write_bytes(b"")
+    pipeline.save_settings(third, pipeline.Settings())
+    sheet.refresh()
+    third_entry = sheet.find(third)
+    assert third_entry.settings_from_sidecar
+
+    sheet.rename([first_entry], ["renamed.DCR"])
+    assert first_entry.settings_from_sidecar
+    assert pipeline.sidecar_path(first_entry.path).is_file()
+
+
+def test_thumbnail_temperature_initialization_respects_sidecar_and_async_edits(monkeypatch):
+    from types import SimpleNamespace
+    from photodesk.gui import app as gui_app
+    from photodesk.gui.model import Entry
+
+    tasks, temperatures, refreshed = [], [], []
+
+    class FakeTask:
+        def __init__(self, token, *_args):
+            self.token = token
+            self.signals = SimpleNamespace(
+                done=SimpleNamespace(connect=lambda callback: setattr(self, "on_done", callback)),
+                failed=SimpleNamespace(connect=lambda _callback: None),
+            )
+            tasks.append(self)
+
+    monkeypatch.setattr(gui_app, "Task", FakeTask)
+    monkeypatch.setattr(gui_app, "to_qimage", lambda image: image)
+    monkeypatch.setattr(pipeline, "balance_temperature",
+                        lambda _raw, settings: temperatures.append(settings) or 6200)
+
+    window = SimpleNamespace(pdir="profiles", thumb_pool=SimpleNamespace(start=lambda _task: None),
+                             focused=lambda: None, refresh_thumb=lambda entry: refreshed.append(entry))
+    sw = SimpleNamespace(view=SimpleNamespace(refresh_entry=lambda _entry: None))
+
+    def complete(settings, from_sidecar=False, edit_during_decode=None):
+        entry = Entry(Path("image.DCR"), settings, settings_from_sidecar=from_sidecar)
+        gui_app.MainWindow._load_thumb(window, sw, entry)
+        if edit_during_decode is not None:
+            entry.settings = edit_during_decode(entry.settings)
+        tasks[-1].on_done(entry, (object(), {}, "thumbnail"))
+        return entry
+
+    computed = complete(pipeline.Settings(white_point=4800, white_point_ref=4800), from_sidecar=False)
+    assert computed.settings.white_point == computed.settings.white_point_ref == 6200
+    assert temperatures == [computed.settings]
+    assert refreshed == [computed]
+
+    sidecar = complete(pipeline.Settings(white_point=6300, white_point_ref=6300), from_sidecar=True)
+    assert sidecar.settings.white_point == sidecar.settings.white_point_ref == 6300
+    assert len(temperatures) == 1
+    assert refreshed == [computed]
+
+    edited = complete(pipeline.Settings(white_point=4700, white_point_ref=4700),
+                      edit_during_decode=lambda settings: settings.copy(exposure=0.75))
+    assert edited.settings.exposure == 0.75
+    assert edited.settings.white_point == edited.settings.white_point_ref == 4700
+    assert len(temperatures) == 1
+    assert refreshed == [computed, edited]
+
+
+def test_white_point_dialog_uses_100_kelvin_slider_steps():
+    from types import SimpleNamespace
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QLabel, QSlider
+    from photodesk.gui.dialogs import WhitePointDialog
+
+    app = QApplication.instance() or QApplication([])
+    window = SimpleNamespace(b={1212: QSlider(Qt.Horizontal), 1213: QLabel(), 1217: QLabel()},
+                             changed=lambda: None)
+    window._show = lambda notify=True: WhitePointDialog._show(window, notify)
+    WhitePointDialog.setup(window, SimpleNamespace(white_point=5059))
+    assert window.b[1213].text() == "5000° K"
+    assert WhitePointDialog.values(window) == {"white_point": 5000}
+    window.b[1212].setValue(51)
+    assert window.b[1213].text() == "5100° K"
+    assert WhitePointDialog.values(window) == {"white_point": 5100}
+
+
 def test_click_balance_does_not_edit_an_unselected_reference(monkeypatch):
     from types import SimpleNamespace
     from photodesk.gui.app import MainWindow

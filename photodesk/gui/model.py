@@ -49,6 +49,7 @@ class Entry:
 
     _raw_kind: bool = None
     _serial: str = None
+    settings_from_sidecar: bool = False
 
     @property
     def serial(self):
@@ -126,7 +127,8 @@ class Sheet:
         self.entries = []
         for p in sorted(self._present()):
             make, model = camera.read_make_model(p)
-            self.entries.append(Entry(p, pipeline.load_settings(p), make, model))
+            self.entries.append(Entry(p, pipeline.load_settings(p), make, model,
+                                      settings_from_sidecar=pipeline.has_saved_settings(p)))
         self.undo_stack, self.redo_stack = [], []
         self.sort = "name"
 
@@ -213,6 +215,7 @@ class Sheet:
                 need_save_as.append(e)
                 continue
             pipeline.save_settings(e.path, e.settings)
+            e.settings_from_sidecar = True
             e.dirty = False
         return need_save_as
 
@@ -303,5 +306,6 @@ class Sheet:
         self.entries = [e for e in self.entries if e.path in present]
         for p in sorted(present - known):
             make, model = camera.read_make_model(p)
-            self.entries.append(Entry(p, pipeline.load_settings(p), make, model))
+            self.entries.append(Entry(p, pipeline.load_settings(p), make, model,
+                                      settings_from_sidecar=pipeline.has_saved_settings(p)))
         self.sort_by(self.sort)
