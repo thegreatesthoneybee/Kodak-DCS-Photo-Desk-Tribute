@@ -77,12 +77,12 @@ def main(folder, outdir):
             w.mdi.setActiveSubWindow(w.sheets[0])
         if w.sheets and not w.sheets[0].view.selectedItems():
             w.sheets[0].view.item(0).setSelected(True)
-    # Unlock All Camera Features is on by default; White Point (Pro 14n/SLR only) needs it for this sample.
+    # Unlock All Camera Features is on by default; locked behavior depends on the camera.
     if not w.acts[33152].isEnabled():
         errors.append("White Point disabled although camera features are unlocked by default")
     w.set_unlock_all(False)
-    if w.acts[33152].isEnabled():
-        errors.append("White Point enabled for a Pro Back with camera features locked")
+    if w.acts[33152].isEnabled() != e.caps.white_point:
+        errors.append("White Point availability does not match locked camera capabilities")
     w.set_unlock_all(True)
     before = len(errors)
     w.white_point_dialog()
