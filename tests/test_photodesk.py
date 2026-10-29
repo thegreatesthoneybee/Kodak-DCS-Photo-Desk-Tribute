@@ -348,6 +348,55 @@ def test_saved_kelvin_uses_its_own_illumination(monkeypatch):
     np.testing.assert_allclose(pipeline.white_balance(raw, settings), [3.0, 3.0, 1.0])
 
 
+@pytest.mark.parametrize("mode", range(4))
+def test_saved_basic_kelvin_modes_override_nonpreset_balance(monkeypatch, mode):
+    from types import SimpleNamespace
+    illuminations = camera.ILLUMINANTS
+    curves, balance_factors = {}, {}
+    bases = {}
+    slopes = {}
+    for index, illumination in enumerate(illuminations):
+        base = np.array([900, 1700, 2800], dtype=np.float64) + index * np.array([125, 175, 225])
+        slope = np.array([3, 1, -2], dtype=np.float64) + index * np.array([0.5, -0.25, 0.2])
+        curve = [0.0] * 27
+        for channel, offset in enumerate((0, 4, 8)):
+            curve[offset] = base[channel]
+            curve[offset + 1] = slope[channel]
+        factor = np.array([1.0 + 0.05 * index, 0.8 + 0.1 * index, 1.2 - 0.05 * index])
+        curves[illumination] = curve
+        balance_factors[illumination] = factor
+        bases[illumination] = base
+        slopes[illumination] = slope
+
+    raw = SimpleNamespace(caps=SimpleNamespace(pro_slr=True), balance_curves=curves,
+                          balance_factors=balance_factors)
+    monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.array([9.0, 8.0, 7.0]))
+    illumination = illuminations[mode]
+    settings = pipeline.Settings(balance="click", lighting=illuminations[(mode + 1) % 4],
+                                 white_point=5000, white_point_ref=5000, kelvin_mode=mode,
+                                 kelvin_illumination=illumination,
+                                 saved_balance_point=(4000, 2000, 1000))
+
+    np.testing.assert_allclose(pipeline.white_balance(raw, settings), [1.0, 2.0, 4.0])
+    edited = settings.copy(white_point=5200)
+    assert edited.saved_balance_point is None
+    assert edited.kelvin_mode == mode
+    point = np.floor(bases[illumination] + slopes[illumination] * 52 + 0.5)
+    point = np.floor(point * balance_factors[illumination] + 0.5)
+    expected = np.max(point) / point
+    np.testing.assert_allclose(pipeline.white_balance(raw, edited), expected)
+
+
+def test_nonpreset_balance_without_saved_kelvin_keeps_balance_method(monkeypatch):
+    from types import SimpleNamespace
+    raw = SimpleNamespace(caps=SimpleNamespace(pro_slr=True),
+                          balance_curves={"Daylight": [1000.0] * 27},
+                          balance_factors={"Daylight": (0.5, 0.5, 0.5)})
+    monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.array([1.7, 1.0, 2.3]))
+    settings = pipeline.Settings(balance="click", white_point=5000, white_point_ref=5000)
+    np.testing.assert_allclose(pipeline.white_balance(raw, settings), [1.7, 1.0, 2.3])
+
+
 def test_invalid_preset_factor_triplet_is_ignored(monkeypatch):
     monkeypatch.setattr(camera, "read_kodak_tags", lambda *_: {2130: (1.0, 0.099, 1.0), 2131: (1.0, 0.1, 1.0)})
     factors = camera.balance_factors("sample.dcr")

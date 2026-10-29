@@ -610,7 +610,7 @@ def white_balance(raw, settings):
     if raw.caps.pro_slr and settings.saved_balance_point is not None:
         point = np.asarray(settings.saved_balance_point, np.float64)
         wb = np.max(point) / point
-    elif curve and (settings.balance == "preset" or settings.kelvin_mode in (4, 5, 6)):
+    elif curve and (settings.balance == "preset" or settings.kelvin_mode in (0, 1, 2, 3, 4, 5, 6)):
         point = kelvin_point(curve, settings.white_point)
         if settings.kelvin_mode == 4:
             calibration = custom_kelvin_calibration(raw)
