@@ -201,6 +201,23 @@ def test_stored_process_levels_little_endian_and_sidecar(tmp_path, monkeypatch):
     assert pipeline.load_settings(path).tone == saved.tone
 
 
+def test_saved_kelvin_tuple_normalizes_preset_illumination(tmp_path, monkeypatch):
+    import struct
+    path = tmp_path / "sample.dcr"
+    path.write_bytes(b"II")
+    data = bytearray(112)
+    struct.pack_into("<II", data, 4, 2, 112)
+    struct.pack_into("<III", data, 16, 3200, 1, 3)
+    monkeypatch.setattr(camera, "read_kodak_tags", lambda *args: {5011: tuple(data)})
+    params = camera.stored_process_parameters(path)
+    assert (params["white_point"], params["kelvin_mode"], params["kelvin_illumination"]) == (3200, 1, "Tungsten")
+    struct.pack_into("<III", data, 16, 5200, 5, 2)
+    params = camera.stored_process_parameters(path)
+    assert (params["kelvin_mode"], params["kelvin_illumination"]) == (5, "Fluorescent")
+    struct.pack_into("<I", data, 20, 7)
+    assert "kelvin_mode" not in camera.stored_process_parameters(path)
+
+
 def test_stored_process_levels_from_slrn_sample():
     path = ROOT / "raw/SLRn/GQ432034.DCR"
     if not path.is_file():
@@ -209,6 +226,7 @@ def test_stored_process_levels_from_slrn_sample():
     settings = pipeline.load_settings(path)
     np.testing.assert_allclose(settings.tone, (-9.5, -0.2, 4.0), atol=1e-5)
     assert settings.white_point == 5000
+    assert settings.kelvin_mode == 0 and settings.kelvin_illumination == "Daylight"
     raw = pipeline.decode(path, half_size=True)
     np.testing.assert_allclose(raw.balance_factors["Daylight"], (1.0, 0.965, 0.98), atol=1e-6)
     assert settings.saved_balance_point == (2048, 2532, 1771)
@@ -229,6 +247,19 @@ def test_kelvin_point_quantizes_and_clamps(monkeypatch):
     np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()), [100.0, 20.0, 1.0])
     raw.balance_factors = {"Daylight": (1.0, 0.965, 0.98)}
     np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()), [98.0, 9800 / 483, 1.0])
+
+
+def test_saved_kelvin_uses_its_own_illumination(monkeypatch):
+    from types import SimpleNamespace
+    daylight, tungsten = [0.0] * 27, [0.0] * 27
+    daylight[0], daylight[4], daylight[8] = 1000, 1000, 1000
+    tungsten[0], tungsten[4], tungsten[8] = 1000, 2000, 3000
+    raw = SimpleNamespace(caps=SimpleNamespace(pro_slr=True),
+                          balance_curves={"Daylight": daylight, "Tungsten": tungsten},
+                          balance_factors={"Tungsten": (1.0, 0.5, 1.0)})
+    monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.ones(3))
+    settings = pipeline.Settings(lighting="Daylight", kelvin_mode=1, kelvin_illumination="Tungsten")
+    np.testing.assert_allclose(pipeline.white_balance(raw, settings), [3.0, 3.0, 1.0])
 
 
 def test_saved_auto_kelvin_uses_capture_calibration(tmp_path, monkeypatch):
@@ -253,6 +284,7 @@ def test_saved_auto_kelvin_uses_capture_calibration(tmp_path, monkeypatch):
     assert settings.copy(click_wb=(1.1, 1.0, 1.2)).saved_balance_point is None
     assert settings.copy(balance="auto").kelvin_mode is None
     assert settings.copy(lighting="Tungsten").kelvin_mode is None
+    assert settings.copy(lighting="Tungsten").kelvin_illumination is None
     assert settings.copy(white_point=5000).kelvin_mode == 5
     assert settings.copy(exposure=0).saved_balance_point == settings.saved_balance_point
     pipeline.save_settings(path, settings)

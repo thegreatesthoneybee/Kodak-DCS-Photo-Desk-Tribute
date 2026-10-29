@@ -91,7 +91,8 @@ class Settings:
     # Colour temperature the balance method's own balance corresponds to; White Point re-balances
     # from it, so white_point == white_point_ref leaves the balance as the method set it.
     white_point_ref: int = WHITE_POINT_DEFAULT
-    kelvin_mode: int = None             # saved non-preset Kelvin mode, when restored from the RAW
+    kelvin_mode: int = None             # saved Kelvin mode, when restored from the RAW
+    kelvin_illumination: str = None     # separate from the saved image-lighting selector
     saved_balance_point: tuple = None  # RGB neutral point restored from the camera processing record
     color_balance: tuple = (0, 0, 0)    # R, G, B in -100..100
     exposure: float = 0.0               # EV
@@ -144,6 +145,8 @@ class Settings:
             field in changes and changes[field] != getattr(self, field) for field in ("balance", "lighting", "click_wb")
         ):
             changes["kelvin_mode"] = None
+            if "kelvin_illumination" not in changes:
+                changes["kelvin_illumination"] = None
         return dataclasses.replace(Settings.from_json(self.to_json()), **changes)
 
     def sharpening_on(self):
@@ -249,14 +252,10 @@ def load_settings(raw_path):
         settings.tone = levels
     if "tone_enabled" in params:
         settings.tone_enabled = params["tone_enabled"]
-    if "white_point" in params and camera.balance_curves(raw_path).get("Daylight"):
-        mode = params["kelvin_mode"]
-        if mode == 5:
-            settings.kelvin_mode = mode
-            settings.white_point = settings.white_point_ref = params["white_point"]
-        elif settings.balance == "preset" and settings.lighting == "Daylight":
-            settings.white_point = params["white_point"]
-            settings.white_point_ref = LIGHTING_CCT["Daylight"]
+    if "white_point" in params and camera.balance_curves(raw_path).get(params["kelvin_illumination"]):
+        settings.kelvin_mode = params["kelvin_mode"]
+        settings.kelvin_illumination = params["kelvin_illumination"]
+        settings.white_point = settings.white_point_ref = params["white_point"]
     caps = camera.capabilities(model)
     if caps.pro_slr:
         exposure = render_params.get("exposure")
@@ -532,16 +531,18 @@ def auto_kelvin_factors(raw):
 
 def white_balance(raw, settings):
     wb = np.asarray(method_wb(raw, settings), np.float64)
-    curve = raw.balance_curves.get(settings.lighting) if raw.caps.pro_slr else None
+    illumination = settings.kelvin_illumination if settings.kelvin_mode is not None else settings.lighting
+    curve = raw.balance_curves.get(illumination) if raw.caps.pro_slr else None
     if raw.caps.pro_slr and settings.saved_balance_point is not None:
         point = np.asarray(settings.saved_balance_point, np.float64)
         wb = np.max(point) / point
     elif settings.balance == "preset" and curve:
         point = kelvin_point(curve, settings.white_point)
-        factors = (auto_kelvin_factors(raw) if settings.kelvin_mode == 5 and settings.lighting == "Daylight"
-                   else getattr(raw, "balance_factors", {}).get(settings.lighting) if settings.kelvin_mode != 5
+        factors = (auto_kelvin_factors(raw) if settings.kelvin_mode == 5 and illumination == "Daylight"
+                   else getattr(raw, "balance_factors", {}).get(illumination)
+                   if settings.kelvin_mode is None or settings.kelvin_mode < 4
                    else None)
-        if point is not None and (factors is not None or settings.kelvin_mode != 5):
+        if point is not None and (factors is not None or settings.kelvin_mode is None):
             factors = np.asarray(factors if factors is not None else (1, 1, 1))
             point = np.floor(point * factors + 0.5)
             wb = np.max(point) / point

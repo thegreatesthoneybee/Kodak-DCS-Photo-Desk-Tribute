@@ -25,7 +25,7 @@ CANT_UNDO, CANT_REDO = 62091, 62092
 # Paste Special groups (check box id in dialog 292 -> Settings fields).
 PASTE_GROUPS = {
     1338: ("crop",), 1340: ("rotation",), 1341: ("exposure",), 1342: ("tone", "tone_enabled"),
-    1344: ("balance", "click_wb", "lighting", "white_point", "white_point_ref", "kelvin_mode", "saved_balance_point", "color_balance"),
+    1344: ("balance", "click_wb", "lighting", "white_point", "white_point_ref", "kelvin_mode", "kelvin_illumination", "saved_balance_point", "color_balance"),
     1352: ("lens_optimization",), 1346: ("look",),
     1347: ("noise_type", "noise_radius", "noise_strength", "noise_luma", "moire_threshold"),
     1348: ("sharpen_amount", "sharpen_radius", "sharpen_threshold"), 1350: ("iptc",), 1351: ("tagged",),

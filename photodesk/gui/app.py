@@ -1485,6 +1485,7 @@ class MainWindow(QMainWindow):
     def _set_balance_temperature(self, e, s):
         """White Point slider shows the colour temperature of the new balance (and starts from it)."""
         s.kelvin_mode = None
+        s.kelvin_illumination = None
         s.saved_balance_point = None
         raw = e.raw or e.small
         if raw is None:

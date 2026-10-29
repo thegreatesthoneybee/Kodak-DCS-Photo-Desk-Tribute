@@ -260,9 +260,10 @@ def stored_process_parameters(path):
         return {}
     result = {}
     temperature, mode, illuminant = struct.unpack_from(order + "III", data, 16)
-    if mode in (0, 5) and illuminant == 0 and 2000 <= temperature <= 7500:
+    if mode < 7 and illuminant < len(ILLUMINANTS) and 100 <= temperature <= 11000:
         result["white_point"] = temperature
         result["kelvin_mode"] = mode
+        result["kelvin_illumination"] = ILLUMINANTS[mode if mode < 4 else illuminant]
     result["tone_enabled"] = bool(struct.unpack_from(order + "I", data, 92)[0])
     levels = []
     for offset in (68, 76, 84):
@@ -301,11 +302,12 @@ def auto_kelvin_illumination(path):
         return None
     if not tags.get(3125) or not tags[3125][0]:
         return None
-    for tag in (2121, 2122, 2125):
+    for tag in (2121, 2122):
         point = tags.get(tag, ())
-        if len(point) != 3 or not all(1 <= value <= 10000 for value in point):
+        if len(point) != 3 or not all(value > 0 for value in point):
             return None
-    if all(value == 4095 for value in tags[2125]):
+    point = tags.get(2125, ())
+    if len(point) != 3 or not all(1 <= value <= 10000 for value in point) or all(value == 4095 for value in point):
         return None
     return ILLUMINANTS[illumination[0]]
 
