@@ -1352,6 +1352,161 @@ def test_decode_sample(raw):
     assert 0 < raw.camera_rgb.max() <= 1
 
 
+def _fake_decode(monkeypatch, model, sizes, image):
+    from types import SimpleNamespace
+
+    class FakeRaw:
+        def __init__(self):
+            self.sizes = sizes
+            self.image = image
+            self.other = SimpleNamespace(iso_speed=100, shutter_speed=1, aperture=2.8,
+                                         focal_length=50, timestamp=None, artist="")
+            self.daylight_whitebalance = [1, 1, 1, 1]
+            self.camera_whitebalance = [1, 1, 1, 1]
+            self.rgb_xyz_matrix = np.eye(3)
+            self.params = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def postprocess(self, **params):
+            self.params = params
+            return self.image.copy()
+
+    raw = FakeRaw()
+    monkeypatch.setattr(pipeline.camera, "read_make_model", lambda _path: ("Kodak", model))
+    monkeypatch.setattr(pipeline.rawpy, "imread", lambda _path: raw)
+    monkeypatch.setattr(pipeline.camera, "read_gps", lambda _path: None)
+    monkeypatch.setattr(pipeline.camera, "auto_capture_settings", lambda _path: (None, None))
+    monkeypatch.setattr(pipeline.camera, "balance_points", lambda _path: {})
+    monkeypatch.setattr(pipeline.camera, "balance_curves", lambda _path: {})
+    monkeypatch.setattr(pipeline.camera, "balance_factors", lambda _path: {})
+    monkeypatch.setattr(pipeline.camera, "custom_kelvin_illumination", lambda _path: None)
+    return raw
+
+
+def _coordinate_image(height, width):
+    y, x = np.indices((height, width))
+    return np.stack((x, y, x + y), axis=-1).astype(np.uint16)
+
+
+def _normalise_test_image(image):
+    image = image.astype(np.float32)
+    image *= np.float32(1 / 65535)
+    return image
+
+
+@pytest.mark.parametrize("half_size,shape,expected_box,expected_scale", [
+    (False, (10, 12), (2, 2, 10, 8), 1.0),
+    (True, (5, 6), (1, 1, 5, 4), 0.5),
+])
+def test_decode_crops_pro_slr_full_and_half_size(monkeypatch, half_size, shape, expected_box,
+                                                 expected_scale):
+    from types import SimpleNamespace
+
+    sizes = SimpleNamespace(raw_width=12, raw_height=10, width=12, height=10,
+                            left_margin=0, top_margin=0, crop_left_margin=2,
+                            crop_top_margin=2, crop_width=8, crop_height=6, flip=0)
+    image = _coordinate_image(*shape)
+    fake = _fake_decode(monkeypatch, "DCS Pro SLR/n", sizes, image)
+    decoded = pipeline.decode("synthetic.dcr", half_size=half_size)
+    x0, y0, x1, y1 = expected_box
+
+    assert fake.params["half_size"] is half_size
+    assert decoded.camera_rgb.shape == (y1 - y0, x1 - x0, 3)
+    np.testing.assert_array_equal(decoded.camera_rgb, _normalise_test_image(image[y0:y1, x0:x1]))
+    assert decoded.metadata["width"] == 8 and decoded.metadata["height"] == 6
+    assert decoded.scale == expected_scale
+
+
+@pytest.mark.parametrize("shape", [(4, 5), (5, 6)])
+def test_decode_maps_odd_half_size_crop_to_actual_output_bounds(monkeypatch, shape):
+    from types import SimpleNamespace
+
+    sizes = SimpleNamespace(raw_width=11, raw_height=9, width=11, height=9,
+                            left_margin=0, top_margin=0, crop_left_margin=3,
+                            crop_top_margin=1, crop_width=6, crop_height=6, flip=0)
+    image = _coordinate_image(*shape)
+    _fake_decode(monkeypatch, "DCS Pro SLR/n", sizes, image)
+    decoded = pipeline.decode("synthetic.dcr", half_size=True)
+
+    np.testing.assert_array_equal(decoded.camera_rgb,
+                                  _normalise_test_image(image[0:4, 1:5]))
+    assert decoded.camera_rgb.shape == (4, 4, 3)
+    assert decoded.metadata["width"] == 6 and decoded.metadata["height"] == 6
+    assert decoded.scale == pytest.approx(2 / 3)
+
+
+def test_decode_crop_offsets_are_relative_to_visible_area(monkeypatch):
+    from types import SimpleNamespace
+
+    sizes = SimpleNamespace(raw_width=14, raw_height=10, width=8, height=6,
+                            left_margin=3, top_margin=2, crop_left_margin=5,
+                            crop_top_margin=4, crop_width=4, crop_height=2, flip=0)
+    image = _coordinate_image(6, 8)
+    _fake_decode(monkeypatch, "DCS Pro SLR/c", sizes, image)
+    decoded = pipeline.decode("synthetic.dcr")
+
+    np.testing.assert_array_equal(decoded.camera_rgb,
+                                  _normalise_test_image(image[2:4, 2:6]))
+    assert decoded.metadata["width"] == 4 and decoded.metadata["height"] == 2
+
+
+@pytest.mark.parametrize("crop_values", [None, (2, 2, 0, 6), (10, 2, 4, 6)])
+def test_decode_ignores_missing_or_invalid_pro_slr_crop(monkeypatch, crop_values):
+    from types import SimpleNamespace
+
+    values = dict(raw_width=12, raw_height=10, width=12, height=10,
+                  left_margin=0, top_margin=0, flip=0)
+    if crop_values is not None:
+        values.update(zip(("crop_left_margin", "crop_top_margin", "crop_width", "crop_height"),
+                          crop_values))
+    sizes = SimpleNamespace(**values)
+    image = _coordinate_image(10, 12)
+    _fake_decode(monkeypatch, "DCS Pro SLR/n", sizes, image)
+    decoded = pipeline.decode("synthetic.dcr")
+
+    np.testing.assert_array_equal(decoded.camera_rgb, _normalise_test_image(image))
+    assert decoded.metadata["width"] == 12 and decoded.metadata["height"] == 10
+
+
+@pytest.mark.parametrize("model", ["DCS Pro 14n", "DCS660M"])
+def test_decode_leaves_other_model_families_uncropped(monkeypatch, model):
+    from types import SimpleNamespace
+
+    sizes = SimpleNamespace(raw_width=12, raw_height=10, width=12, height=10,
+                            left_margin=0, top_margin=0, crop_left_margin=2,
+                            crop_top_margin=2, crop_width=8, crop_height=6, flip=0)
+    image = _coordinate_image(10, 12)
+    _fake_decode(monkeypatch, model, sizes, image)
+    decoded = pipeline.decode("synthetic.dcr")
+
+    assert decoded.camera_rgb.shape == image.shape
+    assert decoded.metadata["width"] == 12 and decoded.metadata["height"] == 10
+
+
+def test_pro_slr_crop_matches_optional_tiff_reference():
+    import tifffile
+
+    reference = ROOT / "raw/sample_tiff/GQ432034.tif"
+    source = ROOT / "raw/SLRn/GQ432034.DCR"
+    if not reference.is_file() or not source.is_file():
+        pytest.skip("Pro SLR/n sample RAW or golden TIFF not available")
+    with tifffile.TiffFile(reference) as tiff:
+        reference_height, reference_width = tiff.pages[0].shape[:2]
+    assert (reference_width, reference_height) == (4500, 3000)
+
+    full = pipeline.decode(source)
+    half = pipeline.decode(source, half_size=True)
+    assert (full.metadata["width"], full.metadata["height"]) == (reference_width, reference_height)
+    assert full.camera_rgb.shape[:2] == (reference_height, reference_width)
+    assert half.camera_rgb.shape[:2] == (reference_height // 2, reference_width // 2)
+    assert half.scale == 0.5
+
+
 @need_sample
 @need_installer
 def test_preset_balance_neutralises_grey_wall(raw, profile_dir):

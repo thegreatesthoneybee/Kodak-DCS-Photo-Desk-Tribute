@@ -295,7 +295,7 @@ class RawImage:
     xyz_from_cam: np.ndarray    # camera->XYZ(D65) for the fallback path
     flip: int                   # LibRaw orientation code
     metadata: dict
-    scale: float = 1.0          # camera_rgb resolution relative to the full sensor image
+    scale: float = 1.0          # camera_rgb resolution relative to the full-size image
     # Neutral camera RGB the camera recorded for each of its balance settings
     # (camera.balance_points: lighting names, "custom", "camera_auto").
     balance_points: dict = dataclasses.field(default_factory=dict)
@@ -310,18 +310,67 @@ class RawImage:
         return camera.capabilities(self.model)
 
 
+def _pro_slr_default_crop(model, sizes):
+    """Return the Pro SLR/n or /c default crop in visible-image coordinates."""
+    model_name = (model or "").lower()
+    if not camera.capabilities(model).pro_slr or not any(name in model_name for name in ("slr/n", "slr/c")):
+        return None
+    try:
+        width, height = int(sizes.width), int(sizes.height)
+        raw_width, raw_height = int(sizes.raw_width), int(sizes.raw_height)
+        left, top = int(sizes.left_margin), int(sizes.top_margin)
+        crop_left, crop_top = int(sizes.crop_left_margin), int(sizes.crop_top_margin)
+        crop_width, crop_height = int(sizes.crop_width), int(sizes.crop_height)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    if min(width, height, raw_width, raw_height, crop_width, crop_height) <= 0:
+        return None
+    if min(left, top, crop_left, crop_top) < 0:
+        return None
+    if left + width > raw_width or top + height > raw_height:
+        return None
+
+    # LibRaw's crop offsets are relative to the raw frame; postprocess starts at the
+    # visible area, so remove its margins before using the crop on the RGB result.
+    x0, y0 = crop_left - left, crop_top - top
+    x1, y1 = x0 + crop_width, y0 + crop_height
+    if x0 < 0 or y0 < 0 or x1 > width or y1 > height:
+        return None
+    return x0, y0, x1, y1
+
+
+def _crop_rendered_image(image, crop, visible_width, visible_height):
+    """Map visible-image crop boundaries to the actual full/half-size RGB array."""
+    x0, y0, x1, y1 = crop
+    out_height, out_width = image.shape[:2]
+    px0 = x0 * out_width // visible_width
+    py0 = y0 * out_height // visible_height
+    px1 = (x1 * out_width + visible_width - 1) // visible_width
+    py1 = (y1 * out_height + visible_height - 1) // visible_height
+    px0, py0 = min(px0, out_width - 1), min(py0, out_height - 1)
+    px1 = min(out_width, max(px0 + 1, px1))
+    py1 = min(out_height, max(py0 + 1, py1))
+    return image[py0:py1, px0:px1]
+
+
 def decode(path, half_size=False, algorithm="AHD"):
     path = Path(path)
     make, model = camera.read_make_model(path)
     with rawpy.imread(str(path)) as r:
-        full_w, full_h = r.sizes.width, r.sizes.height   # before postprocess, which halves them
+        sizes = r.sizes
+        visible_w, visible_h = sizes.width, sizes.height
+        crop = _pro_slr_default_crop(model, sizes)
+        full_w, full_h = (crop[2] - crop[0], crop[3] - crop[1]) if crop else (visible_w, visible_h)
         params = dict(
             output_color=rawpy.ColorSpace.raw, gamma=(1, 1), no_auto_bright=True,
             output_bps=16, user_wb=[1, 1, 1, 1], user_flip=0, half_size=half_size,
             adjust_maximum_thr=0.0, highlight_mode=rawpy.HighlightMode.Clip,
             demosaic_algorithm=rawpy.DemosaicAlgorithm[algorithm],
         )
-        cam = r.postprocess(**params).astype(np.float32)
+        cam = r.postprocess(**params)
+        if crop:
+            cam = _crop_rendered_image(cam, crop, visible_w, visible_h)
+        cam = cam.astype(np.float32)
         cam *= np.float32(1 / 65535)
         daylight = np.array(r.daylight_whitebalance[:3], np.float64)
         if not np.all(daylight > 0):
@@ -330,7 +379,7 @@ def decode(path, half_size=False, algorithm="AHD"):
         if not np.all(wb > 0):
             wb = daylight
         rgb_xyz = np.array(r.rgb_xyz_matrix[:3], np.float64)
-        flip = r.sizes.flip
+        flip = sizes.flip
         o = r.other
         metadata = {
             "make": make, "model": model, "iso": o.iso_speed, "shutter": o.shutter_speed,
