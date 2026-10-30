@@ -304,6 +304,7 @@ class RawImage:
     auto_kelvin_illumination: str = None
     custom_kelvin_illumination: str = None
     auto_scene_exposure: float = None
+    lens_optimization_baseline: int = None
 
     @property
     def caps(self):
@@ -394,7 +395,8 @@ def decode(path, half_size=False, algorithm="AHD"):
     return RawImage(path, make, model, cam, wb / wb[1], daylight / daylight[1], rgb_xyz,
                     camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h),
                     camera.balance_points(path), camera.balance_curves(path), camera.balance_factors(path),
-                    auto_illumination, camera.custom_kelvin_illumination(path), auto_exposure)
+                    auto_illumination, camera.custom_kelvin_illumination(path), auto_exposure,
+                    camera.lens_optimization_baseline(path, model))
 
 
 def reduced(raw, long_edge):
@@ -1003,7 +1005,8 @@ def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="
         lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
     out = icc.trilinear(lut, lin, power=1 / LUT_INPUT_GAMMA)
     if quality == "better":
-        out = finish(out, settings, raw.caps, raw.scale)
+        out = finish(out, settings, raw.caps, raw.scale,
+                     lens_optimization_baseline=getattr(raw, "lens_optimization_baseline", None))
     out = orient(out, raw.flip, settings.rotation)
     return apply_crop(out, settings.crop)
 
@@ -1024,14 +1027,15 @@ def render_region(raw, settings, rect, space=DISPLAY_SPACE, profile_directory=No
     return apply_crop(img, rotate_crop(inner, turns))
 
 
-def finish(img, settings, caps=None, scale=1.0):
+def finish(img, settings, caps=None, scale=1.0, lens_optimization_baseline=None):
     """Lens optimization, noise reduction and sharpening on the rendered image.
 
     scale is the render resolution relative to the full image so that radii
     stay proportional in reduced-size previews.
     """
     caps = caps or camera.capabilities("")
-    if settings.lens_optimization and caps.lens_optimization:
+    if (settings.lens_optimization and caps.lens_optimization
+            and settings.lens_optimization != lens_optimization_baseline):
         img = lens_optimize(img, settings.lens_optimization)
     if settings.noise_type != "none":
         img = reduce_noise(img, settings, scale, caps)

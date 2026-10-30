@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = Path(os.environ.get("PHOTODESK_INSTALLER", ROOT / "vendor/original/Photo_Desk_V_4_3_0.exe"))
 SAMPLE = Path(os.environ.get("PHOTODESK_SAMPLE", ROOT / "raw/ProBack645/4H6B9130.DCR"))
 SLR_C_SAMPLE = ROOT / "raw/SLRc/F5KG7096.DCR"
+SLR_N_SAMPLE = ROOT / "raw/SLRn/GQ432034.DCR"
 PRO14N_SAMPLE = ROOT / "raw/14n/CX458821.DCR"
 
 need_installer = pytest.mark.skipif(not INSTALLER.is_file(), reason="Photo Desk installer not available")
@@ -238,6 +239,54 @@ def test_lens_strength_recorded_by_camera():
     assert pipeline.capture_settings(SLR_C_SAMPLE).lens_optimization == 24
     # The 14n has no Lens Optimization even though it writes the tag (as zeros).
     assert "lens_optimization" not in camera.capture_info(PRO14N_SAMPLE, "DCS Pro 14N")
+
+
+def _tiff_with_lens_baseline(path, tag_type=4, count=4, values=(56, 0, 10, 0)):
+    """Write a minimal little-endian TIFF with a Kodak tag 0xa5e record."""
+    if tag_type is None:
+        root = (struct.pack("<H", 1) + struct.pack("<HHII", camera.KODAK_IFD, 4, 1, 26)
+                + b"\0" * 4)
+        path.write_bytes(b"II*\0" + struct.pack("<I", 8) + root + b"\0" * 6)
+        return
+    payload = struct.pack("<" + ("H" if tag_type == 3 else "I") * count, *values[:count])
+    kodak_ifd_offset = 26
+    payload_offset = kodak_ifd_offset + 2 + 12 + 4
+    field = payload if len(payload) <= 4 else struct.pack("<I", payload_offset)
+    field = field.ljust(4, b"\0")
+    root = (struct.pack("<H", 1) + struct.pack("<HHII", camera.KODAK_IFD, 4, 1, kodak_ifd_offset)
+            + b"\0" * 4)
+    kodak = (struct.pack("<H", 1) + struct.pack("<HHI", camera.LENS_BASELINE_TAG, tag_type, count)
+             + field + b"\0" * 4)
+    path.write_bytes(b"II*\0" + struct.pack("<I", 8) + root + kodak
+                     + (payload if len(payload) > 4 else b""))
+
+
+@pytest.mark.parametrize("model", ["DCS Pro SLR/n", "DCS Pro SLR/c"])
+def test_lens_baseline_reads_valid_third_long_only_for_slr_family(tmp_path, model):
+    path = tmp_path / "sample.dcr"
+    _tiff_with_lens_baseline(path)
+    assert camera.lens_optimization_baseline(path, model) == 10
+
+
+@pytest.mark.parametrize("tag_type,count,values", [
+    (3, 4, (56, 0, 10, 0)),       # SHORT is not the native LONG record
+    (4, 2, (56, 0)),             # no third LONG
+    (4, 3, (56, 0, 10)),         # incomplete four-LONG record
+    (4, 4, (56, 0, 100, 0)),     # outside the accepted strength range
+])
+def test_lens_baseline_rejects_invalid_metadata(tmp_path, tag_type, count, values):
+    path = tmp_path / "invalid.dcr"
+    _tiff_with_lens_baseline(path, tag_type, count, values)
+    assert camera.lens_optimization_baseline(path, "DCS Pro SLR/n") is None
+
+
+def test_lens_baseline_preserves_zero_and_rejects_missing_or_non_target_metadata(tmp_path):
+    path = tmp_path / "sample.dcr"
+    _tiff_with_lens_baseline(path, values=(56, 0, 0, 0))
+    assert camera.lens_optimization_baseline(path, "DCS Pro SLR/c") == 0
+    assert camera.lens_optimization_baseline(path, "DCS Pro 14n") is None
+    _tiff_with_lens_baseline(path, tag_type=None)
+    assert camera.lens_optimization_baseline(path, "DCS Pro SLR/n") is None
 
 
 DCS560_SAMPLE = ROOT / "raw/560/3R7D2667.TIF"
@@ -612,6 +661,44 @@ def test_lens_auto_measures_corner_cast():
     red = np.zeros((h, w, 3), np.float32)
     red[..., 0] = 0.9
     assert pipeline.lens_auto(red) is None
+
+
+def test_finish_skips_lens_heuristic_only_for_matching_validated_baseline(monkeypatch):
+    calls = []
+    monkeypatch.setattr(pipeline, "lens_optimize", lambda img, strength: calls.append(strength) or img)
+    caps = camera.capabilities("DCS Pro SLR/n")
+    img = np.zeros((2, 2, 3), np.float32)
+
+    def finish(strength, baseline):
+        settings = pipeline.Settings(lens_optimization=strength, sharpen_amount=0)
+        return pipeline.finish(img, settings, caps, lens_optimization_baseline=baseline)
+
+    finish(10, 10)       # equal nonzero values take the native no-grid branch
+    finish(11, 10)       # unequal strength retains the existing heuristic
+    finish(10, None)     # missing metadata retains the existing heuristic
+    finish(10, 0)        # zero baseline is distinct from a nonzero request
+    finish(0, 0)         # the existing zero-request behavior remains unchanged
+    assert calls == [11, 10, 10]
+
+
+def test_render_passes_raw_lens_baseline_to_finish(monkeypatch):
+    from types import SimpleNamespace
+
+    raw = SimpleNamespace(caps=camera.capabilities("DCS Pro SLR/n"), scale=0.5, flip=0,
+                          lens_optimization_baseline=10, xyz_from_cam=np.eye(3, dtype=np.float32))
+    monkeypatch.setattr(pipeline, "source_profile_for", lambda *_: "source.icm")
+    monkeypatch.setattr(pipeline, "color_lut", lambda *args: None)
+    monkeypatch.setattr(pipeline, "scene_linear", lambda *_: np.zeros((1, 1, 3), np.float32))
+    monkeypatch.setattr(pipeline.icc, "trilinear", lambda *_args, **_kwargs: np.zeros((1, 1, 3), np.float32))
+    seen = []
+
+    def finish(img, settings, caps, scale, lens_optimization_baseline=None):
+        seen.append((caps, scale, lens_optimization_baseline))
+        return img
+
+    monkeypatch.setattr(pipeline, "finish", finish)
+    pipeline.render(raw, pipeline.Settings(sharpen_amount=0), profile_directory=".", linear=True)
+    assert seen == [(raw.caps, 0.5, 10)]
 
 
 def _test_tiles(noise=0.0, blur=0.0, seed=0):
@@ -1384,6 +1471,7 @@ def _fake_decode(monkeypatch, model, sizes, image):
     monkeypatch.setattr(pipeline.camera, "balance_points", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "balance_curves", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "balance_factors", lambda _path: {})
+    monkeypatch.setattr(pipeline.camera, "lens_optimization_baseline", lambda *_: None)
     monkeypatch.setattr(pipeline.camera, "custom_kelvin_illumination", lambda _path: None)
     return raw
 
@@ -1455,6 +1543,27 @@ def test_decode_crop_offsets_are_relative_to_visible_area(monkeypatch):
     assert decoded.metadata["width"] == 4 and decoded.metadata["height"] == 2
 
 
+def test_decode_reduction_and_region_preserve_lens_baseline(monkeypatch):
+    from types import SimpleNamespace
+
+    sizes = SimpleNamespace(raw_width=10, raw_height=8, width=10, height=8, flip=0)
+    _fake_decode(monkeypatch, "DCS Pro SLR/n", sizes, _coordinate_image(8, 10))
+    monkeypatch.setattr(pipeline.camera, "lens_optimization_baseline", lambda *_: 10)
+    raw = pipeline.decode("synthetic.dcr")
+    assert raw.lens_optimization_baseline == 10
+    assert pipeline.reduced(raw, 4).lens_optimization_baseline == 10
+
+    seen = []
+
+    def render(sub, settings, *args, **kwargs):
+        seen.append(sub.lens_optimization_baseline)
+        return sub.camera_rgb
+
+    monkeypatch.setattr(pipeline, "render", render)
+    pipeline.render_region(raw, pipeline.Settings(sharpen_amount=0), (0, 0, 0.5, 1), margin=0)
+    assert seen == [10]
+
+
 @pytest.mark.parametrize("crop_values", [None, (2, 2, 0, 6), (10, 2, 4, 6)])
 def test_decode_ignores_missing_or_invalid_pro_slr_crop(monkeypatch, crop_values):
     from types import SimpleNamespace
@@ -1505,6 +1614,20 @@ def test_pro_slr_crop_matches_optional_tiff_reference():
     assert full.camera_rgb.shape[:2] == (reference_height, reference_width)
     assert half.camera_rgb.shape[:2] == (reference_height // 2, reference_width // 2)
     assert half.scale == 0.5
+
+
+@pytest.mark.skipif(not SLR_N_SAMPLE.is_file(), reason="Pro SLR/n sample RAW not available")
+@need_installer
+def test_pro_slrn_matching_validated_baseline_renders_without_lab_heuristic(profile_dir):
+    raw = pipeline.decode(SLR_N_SAMPLE, half_size=True)
+    assert raw.lens_optimization_baseline == 10
+    settings = pipeline.Settings(sharpen_amount=0)
+    matching = pipeline.render(raw, settings.copy(lens_optimization=10), profile_directory=profile_dir)
+    unadjusted = pipeline.render(raw, settings.copy(lens_optimization=0), profile_directory=profile_dir)
+    mae = float(np.mean(np.abs(matching - unadjusted), dtype=np.float64))
+    # This proves the validated baseline-10 bypass for this sample only; it does not claim native
+    # Lens Optimization strength zero is a no-op for captures with another baseline.
+    assert mae == 0.0
 
 
 @need_sample

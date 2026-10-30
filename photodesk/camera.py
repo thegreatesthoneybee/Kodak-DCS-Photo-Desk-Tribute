@@ -169,9 +169,10 @@ def _ifd0_strings(path, tags):
 
 _TIFF_INTS = {1: "B", 3: "H", 4: "I", 7: "B", 8: "h", 9: "i", 5: "II", 10: "ii"}   # 5/10: rationals
 KODAK_IFD = 0x8290
-# Kodak IFD tags 2654-2656: [56, 0, strength, 0] per channel, the Lens Optimization strength the
-# camera applied (DCSPro3SLR/DCSPro4SLR.dll read them and accept strengths of 0..99).
-LENS_STRENGTH_TAG = 2654
+# Kodak IFD tags 2654-2656: [56, 0, strength, 0] per channel. DCSPro3SLR/DCSPro4SLR.dll
+# reads these records and accepts strengths of 0..99. For DCSPro4SLR the third LONG in tag 2654
+# is the baseline compared with the requested Lens Optimization strength.
+LENS_BASELINE_TAG = 2654
 # Kodak IFD tags 2120-2125: camera RGB of a neutral under each white balance setting of the camera
 # (Daylight, Tungsten, Fluorescent, Flash, Custom, Auto); tag 1020 is the setting used for the shot.
 # Photo Desk takes the Preset balance from the lighting's point and Custom from tag 2124 (0x84C).
@@ -181,9 +182,10 @@ WB_SETTING_TAG = 1020
 WB_SETTINGS = ("Daylight", "Tungsten", "Fluorescent", "Flash", "custom", "camera_auto")
 
 
-def read_kodak_tags(path, tags):
+def read_kodak_tags(path, tags, expected_types=None):
     """Integer values of the given Kodak IFD (tag 0x8290) tags as {tag: tuple}; reads only the
-    IFD entries and those values, not the whole file."""
+    IFD entries and those values, not the whole file. ``expected_types`` optionally maps tag IDs
+    to required TIFF type codes."""
     out = {}
     with open(path, "rb") as f:
         head = f.read(8)
@@ -206,7 +208,9 @@ def read_kodak_tags(path, tags):
             return out
         for tag, typ, cnt, val in entries(struct.unpack(bo + "I", kodak)[0]):
             code = _TIFF_INTS.get(typ)
-            if tag not in tags or code is None or (tag in (1021, 5011) and typ != 7):
+            if (tag not in tags or code is None
+                    or (expected_types is not None and typ != expected_types.get(tag, typ))
+                    or (tag in (1021, 5011) and typ != 7)):
                 continue
             if tag in (1021, 5011):
                 count = min(cnt, 72 if tag == 1021 else 112)
@@ -369,10 +373,27 @@ def capture_info(path, model):
     if v and 0 <= v[0] < len(WB_SETTINGS):
         info["white_balance"] = WB_SETTINGS[v[0]]
     if capabilities(model).lens_optimization:
-        v = read_kodak_tags(path, (LENS_STRENGTH_TAG,)).get(LENS_STRENGTH_TAG)
+        v = read_kodak_tags(path, (LENS_BASELINE_TAG,)).get(LENS_BASELINE_TAG)
         if v and len(v) >= 3 and 0 <= v[2] <= 99:
             info["lens_optimization"] = v[2]
     return info
+
+
+def lens_optimization_baseline(path, model):
+    """Return the validated DCS Pro SLR/n or /c Lens Optimization baseline, or None.
+
+    The native Pro SLR correction compares the requested strength against the third LONG in Kodak
+    tag 0xa5e. Other camera families, malformed records, and out-of-range strengths have no usable
+    baseline; they must not be treated as zero.
+    """
+    model_name = (model or "").lower()
+    if not capabilities(model).pro_slr or not any(name in model_name for name in ("slr/n", "slr/c")):
+        return None
+    values = read_kodak_tags(path, (LENS_BASELINE_TAG,), expected_types={LENS_BASELINE_TAG: 4}).get(
+        LENS_BASELINE_TAG, ())
+    if len(values) != 4 or not 0 <= values[2] <= 99:
+        return None
+    return values[2]
 
 
 def read_gps(path):
