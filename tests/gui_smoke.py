@@ -86,7 +86,8 @@ def main(folder, shot):
     w.acts[32788].trigger()                    # Lighting > Tungsten
     assert entry.settings.lighting == "Tungsten"
     if entry.path.name.upper() == "F5KG7096.DCR":
-        assert entry.settings.kelvin_mode is None and entry.settings.saved_balance_point is None
+        assert entry.settings.kelvin_mode == 5 and entry.settings.white_point == 5200
+        assert entry.settings.kelvin_illumination == "Tungsten" and entry.settings.saved_balance_point is None
     wait(app, lambda: entry.thumb is not before)   # thumbnail re-rendered in the background
     undo_text = w.acts[57643].text()
     w.acts[57643].trigger()
