@@ -1819,7 +1819,8 @@ def test_export_formats(tmp_path, profile_dir):
     opts = export.OutputOptions(tiff_16bit=True, working_space="ProPhotoRGB.icm")
     tif = export.process_file(SAMPLE, tmp_path / "b.tif", "tiff", opts, s, profile_dir)
     page = tifffile.TiffFile(tif).pages[0]
-    assert page.dtype == np.uint16 and page.shape == (4072, 4072, 3) or page.shape == (4080, 4080, 3)
+    assert page.dtype == np.uint16
+    assert page.shape in ((4072, 4072, 3), (4080, 4080, 3))
     assert 34675 in page.tags and 33723 in page.tags
     lin = export.process_file(SAMPLE, tmp_path / "c.tif", "tiff", export.OutputOptions(tiff_linear=True), s, profile_dir)
     assert 34675 not in tifffile.TiffFile(lin).pages[0].tags
@@ -1832,6 +1833,43 @@ def test_export_formats(tmp_path, profile_dir):
     fin_tif = export.process_file(jpg, tmp_path / "f.tif", "tiff", export.OutputOptions(tiff_16bit=True),
                                   pipeline.Settings(), profile_dir)
     assert tifffile.imread(fin_tif).dtype == np.uint8          # 16-bit does not apply to 8-bit sources
+
+
+@pytest.mark.parametrize("tiff_16bit,scale,dtype", [(False, 255, np.uint8), (True, 65535, np.uint16)])
+def test_tiff_upscale_cubic_overshoot_saturates(tmp_path, tiff_16bit, scale, dtype):
+    import tifffile
+
+    pattern = np.array([[0, 0, 1, 1], [0, 0, 1, 1], [1, 1, 0, 0], [1, 1, 0, 0]], np.float32)
+    img = np.repeat(pattern[..., None], 3, axis=2)
+    opts = export.OutputOptions(resize=True, percent=400, tiff_16bit=tiff_16bit)
+    resized = export.apply_size(img, opts)
+    assert resized.min() < 0 and resized.max() > 1
+
+    saved = export.save(img, tmp_path / f"overshoot-{scale}.tif", "tiff", opts, {})
+    actual = tifffile.imread(saved)
+    assert actual.dtype == dtype
+    np.testing.assert_array_equal(actual, np.round(np.clip(resized, 0, 1) * scale).astype(dtype))
+    assert actual.min() == 0 and actual.max() == scale
+
+
+def test_jpeg_upscale_cubic_overshoot_saturates(tmp_path):
+    from PIL import Image
+
+    pattern = np.array([[0, 0, 1, 1], [0, 0, 1, 1], [1, 1, 0, 0], [1, 1, 0, 0]], np.float32)
+    img = np.repeat(pattern[..., None], 3, axis=2)
+    opts = export.OutputOptions(resize=True, percent=400, jpeg_quality="best")
+    resized = export.apply_size(img, opts)
+    assert resized.min() < 0 and resized.max() > 1
+    peak = np.unravel_index(np.argmax(resized[..., 0]), resized.shape[:2])
+    trough = np.unravel_index(np.argmin(resized[..., 0]), resized.shape[:2])
+
+    saved = export.save(img, tmp_path / "overshoot.jpg", "jpeg", opts, {})
+    with Image.open(saved) as jpeg:
+        actual = np.asarray(jpeg.convert("RGB"))
+    # JPEG is lossy, but clipped extrema remain near white and black. Unsigned wraparound
+    # would instead turn these overshoots into dark and bright values, respectively.
+    assert actual[peak].min() > 160
+    assert actual[trough].max() < 95
 
 
 def test_sheet_undo_redo_rename_paste(tmp_path):

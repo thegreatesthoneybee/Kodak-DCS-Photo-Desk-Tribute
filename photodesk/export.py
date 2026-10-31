@@ -153,7 +153,7 @@ def save(img, path, file_type, opts, metadata, settings=None, space_bytes=None):
     dpi = _dpi(opts)
     iptc_blob = iptc.encode(settings.iptc) if settings and settings.iptc else None
     if file_type == "jpeg":
-        im = Image.fromarray(np.round(img * 255).astype(np.uint8), "RGB")
+        im = Image.fromarray(np.round(np.clip(img, 0.0, 1.0) * 255).astype(np.uint8), "RGB")
         kw = dict(quality=JPEG_QUALITY[opts.jpeg_quality], subsampling=0 if opts.jpeg_quality == "best" else 2,
                   dpi=(dpi, dpi), exif=_exif(metadata, dpi))
         if space_bytes and opts.embed_jpeg_profile:
@@ -162,8 +162,9 @@ def save(img, path, file_type, opts, metadata, settings=None, space_bytes=None):
         if iptc_blob:
             iptc.insert_into_jpeg(path, iptc_blob)
     elif file_type == "tiff":
-        data = (np.round(img * 65535).astype(np.uint16) if opts.tiff_16bit
-                else np.round(img * 255).astype(np.uint8))
+        quantized = np.clip(img, 0.0, 1.0)
+        data = (np.round(quantized * 65535).astype(np.uint16) if opts.tiff_16bit
+                else np.round(quantized * 255).astype(np.uint8))
         extratags = []
         if space_bytes and opts.embed_tiff_profile:
             extratags.append((34675, "B", len(space_bytes), space_bytes, True))
