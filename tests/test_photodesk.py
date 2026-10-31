@@ -1302,6 +1302,12 @@ def test_thumbnail_temperature_initialization_respects_sidecar_and_async_edits(m
     assert len(temperatures) == 1
     assert refreshed == [computed]
 
+    restored = complete(pipeline.Settings(white_point=5000, white_point_ref=5000,
+                                          kelvin_mode=0, kelvin_illumination="Daylight"))
+    assert restored.settings.white_point == restored.settings.white_point_ref == 5000
+    assert len(temperatures) == 1
+    assert refreshed == [computed]
+
     edited = complete(pipeline.Settings(white_point=4700, white_point_ref=4700),
                       edit_during_decode=lambda settings: settings.copy(exposure=0.75))
     assert edited.settings.exposure == 0.75
