@@ -29,7 +29,7 @@ THUMB_EDGE = 256
 ZOOMS = {32842: 25, 32853: 50, 32852: 100, 32841: 200}
 SHEET_ZOOMS = (50, 100, 200)      # contact sheets: 50/100/200 % (25 % is for full image renderings)
 TOOLS = {32847: "select", 32848: "crop", 32846: "click", 33178: "closeup", 33177: "hand"}
-# Edits that change the balance method: the White Point follows the new balance's temperature.
+# Balance and lighting edits can affect the White Point and its calibration.
 BALANCE_KINDS = ("balance", "click_balance", "lighting")
 BALANCE_CMD = {32812: "preset", 32816: "click", 32814: "custom", 32815: "auto"}
 LIGHTING_CMD = dict(zip((32787, 32788, 32789, 32790), pipeline.LIGHTINGS))
@@ -1465,9 +1465,17 @@ class MainWindow(QMainWindow):
             entries = [e for e in entries if e.is_raw]     # processing options need DCS raw files
         if kind in BALANCE_KINDS:
             def change(e, s):
+                if kind == "lighting" and fields.get("lighting") == s.lighting:
+                    return
                 for k, v in fields.items():
                     setattr(s, k, v)
-                self._set_balance_temperature(e, s)
+                if kind == "lighting" and s.kelvin_mode in (4, 5, 6):
+                    # The native process record retains its mode and temperature; the new
+                    # lighting is also used as the Kelvin illuminant when it is applied.
+                    s.kelvin_illumination = s.lighting
+                    s.saved_balance_point = None
+                else:
+                    self._set_balance_temperature(e, s)
             changed = sw.sheet.apply(entries, kind, change)
         elif kind == "exposure_tone":
             def change(e, s):

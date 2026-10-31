@@ -1334,6 +1334,37 @@ def test_white_point_dialog_uses_100_kelvin_slider_steps():
     assert WhitePointDialog.values(window) == {"white_point": 5100}
 
 
+@pytest.mark.parametrize("mode,balance", [(4, "custom"), (5, "auto"), (6, "click")])
+def test_lighting_edit_preserves_kelvin_mode_and_temperature(tmp_path, mode, balance):
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+    from photodesk.gui.model import Entry, Sheet
+
+    settings = pipeline.Settings(balance=balance, lighting="Daylight", white_point=5100,
+                                 white_point_ref=5100, kelvin_mode=mode,
+                                 kelvin_illumination="Daylight", saved_balance_point=(2048, 2500, 1800))
+    entry = Entry(tmp_path / "image.DCR", settings)
+    sheet = Sheet(tmp_path)
+    recalculated, changed = [], []
+    window = SimpleNamespace(active_sheet=lambda: SimpleNamespace(sheet=sheet),
+                             selection=lambda: [entry],
+                             _set_balance_temperature=lambda e, s: recalculated.append((e, s)),
+                             after_edit=lambda entries: changed.extend(entries))
+
+    MainWindow.edit(window, "lighting", lighting="Daylight")
+    assert entry.settings.to_json() == settings.to_json() and not changed and not recalculated
+    MainWindow.edit(window, "lighting", lighting="Tungsten")
+    assert changed == [entry] and not recalculated
+    assert entry.settings.lighting == entry.settings.kelvin_illumination == "Tungsten"
+    assert entry.settings.kelvin_mode == mode
+    assert entry.settings.white_point == entry.settings.white_point_ref == 5100
+    assert entry.settings.saved_balance_point is None
+    sheet.undo()
+    assert entry.settings.to_json() == settings.to_json()
+    sheet.redo()
+    assert entry.settings.lighting == "Tungsten" and entry.settings.kelvin_mode == mode
+
+
 def test_click_balance_does_not_edit_an_unselected_reference(monkeypatch):
     from types import SimpleNamespace
     from photodesk.gui.app import MainWindow
