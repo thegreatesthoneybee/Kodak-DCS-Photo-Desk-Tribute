@@ -1115,6 +1115,32 @@ def test_auto_scene_retains_settings_when_calibration_unavailable():
     MainWindow.auto_scene(window)
 
 
+def test_auto_scene_uses_auto_calibration_not_edited_temperature():
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+    if not SLR_C_SAMPLE.is_file():
+        pytest.skip("camera sample not available")
+    raw = pipeline.decode(SLR_C_SAMPLE, half_size=True)
+    entry = SimpleNamespace(raw=raw, small=None, caps=raw.caps,
+                            settings=pipeline.Settings(white_point=6500, white_point_ref=6500))
+    result = []
+
+    def apply(entries, kind, change):
+        candidate = entry.settings.copy()
+        change(entry, candidate)
+        result.append(candidate)
+        return [entry]
+
+    sheet = SimpleNamespace(sheet=SimpleNamespace(apply=apply))
+    window = SimpleNamespace(active_sheet=lambda: sheet, _raw_selection=lambda: [entry],
+                             after_edit=lambda changed: None,
+                             _set_balance_temperature=lambda e, s: MainWindow._set_balance_temperature(None, e, s))
+    MainWindow.auto_scene(window)
+    assert result[0].balance == "auto" and result[0].kelvin_mode == 5
+    assert result[0].white_point == result[0].white_point_ref == 4800
+    assert result[0].exposure == -1.0
+
+
 def test_histogram_exposure_before_clipping(monkeypatch):
     from types import SimpleNamespace
     raw = SimpleNamespace(camera_rgb=np.full((2, 2, 3), 0.75, dtype=np.float32))

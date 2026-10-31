@@ -2151,10 +2151,14 @@ class MainWindow(QMainWindow):
                 raw = e.raw or e.small
                 if raw.caps.pro_slr:
                     exposure = pipeline.auto_exposure(raw, s)
-                    if exposure is None or pipeline.auto_kelvin_calibration(raw) is None:
+                    calibration = pipeline.auto_kelvin_calibration(raw)
+                    if exposure is None or calibration is None:
                         return
                     s.lighting = raw.auto_kelvin_illumination
                     s.balance = "auto"
+                    # Auto Scene applies the cached Auto record, unlike the Balance > Auto
+                    # command, which clamps the currently edited temperature.
+                    s.white_point = ((calibration[0] + 50) // 100) * 100
                     self._set_balance_temperature(e, s)
                     s.exposure = exposure
                     return
