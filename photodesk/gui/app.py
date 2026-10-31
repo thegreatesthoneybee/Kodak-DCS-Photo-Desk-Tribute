@@ -135,6 +135,16 @@ def _decode_job(path):
     return pipeline.decode(path, half_size=True)
 
 
+def _click_balance_job(path, x, y, rotation):
+    """Sample a Pro SLR click from full-resolution decoded camera RGB off the UI thread."""
+    raw = pipeline.decode(path, half_size=False)
+    h, w = raw.camera_rgb.shape[:2]
+    turns = ({0: 0, 3: 2, 5: 3, 6: 1}.get(raw.flip, 0) + rotation) % 4
+    for _ in range(turns):
+        x, y = y, 1 - x
+    return pipeline.click_wb_pro_slr(raw.camera_rgb, min(w - 1, int(x * w)), min(h - 1, int(y * h)))
+
+
 def _region_job(raw, settings, rect, pdir, space):
     return pipeline.render_region(raw, settings, rect, space, pdir)
 
@@ -1538,6 +1548,8 @@ class MainWindow(QMainWindow):
         s.white_point = s.white_point_ref = pipeline.balance_temperature(raw, s)
 
     def after_edit(self, changed):
+        if changed:
+            self._click_balance_generation = getattr(self, "_click_balance_generation", 0) + 1
         for e in changed:
             self.refresh_thumb(e)
             for sw in self.sheets:
@@ -1883,8 +1895,38 @@ class MainWindow(QMainWindow):
         """Neutralise the clicked point; applied to every selected raw image."""
         if not entry.is_raw:
             return
+        self._click_balance_generation = getattr(self, "_click_balance_generation", 0) + 1
+        generation = self._click_balance_generation
         raw = entry.raw if entry.raw is not None and not thumb else entry.small
         if raw is None:
+            return
+        if getattr(getattr(raw, "caps", None), "pro_slr", False):
+            entries = [e for e in self.selection() if e.is_raw and e.serial == entry.serial]
+            if not entries:
+                return
+            sheet = self.active_sheet()
+            if sheet is None:
+                return
+            task = Task((sheet, entries), _click_balance_job, entry.path, x, y, entry.settings.rotation)
+
+            def clicked(token, wb):
+                target_sheet, targets = token
+                if self.active_sheet() is target_sheet and self._click_balance_generation == generation:
+                    self.edit("click_balance", targets, balance="click", click_wb=wb)
+
+            def failed(token, msg):
+                if self.active_sheet() is not token[0] or self._click_balance_generation != generation:
+                    return
+                prefix = "ClickBalanceError: "
+                if msg.startswith(prefix):
+                    error = msg[len(prefix):]
+                    D.message(self, self.res, self.res.tr(error, ("Pop-Up Message",)))
+                else:
+                    D.message(self, self.res, self.res.s(60002) + "\n" + msg)
+
+            task.signals.done.connect(clicked)
+            task.signals.failed.connect(failed)
+            self.thumb_pool.start(task, 1)
             return
         h, w = raw.camera_rgb.shape[:2]
         turns = ({0: 0, 3: 2, 5: 3, 6: 1}.get(raw.flip, 0) + entry.settings.rotation) % 4

@@ -1460,6 +1460,48 @@ def test_capture_reset_keeps_original_settings_on_decode_failure(tmp_path, monke
     assert not entry.dirty and not sheet.undo_stack and not refreshed
 
 
+def test_pro_slr_click_balance_roi_is_even_aligned_and_bounded():
+    cam = np.zeros((32, 34, 3), dtype=np.float32)
+    cam[..., 0] = np.arange(34, dtype=np.float32)[None, :]
+    cam[..., 1] = np.arange(32, dtype=np.float32)[:, None]
+
+    center = pipeline._click_balance_roi(cam, 17, 17)
+    assert center.shape == (16, 16, 3)
+    np.testing.assert_array_equal(center[0, 0, :2], [10, 10])
+    np.testing.assert_array_equal(center[-1, -1, :2], [25, 25])
+
+    top_left = pipeline._click_balance_roi(cam, 0, 0)
+    assert top_left.shape == (16, 16, 3)
+    np.testing.assert_array_equal(top_left[0, 0, :2], [0, 0])
+    bottom_right = pipeline._click_balance_roi(cam, 33, 31)
+    np.testing.assert_array_equal(bottom_right[0, 0, :2], [18, 16])
+    assert bottom_right.shape == (16, 16, 3)
+
+    small = pipeline._click_balance_roi(np.zeros((7, 9, 3), np.float32), 8, 6)
+    assert small.shape == (7, 9, 3)
+
+
+def test_pro_slr_click_balance_trims_per_channel_without_native_integer_thresholds():
+    cam = np.empty((32, 32, 3), dtype=np.float32)
+    cam[:] = (0.4, 0.2, 0.1)
+    cam[10, 10] = (0.7, 0.8, 1.0)
+    np.testing.assert_allclose(pipeline.click_wb_pro_slr(cam, 15, 15), [0.5, 1.0, 2.0])
+
+    low = np.empty((16, 16, 3), dtype=np.float32)
+    low[:] = (0.03, 0.02, 0.01)
+    np.testing.assert_allclose(pipeline.click_wb_pro_slr(low, 8, 8), [2 / 3, 1.0, 2.0])
+    with pytest.raises(pipeline.ClickBalanceError, match="too dark"):
+        pipeline.click_wb_pro_slr(np.zeros((16, 16, 3), np.float32), 8, 8)
+    with pytest.raises(pipeline.ClickBalanceError, match="saturated"):
+        pipeline.click_wb_pro_slr(np.ones((16, 16, 3), np.float32), 8, 8)
+
+    # Other camera families keep the legacy ordinary patch mean, including its outlier influence.
+    generic = np.full((5, 5, 3), (0.4, 0.2, 0.1), dtype=np.float32)
+    generic[2, 2] = (0.7, 0.8, 0.9)
+    mean = generic.mean((0, 1))
+    np.testing.assert_allclose(pipeline.click_wb(generic, 2, 2, radius=2), mean[1] / mean)
+
+
 def test_click_balance_does_not_edit_an_unselected_reference(monkeypatch):
     from types import SimpleNamespace
     from photodesk.gui.app import MainWindow
@@ -1469,16 +1511,120 @@ def test_click_balance_does_not_edit_an_unselected_reference(monkeypatch):
                                 settings=SimpleNamespace(rotation=0))
     selected = SimpleNamespace(is_raw=True, serial="camera-b")
     edits = []
+    clicks = []
     window = SimpleNamespace(selection=lambda: [selected], edit=lambda *args, **kw: edits.append((args, kw)))
-    monkeypatch.setattr(pipeline, "click_wb", lambda *args, **kw: (1.0, 1.0, 1.0))
+
+    def generic_click(cam, x, y, radius):
+        clicks.append((cam, x, y, radius))
+        return 1.0, 1.0, 1.0
+
+    monkeypatch.setattr(pipeline, "click_wb", generic_click)
 
     MainWindow.click_balance(window, reference, 0.5, 0.5)
 
     assert len(edits) == 1 and edits[0][0][1] == []
+    assert clicks[0][1:] == (8, 8, 1)
     matching = SimpleNamespace(is_raw=True, serial="camera-a")
     window.selection = lambda: [selected, matching]
     MainWindow.click_balance(window, reference, 0.5, 0.5)
     assert edits[-1][0][1] == [matching]
+    assert clicks[-1][1:] == (8, 8, 1)
+
+
+def test_pro_slr_thumbnail_click_uses_full_decode_and_preserves_camera_selection(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from photodesk.gui import app as gui_app
+    from photodesk.gui.app import MainWindow
+
+    callbacks = {}
+
+    class Signal:
+        def connect(self, callback):
+            self.callback = callback
+
+        def emit(self, *args):
+            self.callback(*args)
+
+    class Task:
+        def __init__(self, token, fn, *args):
+            self.token, self.fn, self.args = token, fn, args
+            self.signals = SimpleNamespace(done=Signal(), failed=Signal())
+
+    class Pool:
+        def start(self, task, priority):
+            callbacks["priority"] = priority
+            task.signals.done.emit(task.token, task.fn(*task.args))
+
+    small = SimpleNamespace(camera_rgb=np.zeros((10, 12, 3), np.float32), flip=6,
+                            caps=SimpleNamespace(pro_slr=True))
+    entry = SimpleNamespace(is_raw=True, raw=None, small=small, serial="camera-a", path=tmp_path / "x.DCR",
+                            settings=SimpleNamespace(rotation=1))
+    matching = SimpleNamespace(is_raw=True, serial="camera-a")
+    other = SimpleNamespace(is_raw=True, serial="camera-b")
+    sheet = object()
+    edits = []
+    window = SimpleNamespace(selection=lambda: [matching, other], active_sheet=lambda: sheet,
+                             edit=lambda *args, **kwargs: edits.append((args, kwargs)), thumb_pool=Pool())
+
+    def decode(path, half_size):
+        callbacks["decode"] = (path, half_size)
+        return SimpleNamespace(camera_rgb=np.zeros((40, 60, 3), np.float32), flip=6)
+
+    def sample(cam, x, y):
+        callbacks["sample"] = (cam.shape[:2], x, y)
+        return (1.25, 1.0, 0.75)
+
+    monkeypatch.setattr(gui_app, "Task", Task)
+    monkeypatch.setattr(pipeline, "decode", decode)
+    monkeypatch.setattr(pipeline, "click_wb_pro_slr", sample)
+
+    MainWindow.click_balance(window, entry, 0.25, 0.75, thumb=True)
+
+    assert callbacks["decode"] == (entry.path, False)
+    assert callbacks["sample"] == ((40, 60), 45, 10)
+    assert callbacks["priority"] == 1
+    assert edits == [(("click_balance", [matching]), {"balance": "click", "click_wb": (1.25, 1.0, 0.75)})]
+
+
+def test_pro_slr_click_discards_older_async_result(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from photodesk.gui import app as gui_app
+
+    tasks, edits = [], []
+
+    class Signal:
+        def connect(self, callback):
+            self.callback = callback
+
+    class Task:
+        def __init__(self, token, *_args):
+            self.token = token
+            self.signals = SimpleNamespace(done=Signal(), failed=Signal())
+            tasks.append(self)
+
+    raw = SimpleNamespace(camera_rgb=np.zeros((20, 20, 3), np.float32), flip=0,
+                          caps=SimpleNamespace(pro_slr=True))
+    entry = SimpleNamespace(is_raw=True, raw=raw, small=raw, serial="camera-a", path=tmp_path / "x.DCR",
+                            settings=SimpleNamespace(rotation=0))
+    sheet = object()
+    window = SimpleNamespace(selection=lambda: [entry], active_sheet=lambda: sheet,
+                             edit=lambda *args, **kwargs: edits.append((args, kwargs)),
+                             thumb_pool=SimpleNamespace(start=lambda *_: None))
+    monkeypatch.setattr(gui_app, "Task", Task)
+
+    gui_app.MainWindow.click_balance(window, entry, 0.25, 0.25)
+    gui_app.MainWindow.click_balance(window, entry, 0.75, 0.75)
+    tasks[1].signals.done.callback(tasks[1].token, (1.2, 1.0, 1.1))
+    tasks[0].signals.done.callback(tasks[0].token, (1.4, 1.0, 0.9))
+    assert len(edits) == 1 and edits[0][1]["click_wb"] == (1.2, 1.0, 1.1)
+    gui_app.MainWindow.click_balance(window, entry, 0.5, 0.5)
+    window.refresh_thumb = lambda _entry: None
+    window.sheets = []
+    window.closeups = []
+    window.selection_changed = lambda: None
+    gui_app.MainWindow.after_edit(window, [entry])
+    tasks[2].signals.done.callback(tasks[2].token, (1.1, 1.0, 1.4))
+    assert len(edits) == 1
 
 
 def test_preview_refresh_updates_matching_closeups():

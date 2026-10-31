@@ -530,6 +530,41 @@ def click_wb(cam, x, y, radius=2):
     return tuple(float(v) for v in mean[1] / mean)
 
 
+def _click_balance_roi(cam, x, y, size=16):
+    """Bound an even-aligned square around a sensor pixel, shifting it inward at image edges."""
+    h, w = cam.shape[:2]
+    if h == 0 or w == 0:
+        return cam[:0, :0]
+    roi_h, roi_w = min(size, h), min(size, w)
+    x, y = min(w - 1, max(0, int(x))), min(h - 1, max(0, int(y)))
+    x0 = max(0, min(w - roi_w, 2 * ((x + 1) // 2) - roi_w // 2))
+    y0 = max(0, min(h - roi_h, 2 * ((y + 1) // 2) - roi_h // 2))
+    x0 -= x0 % 2
+    y0 -= y0 % 2
+    return cam[y0:y0 + roi_h, x0:x0 + roi_w]
+
+
+def click_wb_pro_slr(cam, x, y):
+    """Pro SLR click-balance approximation over a 16x16 sensor RGB ROI.
+
+    LibRaw supplies demosaiced, normalized RGB rather than the native CFA samples used by the
+    camera DLL.  Per-channel middle-half trimming limits isolated outliers, but does not reproduce
+    the native sampler or its integer thresholds.
+    """
+    patch = _click_balance_roi(cam, x, y).reshape(-1, 3)
+    if len(patch) == 0:
+        raise ClickBalanceError(SATURATED_MSG)
+    samples = np.sort(patch, axis=0)
+    trim = len(samples) // 4
+    central = samples[trim:len(samples) - trim] if trim else samples
+    mean = central.mean(0, dtype=np.float64)
+    if mean.max() >= 0.98:
+        raise ClickBalanceError(SATURATED_MSG)
+    if mean.min() < 0.002:
+        raise ClickBalanceError(TOO_DARK_MSG)
+    return tuple(float(v) for v in mean[1] / mean)
+
+
 def balance_temperature(raw, settings):
     """Colour temperature (K, rounded to 100 within WHITE_POINT_RANGE) whose Preset-style balance
     (Daylight balance shifted along the illuminant locus) is closest to the balance method's own."""
