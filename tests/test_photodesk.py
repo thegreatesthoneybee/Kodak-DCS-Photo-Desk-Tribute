@@ -525,8 +525,8 @@ def test_saved_auto_kelvin_uses_capture_calibration(tmp_path, monkeypatch):
     assert settings.copy(lighting="Tungsten").saved_balance_point is None
     assert settings.copy(click_wb=(1.1, 1.0, 1.2)).saved_balance_point is None
     assert settings.copy(balance="auto").kelvin_mode is None
-    assert settings.copy(lighting="Tungsten").kelvin_mode is None
-    assert settings.copy(lighting="Tungsten").kelvin_illumination is None
+    assert settings.copy(lighting="Tungsten").kelvin_mode == 5
+    assert settings.copy(lighting="Tungsten").kelvin_illumination == "Tungsten"
     assert settings.copy(white_point=5000).kelvin_mode == 5
     assert settings.copy(exposure=0).saved_balance_point == settings.saved_balance_point
     pipeline.save_settings(path, settings)
@@ -1409,6 +1409,10 @@ def test_lighting_edit_preserves_kelvin_mode_and_temperature(tmp_path, mode, bal
     assert entry.settings.to_json() == settings.to_json()
     sheet.redo()
     assert entry.settings.lighting == "Tungsten" and entry.settings.kelvin_mode == mode
+    copied = settings.copy(lighting="Tungsten")
+    assert copied.kelvin_mode == mode and copied.kelvin_illumination == "Tungsten"
+    assert copied.saved_balance_point is None and copied.white_point == 5100
+    assert settings.copy(lighting="Tungsten", balance="preset").kelvin_mode is None
 
 
 def test_click_balance_does_not_edit_an_unselected_reference(monkeypatch):

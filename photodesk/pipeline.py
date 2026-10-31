@@ -144,12 +144,17 @@ class Settings:
             field in changes and changes[field] != getattr(self, field) for field in balance_fields
         ):
             changes["saved_balance_point"] = None
-        if "kelvin_mode" not in changes and any(
-            field in changes and changes[field] != getattr(self, field) for field in ("balance", "lighting", "click_wb")
-        ):
+        balance_changed = any(field in changes and changes[field] != getattr(self, field)
+                              for field in ("balance", "click_wb"))
+        lighting_changed = "lighting" in changes and changes["lighting"] != self.lighting
+        if "kelvin_mode" not in changes and (balance_changed or
+                                               (lighting_changed and self.kelvin_mode not in (4, 5, 6))):
             changes["kelvin_mode"] = None
             if "kelvin_illumination" not in changes:
                 changes["kelvin_illumination"] = None
+        elif (lighting_changed and not balance_changed and
+              changes.get("kelvin_mode", self.kelvin_mode) in (4, 5, 6)):
+            changes.setdefault("kelvin_illumination", changes["lighting"])
         if "balance" in changes and changes["balance"] != self.balance and "auto_balance_wb" not in changes:
             changes["auto_balance_wb"] = None
         return dataclasses.replace(Settings.from_json(self.to_json()), **changes)
