@@ -820,7 +820,7 @@ def white_balance(raw, settings):
     else:
         gains = 2.0 ** (controls / 100)
         weights = [0.3, 0.59, 0.11]
-    # Colour balance preserves overall luminance.
+    # Normalize the control gains by their weighted sum.
     gains /= gains @ np.array(weights)
     return wb * gains
 
