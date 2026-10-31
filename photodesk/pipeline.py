@@ -593,11 +593,42 @@ def method_wb(raw, settings):
 
 
 def kelvin_point(curve, temperature):
-    x = temperature / 100.0
-    point = np.array([sum(curve[i + j] * x ** j for j in range(4)) for i in (0, 4, 8)])
-    if not np.all(np.isfinite(point)):
+    try:
+        if isinstance(temperature, (int, np.integer)):
+            temperature_word = int(temperature) & 0xffff
+        else:
+            temperature = float(temperature)
+            if not math.isfinite(temperature):
+                return None
+            temperature_word = math.trunc(temperature) & 0xffff
+    except (TypeError, ValueError, OverflowError):
         return None
-    return np.clip(np.floor(point + 0.5), 100, 10000)
+    x = temperature_word * 0.01
+    point = []
+    for channel, i in enumerate((0, 4, 8)):
+        with np.errstate(over="ignore", invalid="ignore"):
+            c0, c1, c2, c3 = np.asarray([curve[i + j] for j in range(4)], dtype=np.float32)
+        if not np.all(np.isfinite((c0, c1, c2, c3))):
+            return None
+        c0, c1, c2, c3 = (float(c) for c in (c0, c1, c2, c3))
+
+        # Preserve the native polynomial order. Python uses binary64 intermediates rather than
+        # x87 extended precision, but the native binary32 coefficient loads and red/green spills
+        # are explicit here.
+        value = c3 * x
+        value *= x
+        value *= x
+        value += c2 * x * x
+        value += c1 * x
+        value += c0
+        if channel < 2:
+            with np.errstate(over="ignore", invalid="ignore"):
+                value = float(np.float32(value))
+        if not math.isfinite(value):
+            return None
+        rounded = math.trunc(value + 0.5)
+        point.append(min(10000, max(100, rounded)))
+    return np.asarray(point, dtype=np.float64)
 
 
 def auto_kelvin_calibration(raw):
@@ -677,8 +708,20 @@ def white_balance(raw, settings):
         else:
             factors = None
         if point is not None and (factors is not None or settings.kelvin_mode is None):
-            factors = np.asarray(factors if factors is not None else (1, 1, 1))
-            point = np.floor(point * factors + 0.5)
+            with np.errstate(over="ignore", invalid="ignore"):
+                factors = np.asarray(factors if factors is not None else (1, 1, 1), dtype=np.float32)
+            if factors.shape != (3,) or not np.all(np.isfinite(factors)):
+                raise ValueError("Kelvin balance factors must be three finite values")
+            scaled_words = []
+            for channel, factor in zip(point, factors):
+                scaled = (int(channel) & 0xffff) * float(factor)
+                if not math.isfinite(scaled):
+                    raise ValueError("Kelvin scaling produced a non-finite channel")
+                # The native conversion adds 0.5, truncates to an integer, then stores a WORD.
+                scaled_words.append(math.trunc(scaled + 0.5) & 0xffff)
+            point = np.asarray(scaled_words, dtype=np.float64)
+            if np.any(point == 0):
+                raise ValueError("Kelvin scaling produced a zero channel")
             wb = np.max(point) / point
         elif settings.white_point != settings.white_point_ref:
             wb = wb * cct_shift(raw, settings.white_point_ref, settings.white_point)

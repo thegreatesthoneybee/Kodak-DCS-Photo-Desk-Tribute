@@ -381,7 +381,59 @@ def test_kelvin_point_quantizes_and_clamps(monkeypatch):
     monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.ones(3))
     np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()), [100.0, 20.0, 1.0])
     raw.balance_factors = {"Daylight": (1.0, 0.965, 0.98)}
-    np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()), [98.0, 9800 / 483, 1.0])
+    np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()), [98.0, 9800 / 482, 1.0])
+
+
+def test_kelvin_forward_binary32_spills_straddle_half_rounding():
+    curve = [0.0] * 27
+    for offset in (0, 4, 8):
+        curve[offset] = 100.0
+        curve[offset + 1] = 0.01
+    # At 5000 K, binary32 0.01 * 50 is just below 0.5. Red/green spill to
+    # binary32 (100.5); blue stays extended and truncates 100.999... to 100.
+    np.testing.assert_array_equal(pipeline.kelvin_point(curve, 5000), [101.0, 101.0, 100.0])
+
+
+def test_kelvin_forward_temperature_is_an_unsigned_word():
+    curve = [0.0] * 27
+    for offset, base, slope in zip((0, 4, 8), (100, 200, 300), (1, 2, 3)):
+        curve[offset], curve[offset + 1] = base, slope
+    np.testing.assert_array_equal(pipeline.kelvin_point(curve, 67536),
+                                  pipeline.kelvin_point(curve, 2000))
+    assert pipeline.kelvin_point(curve, float("nan")) is None
+    assert pipeline.kelvin_point(curve, float("inf")) is None
+
+
+@pytest.mark.parametrize(("factor", "rounded_word"), [
+    (0.50004995, 5000),
+    (0.50004999, 5001),
+])
+def test_kelvin_scale_uses_binary32_factors_around_half(monkeypatch, factor, rounded_word):
+    from types import SimpleNamespace
+    curve = [0.0] * 27
+    curve[0] = curve[4] = curve[8] = 10000.0
+    raw = SimpleNamespace(caps=SimpleNamespace(pro_slr=True), balance_curves={"Daylight": curve},
+                          balance_factors={"Daylight": (1.0, factor, 1.0)})
+    monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.ones(3))
+    native_product = 10000 * float(np.float32(factor))
+    assert (native_product < 5000.5) == (rounded_word == 5000)
+    np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()),
+                               [1.0, 10000 / rounded_word, 1.0])
+
+
+def test_kelvin_scale_stores_words_and_rejects_zero_channels(monkeypatch):
+    from types import SimpleNamespace
+    curve = [0.0] * 27
+    curve[0] = curve[4] = curve[8] = 10000.0
+    raw = SimpleNamespace(caps=SimpleNamespace(pro_slr=True), balance_curves={"Daylight": curve},
+                          balance_factors={"Daylight": (1.0, 6.5537, 1.0)})
+    monkeypatch.setattr(pipeline, "method_wb", lambda *_: np.ones(3))
+    # 65537 is truncated to a WORD, so the green channel wraps to 1 before normalization.
+    np.testing.assert_allclose(pipeline.white_balance(raw, pipeline.Settings()), [1.0, 10000.0, 1.0])
+    raw.balance_factors["Daylight"] = (1.0, 6.5536, 1.0)
+    # This product stores as WORD 0; do not convert the native invalid channel into inf/NaN.
+    with pytest.raises(ValueError, match="zero channel"):
+        pipeline.white_balance(raw, pipeline.Settings())
 
 
 def test_saved_kelvin_uses_its_own_illumination(monkeypatch):
