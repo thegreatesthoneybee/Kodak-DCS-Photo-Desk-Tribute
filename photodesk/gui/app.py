@@ -2197,10 +2197,9 @@ class MainWindow(QMainWindow):
                 if raw is None:
                     return
                 cap = pipeline.capture_settings(e.path, raw)
-                for f in ("sharpen_amount", "sharpen_radius", "sharpen_threshold", "balance", "lighting",
-                          "color_balance", "lens_optimization"):
-                    if f not in ("balance", "lighting"):
-                        setattr(s, f, getattr(cap, f))
+                for f in ("sharpen_amount", "sharpen_radius", "sharpen_threshold", "color_balance",
+                          "lens_optimization"):
+                    setattr(s, f, getattr(cap, f))
                 self._restore_capture_balance(e, s, cap)
                 if e.caps.pro_slr:
                     for f in ("rotation", "look", "noise_type", "noise_radius", "noise_strength", "noise_luma"):
