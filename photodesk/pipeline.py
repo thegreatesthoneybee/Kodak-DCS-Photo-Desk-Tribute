@@ -7,6 +7,7 @@ Colour chain (as in Photo Desk):
       -> "Look" profile (A2B0)                               -> output Lab
       -> RGB working space profile (matrix/TRC)
 The profile part of the chain is baked into one 3D LUT per (source, look, space).
+Linear mode bypasses that chain and uses white-balanced, exposed and toned camera RGB.
 
 Image settings mirror the original's processing options: crop, rotation,
 exposure compensation, tone (shadow/midtone/highlight EV), balance method
@@ -34,7 +35,6 @@ MID_GREY = 0.093
 # Scene-linear gain of the Kodak source profiles (0.093 input -> 0.18 scene grey),
 # used to place LibRaw-matrix renders of unsupported cameras at the same exposure.
 FALLBACK_SCENE_GAIN = 1.94
-IDEAL_WHITE_EV = 2.47
 SIDE_CAR_SUFFIX = ".photodesk.json"
 
 DEFAULT_LOOK = "DCSProductLook.icm"
@@ -964,8 +964,7 @@ def color_lut(source_name, look_name, space_path, profile_directory):
     """Bake the colour chain into a LUT_SIZE^3 table indexed by lin^(1/2.2).
 
     source_name None selects the LibRaw-matrix fallback; the LUT is then
-    indexed by linear XYZ(D65) instead of camera RGB.  space_path None
-    produces linear ROMM (Photo Desk's Linear Mode: no Look, no profile).
+    indexed by linear XYZ(D65) instead of camera RGB.
     """
     d = Path(profile_directory)
     g = np.linspace(0, 1, LUT_SIZE, dtype=np.float32)
@@ -975,9 +974,6 @@ def color_lut(source_name, look_name, space_path, profile_directory):
         scene_xyz = icc.lab_to_xyz(icc.lab_decode(_profile(str(d / source_name)).lut("A2B0")(lin)))
     else:
         scene_xyz = (lin @ np.linalg.inv(_BRADFORD_D50_TO_D65).T.astype(np.float32)) * FALLBACK_SCENE_GAIN
-    if space_path is None:
-        out = np.clip(scene_xyz @ XYZ50_TO_PROPHOTO.T.astype(np.float32) / (0.18 * 2 ** IDEAL_WHITE_EV), 0, 1)
-        return out.astype(np.float32).reshape(LUT_SIZE, LUT_SIZE, LUT_SIZE, 3)
     if source_name:
         erimm = _profile(str(d / "ERIMM_PCS3.icm")).lut("B2A0")(icc.xyz_encode(scene_xyz))
     else:
@@ -1035,18 +1031,23 @@ def scene_linear(raw, settings, camera_rgb=None):
 
 
 def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="better", linear=False):
-    """Return a float32 HxWx3 image in [0, 1] in the working space (oriented and cropped).
+    """Return a float32 HxWx3 image in [0, 1], oriented and cropped.
 
-    quality "faster" skips lens optimization, noise reduction and sharpening, as
-    Photo Desk's Faster display mode does.
+    Linear mode uses white-balanced, exposed and toned camera RGB directly, without applying
+    source, Look or working-space profiles. Its decoder scaling remains an approximation.
+    quality "faster" skips lens optimization, noise
+    reduction and sharpening, as Photo Desk's Faster display mode does.
     """
-    pdir = str(profile_directory or profiles.profile_dir())
-    source = source_profile_for(raw, settings, pdir)
-    lut = color_lut(source, settings.look, None if linear else resolve_space(space, pdir), pdir)
-    lin = scene_linear(raw, settings)
-    if source is None:
-        lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
-    out = icc.trilinear(lut, lin, power=1 / LUT_INPUT_GAMMA)
+    if linear:
+        out = scene_linear(raw, settings)
+    else:
+        pdir = str(profile_directory or profiles.profile_dir())
+        source = source_profile_for(raw, settings, pdir)
+        lut = color_lut(source, settings.look, resolve_space(space, pdir), pdir)
+        lin = scene_linear(raw, settings)
+        if source is None:
+            lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
+        out = icc.trilinear(lut, lin, power=1 / LUT_INPUT_GAMMA)
     if quality == "better":
         out = finish(out, settings, raw.caps, raw.scale,
                      lens_optimization_baseline=getattr(raw, "lens_optimization_baseline", None))

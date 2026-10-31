@@ -151,7 +151,7 @@ def test_tone_marker_preserves_negative_zero():
     ("DCSProSLRcDaylight.icm", "DCSProSLRcToneCurve.icm"),
     ("DCSPro14Daylight.icm", "DCSPro14ToneCurve.icm"),
 ])
-def test_camera_color_chain_uses_tone_profile_except_linear(profile_dir, monkeypatch, source, tone):
+def test_camera_color_chain_uses_tone_profile(profile_dir, monkeypatch, source, tone):
     seen = []
     original = pipeline._profile
     def track(path):
@@ -162,9 +162,6 @@ def test_camera_color_chain_uses_tone_profile_except_linear(profile_dir, monkeyp
     space = str(profile_dir / "sRGB Color Space Profile.icm")
     pipeline.color_lut(source, "DCSProductLook.icm", space, str(profile_dir))
     assert tone in seen
-    seen.clear()
-    pipeline.color_lut(source, "DCSProductLook.icm", None, str(profile_dir))
-    assert tone not in seen
     pipeline.color_lut.cache_clear()
 
 
@@ -740,6 +737,7 @@ def test_render_passes_raw_lens_baseline_to_finish(monkeypatch):
                           lens_optimization_baseline=10, xyz_from_cam=np.eye(3, dtype=np.float32))
     monkeypatch.setattr(pipeline, "source_profile_for", lambda *_: "source.icm")
     monkeypatch.setattr(pipeline, "color_lut", lambda *args: None)
+    monkeypatch.setattr(pipeline, "resolve_space", lambda *_: "space.icm")
     monkeypatch.setattr(pipeline, "scene_linear", lambda *_: np.zeros((1, 1, 3), np.float32))
     monkeypatch.setattr(pipeline.icc, "trilinear", lambda *_args, **_kwargs: np.zeros((1, 1, 3), np.float32))
     seen = []
@@ -749,8 +747,72 @@ def test_render_passes_raw_lens_baseline_to_finish(monkeypatch):
         return img
 
     monkeypatch.setattr(pipeline, "finish", finish)
-    pipeline.render(raw, pipeline.Settings(sharpen_amount=0), profile_directory=".", linear=True)
+    pipeline.render(raw, pipeline.Settings(sharpen_amount=0), profile_directory=".")
     assert seen == [(raw.caps, 0.5, 10)]
+
+
+def test_render_linear_uses_white_balanced_exposed_toned_scene_without_profiles(monkeypatch):
+    raw = pipeline.RawImage(Path("linear-render-test.dcr"), "Kodak", "DCS660M",
+                            np.array([[[0.04, 0.08, 0.12], [0.02, 0.04, 0.06]]], np.float32),
+                            np.ones(3), np.ones(3), np.zeros((3, 3)), np.eye(3, dtype=np.float32),
+                            0, {})
+    settings = pipeline.Settings(balance="click", click_wb=(2.0, 1.0, 0.5), exposure=1.0,
+                                 tone=(-8.0, 0.5, 2.5))
+    monkeypatch.setattr(pipeline, "white_balance", lambda *_: np.array([2.0, 1.0, 0.5]))
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("linear rendering must not access color profiles or looks")
+
+    monkeypatch.setattr(pipeline, "source_profile_for", unexpected)
+    monkeypatch.setattr(pipeline, "resolve_space", unexpected)
+    monkeypatch.setattr(pipeline, "color_lut", unexpected)
+    monkeypatch.setattr(pipeline, "look_path", unexpected)
+    monkeypatch.setattr(pipeline.profiles, "profile_dir", unexpected)
+    monkeypatch.setattr(pipeline.icc, "trilinear", unexpected)
+
+    image = pipeline.render(raw, settings, space="missing-space.icc", quality="faster", linear=True)
+
+    before_tone = raw.camera_rgb * np.array([2.0, 1.0, 0.5], np.float32) * 2.0
+    luminance = before_tone @ np.array([0.3, 0.59, 0.11], np.float32)
+    ev = np.log2(np.maximum(luminance, 1e-7) / pipeline.MID_GREY)
+    mapped_ev = np.interp(ev, settings.tone, pipeline.TONE_DEFAULT) + np.where(
+        ev < settings.tone[0], ev - settings.tone[0], np.where(ev > settings.tone[2], ev - settings.tone[2], 0))
+    expected = np.clip(before_tone * np.exp2(mapped_ev - ev).astype(np.float32)[..., None], 0, 1)
+    np.testing.assert_allclose(image, expected, atol=1e-7)
+    assert not np.allclose(image, raw.camera_rgb)
+
+
+def test_render_linear_finishes_then_orients_and_crops_without_profiles(monkeypatch):
+    from types import SimpleNamespace
+
+    scene = np.repeat(np.arange(12, dtype=np.float32).reshape(3, 4, 1) / 20, 3, axis=2)
+    raw = SimpleNamespace(caps=object(), scale=0.5, flip=0, lens_optimization_baseline=None)
+    settings = pipeline.Settings(rotation=1, crop=(1 / 3, 0.25, 1.0, 0.75))
+    monkeypatch.setattr(pipeline, "scene_linear", lambda *_: scene)
+    seen = []
+
+    def finish(image, received_settings, caps, scale, lens_optimization_baseline=None):
+        seen.append((image, received_settings, caps, scale, lens_optimization_baseline))
+        return image + 0.1
+
+    monkeypatch.setattr(pipeline, "finish", finish)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("linear rendering must not access color profiles or looks")
+
+    monkeypatch.setattr(pipeline, "source_profile_for", unexpected)
+    monkeypatch.setattr(pipeline, "resolve_space", unexpected)
+    monkeypatch.setattr(pipeline, "color_lut", unexpected)
+    monkeypatch.setattr(pipeline, "look_path", unexpected)
+    monkeypatch.setattr(pipeline.profiles, "profile_dir", unexpected)
+    monkeypatch.setattr(pipeline.icc, "trilinear", unexpected)
+
+    image = pipeline.render(raw, settings, quality="better", linear=True)
+
+    expected = np.repeat(np.array([[5, 1], [6, 2]], np.float32)[..., None] / 20 + 0.1, 3, axis=2)
+    np.testing.assert_allclose(image, expected)
+    assert len(seen) == 1 and seen[0][0] is scene and seen[0][1] is settings
+    assert seen[0][2] is raw.caps and seen[0][3:] == (raw.scale, None)
 
 
 def _test_tiles(noise=0.0, blur=0.0, seed=0):
@@ -1666,6 +1728,34 @@ def test_pro_slr_crop_matches_optional_tiff_reference():
     assert full.camera_rgb.shape[:2] == (reference_height, reference_width)
     assert half.camera_rgb.shape[:2] == (reference_height // 2, reference_width // 2)
     assert half.scale == 0.5
+
+
+def test_linear_render_matches_optional_native_tiff_samples():
+    import cv2
+    import tifffile
+
+    references = (ROOT / "raw/sample_tiff/linear_0ev.tif",
+                  ROOT / "raw/sample_tiff/linear_plus1ev.tif")
+    if not SLR_N_SAMPLE.is_file() or not all(path.is_file() for path in references):
+        pytest.skip("Pro SLR/n sample RAW and both linear TIFF references are required")
+
+    raw = pipeline.decode(SLR_N_SAMPLE, half_size=True)
+    settings = pipeline.Settings(tone=(-9.5, -0.2, 4.0))
+    for reference, exposure, rmse_limit in zip(references, (0.0, 1.0), (0.025, 0.035)):
+        with tifffile.TiffFile(reference) as tiff:
+            source = tiff.asarray()
+        assert source.dtype == np.uint16 and source.shape == (
+            raw.camera_rgb.shape[0] * 2, raw.camera_rgb.shape[1] * 2, 3)
+        expected = cv2.resize(source.astype(np.float32) / 65535.0,
+                              (raw.camera_rgb.shape[1], raw.camera_rgb.shape[0]),
+                              interpolation=cv2.INTER_AREA)
+
+        image = pipeline.render(raw, settings.copy(exposure=exposure), space="missing-space.icc",
+                                profile_directory="missing-profile-directory", quality="faster", linear=True)
+        rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
+        # Native linear output is close but not pixel-identical: measured RMSE is about .016/.023;
+        # these bounds leave room for decoder variation while staying well below the ICC path.
+        assert rmse < rmse_limit, f"{reference.name} linear-domain RMSE {rmse:.5f} exceeds {rmse_limit}"
 
 
 @pytest.mark.skipif(not SLR_N_SAMPLE.is_file(), reason="Pro SLR/n sample RAW not available")
