@@ -145,7 +145,8 @@ def _exif(meta, dpi):
     return exif
 
 
-def save(img, path, file_type, opts, metadata, settings=None, space_bytes=None):
+def save(img, path, file_type, opts, metadata, settings=None, space_bytes=None, *,
+         _quantize_12bit_lattice=False):
     """img: float32 HxWx3 in [0, 1]; space_bytes: ICC profile to embed (None for linear)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,8 +164,15 @@ def save(img, path, file_type, opts, metadata, settings=None, space_bytes=None):
             iptc.insert_into_jpeg(path, iptc_blob)
     elif file_type == "tiff":
         quantized = np.clip(img, 0.0, 1.0)
-        data = (np.round(quantized * 65535).astype(np.uint16) if opts.tiff_16bit
-                else np.round(quantized * 255).astype(np.uint8))
+        if opts.tiff_16bit and _quantize_12bit_lattice:
+            # Pro SLR/n linear TIFF samples show a 12-bit code lattice in supplied references.
+            # This nearest-code mapping is provisional and does not claim native rounding parity.
+            codes = np.floor(quantized * 4095 + 0.5).astype(np.uint32)
+            data = (codes * 16).astype(np.uint16)
+        elif opts.tiff_16bit:
+            data = np.round(quantized * 65535).astype(np.uint16)
+        else:
+            data = np.round(quantized * 255).astype(np.uint8)
         extratags = []
         if space_bytes and opts.embed_tiff_profile:
             extratags.append((34675, "B", len(space_bytes), space_bytes, True))
@@ -214,7 +222,13 @@ def process_file(raw_path, dest, file_type="jpeg", opts=None, settings=None, pro
     if file_type == "tiff" and opts.render_gps and raw.metadata.get("gps"):
         img = render_gps(img, camera.gps_text(raw.metadata["gps"]))
     space_bytes = None if linear else Path(space).read_bytes()
-    return save(img, dest, file_type, opts, raw.metadata, settings, space_bytes)
+    model = str(raw.metadata.get("model") or "").strip().casefold()
+    quantize_12bit_lattice = (
+        linear and opts.tiff_16bit and not opts.resize and settings.crop is None and
+        not opts.render_gps and model == "dcs pro slr/n"
+    )
+    return save(img, dest, file_type, opts, raw.metadata, settings, space_bytes,
+                _quantize_12bit_lattice=quantize_12bit_lattice)
 
 
 def is_raw(path):

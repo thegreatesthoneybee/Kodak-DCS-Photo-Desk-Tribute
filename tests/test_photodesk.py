@@ -2248,6 +2248,109 @@ def test_tiff_upscale_cubic_overshoot_saturates(tmp_path, tiff_16bit, scale, dty
     assert actual.min() == 0 and actual.max() == scale
 
 
+def test_pro_slrn_linear_tiff_uses_provisional_12bit_lattice(tmp_path):
+    import tifffile
+
+    img = np.array([[[-0.1, 0.0, 0.0002], [0.25, 0.5, 0.75], [1.0, 1.1, 2.0]]],
+                   dtype=np.float32)
+    opts = export.OutputOptions(tiff_16bit=True, embed_tiff_profile=False)
+    saved = export.save(img, tmp_path / "linear-lattice.tif", "tiff", opts, {},
+                        _quantize_12bit_lattice=True)
+
+    with tifffile.TiffFile(saved) as tiff:
+        page = tiff.pages[0]
+        actual = page.asarray()
+        assert 34675 not in page.tags
+    expected = np.array([[[0, 0, 16], [16384, 32768, 49136], [65520, 65520, 65520]]],
+                        dtype=np.uint16)
+    assert actual.dtype == np.uint16
+    np.testing.assert_array_equal(actual, expected)
+    assert np.all(actual % 16 == 0)
+    assert actual.max() == 65520
+
+
+def test_tiff_16bit_default_conversion_remains_full_range(tmp_path):
+    import tifffile
+
+    img = np.array([[[0.1, 0.5, 1.0]]], dtype=np.float32)
+    opts = export.OutputOptions(tiff_16bit=True, embed_tiff_profile=False)
+    saved = export.save(img, tmp_path / "ordinary-16bit.tif", "tiff", opts, {})
+    actual = tifffile.imread(saved)
+
+    np.testing.assert_array_equal(actual, np.round(img * 65535).astype(np.uint16))
+    assert actual[0, 0, 0] % 16 != 0 and actual[0, 0, 2] == 65535
+
+
+@pytest.mark.parametrize(
+    "model,dcs,file_type,linear,bits16,resize,crop,gps,eligible",
+    [
+        ("DCS Pro SLR/n", True, "tiff", True, True, False, None, False, True),
+        ("DCS Pro SLR/c", True, "tiff", True, True, False, None, False, False),
+        ("DCS Pro 14n", True, "tiff", True, True, False, None, False, False),
+        ("ProBack645", True, "tiff", True, True, False, None, False, False),
+        ("Canon EOS 5D", False, "tiff", True, True, False, None, False, False),
+        ("DCS Pro SLR/n", True, "tiff", False, True, False, None, False, False),
+        ("DCS Pro SLR/n", True, "tiff", True, False, False, None, False, False),
+        ("DCS Pro SLR/n", True, "jpeg", True, True, False, None, False, False),
+        ("DCS Pro SLR/n", True, "tiff", True, True, True, None, False, False),
+        ("DCS Pro SLR/n", True, "tiff", True, True, False, (0.1, 0.1, 0.9, 0.9), False, False),
+        ("DCS Pro SLR/n", True, "tiff", True, True, False, (0, 0, 1, 1), False, False),
+        ("DCS Pro SLR/n", True, "tiff", True, True, False, None, True, False),
+    ],
+)
+def test_process_file_gates_pro_slrn_lattice_dispatch(
+        tmp_path, monkeypatch, model, dcs, file_type, linear, bits16, resize, crop, gps, eligible):
+    from types import SimpleNamespace
+
+    image = np.zeros((2, 3, 3), dtype=np.float32)
+    metadata = {"model": model}
+    if gps:
+        metadata["gps"] = {"lat": 1.0, "lon": 2.0}
+    raw = SimpleNamespace(caps=SimpleNamespace(dcs=dcs), metadata=metadata)
+    profile = tmp_path / "working.icc"
+    profile.write_bytes(b"synthetic profile")
+    rendered = []
+    saves = []
+    gps_overlays = []
+    monkeypatch.setattr(export, "is_raw", lambda _: True)
+    monkeypatch.setattr(pipeline, "decode", lambda _: raw)
+    monkeypatch.setattr(pipeline, "resolve_space", lambda *_: str(profile))
+    monkeypatch.setattr(pipeline, "render",
+                        lambda *args, **kwargs: rendered.append(kwargs["linear"]) or image)
+    monkeypatch.setattr(export, "render_gps",
+                        lambda img, text: gps_overlays.append(text) or img)
+    monkeypatch.setattr(camera, "gps_text", lambda _: "synthetic GPS")
+
+    def capture_save(*args, **kwargs):
+        saves.append(kwargs.get("_quantize_12bit_lattice", False))
+        return Path(args[1])
+
+    monkeypatch.setattr(export, "save", capture_save)
+    opts = export.OutputOptions(tiff_linear=linear, tiff_16bit=bits16,
+                                resize=resize, render_gps=gps)
+    settings = pipeline.Settings(crop=crop)
+    dest = tmp_path / "out"
+    assert export.process_file("synthetic.dcr", dest, file_type, opts, settings, tmp_path) == dest
+
+    assert saves == [eligible]
+    assert rendered == [file_type == "tiff" and linear and dcs]
+    assert bool(gps_overlays) is gps
+
+
+def test_finished_file_bypasses_pro_slrn_lattice_dispatch(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(export, "is_raw", lambda _: False)
+    monkeypatch.setattr(export, "process_finished",
+                        lambda *args: calls.append(args) or Path(args[1]))
+    monkeypatch.setattr(pipeline, "decode", lambda *_: pytest.fail("finished file decoded as RAW"))
+    opts = export.OutputOptions(tiff_linear=True, tiff_16bit=True)
+    settings = pipeline.Settings()
+    dest = tmp_path / "finished.tif"
+
+    assert export.process_file("finished.jpg", dest, "tiff", opts, settings) == dest
+    assert len(calls) == 1 and calls[0][0] == "finished.jpg" and calls[0][2] == "tiff"
+
+
 def test_jpeg_upscale_cubic_overshoot_saturates(tmp_path):
     from PIL import Image
 
