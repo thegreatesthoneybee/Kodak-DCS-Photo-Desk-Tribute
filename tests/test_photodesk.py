@@ -742,7 +742,7 @@ def test_render_passes_raw_lens_baseline_to_finish(monkeypatch):
     monkeypatch.setattr(pipeline, "source_profile_for", lambda *_: "source.icm")
     monkeypatch.setattr(pipeline, "color_lut", lambda *args: None)
     monkeypatch.setattr(pipeline, "resolve_space", lambda *_: "space.icm")
-    monkeypatch.setattr(pipeline, "scene_linear", lambda *_: np.zeros((1, 1, 3), np.float32))
+    monkeypatch.setattr(pipeline, "scene_linear", lambda *_, **__: np.zeros((1, 1, 3), np.float32))
     monkeypatch.setattr(pipeline.icc, "trilinear", lambda *_args, **_kwargs: np.zeros((1, 1, 3), np.float32))
     seen = []
 
@@ -2183,6 +2183,46 @@ def test_pro_slr_scene_applies_camera_matrix_after_clipped_balance(monkeypatch):
                                np.clip(codes @ np.array(matrix, np.float32).reshape(3, 3).T, 0, 1), rtol=1e-6)
     # Lightings without a recorded matrix keep the balanced samples unchanged.
     np.testing.assert_allclose(pipeline.scene_linear(raw, settings.copy(lighting="Tungsten")), balanced)
+
+
+def test_pro_slr_profile_input_scales_code_domain_scene(monkeypatch):
+    from types import SimpleNamespace
+    raw = SimpleNamespace(caps=camera.capabilities("DCS Pro SLR/n"))
+    scene = np.array([[[0.2, 0.5, 0.99]]], np.float32)
+    calls = []
+    monkeypatch.setattr(pipeline, "scene_linear",
+                        lambda *args, **kwargs: calls.append(kwargs) or scene)
+    out = pipeline.profile_input(raw, pipeline.Settings())
+    assert calls == [{"sensor_codes": True}]
+    np.testing.assert_allclose(out, np.clip(scene * np.float32(2 ** (1 / 16)), 0, 1))
+    assert out[0, 0, 2] == 1.0
+    other = SimpleNamespace(caps=camera.capabilities("DCS660M"))
+    assert pipeline.profile_input(other, pipeline.Settings()) is scene and calls[-1] == {}
+
+
+@need_installer
+def test_rgb_render_matches_optional_native_srgb_samples(profile_dir):
+    import cv2
+    import tifffile
+
+    cases = (("srgb_ev0.tif", {}), ("srgb_ev1.tif", {"exposure": 1.0}),
+             ("5500k.tif", {"white_point": 5500, "white_point_ref": 5500}))
+    references = [(ROOT / "raw/sample_tiff" / name, fields) for name, fields in cases]
+    if not SLR_N_SAMPLE.is_file() or not all(path.is_file() for path, _ in references):
+        pytest.skip("Pro SLR/n sample RAW and the sRGB TIFF references are required")
+    raw = pipeline.decode(SLR_N_SAMPLE, half_size=True)
+    settings = pipeline.Settings(balance="preset", lighting="Daylight", white_point=5000,
+                                 white_point_ref=5000, tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
+    for reference, fields in references:
+        # Compared at a quarter of full size, which averages out most of the remaining
+        # LibRaw AHD versus Kodak demosaic differences; measured RMSE is about .011-.012.
+        size = (raw.camera_rgb.shape[1] // 2, raw.camera_rgb.shape[0] // 2)
+        source = tifffile.imread(reference)
+        expected = cv2.resize(source.astype(np.float32) / 65535.0, size, interpolation=cv2.INTER_AREA)
+        image = pipeline.render(raw, settings.copy(**fields), profile_directory=profile_dir, quality="faster")
+        image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+        rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
+        assert rmse < 0.014, f"{reference.name} sRGB RMSE {rmse:.5f}"
 
 
 def test_color_matrices_read_from_slrn_sample():

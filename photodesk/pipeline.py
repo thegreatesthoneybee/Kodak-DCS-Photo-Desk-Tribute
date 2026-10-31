@@ -953,8 +953,9 @@ def tone_curve(raw, settings, space=DISPLAY_SPACE, profile_directory=None, n=256
     render_settings = settings.copy(exposure=0)
     wb = white_balance(raw, render_settings).astype(np.float32)
     camera_rgb = (scene[:, None] / wb[None, :])[None, :, :]
-    lin = scene_linear(raw, render_settings, camera_rgb=camera_rgb)
     source = source_profile_for(raw, render_settings, pdir)
+    lin = (profile_input(raw, render_settings, camera_rgb) if source
+           else scene_linear(raw, render_settings, camera_rgb=camera_rgb))
     if source is None:
         lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
     lut = color_lut(source, render_settings.look, resolve_space(space, pdir), pdir)
@@ -1131,6 +1132,21 @@ def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False):
     return np.clip(lin, 0, 1, out=lin)
 
 
+# Gain between Linear Mode output and the source-profile input of Pro SLR RGB rendering, fitted
+# (2^(1/16)) on original Photo Desk sRGB/Linear export pairs of the same SLR/n image at EV 0 and +1;
+# 5000 K, 5500 K and Tungsten exports agree. The native stage is presumed to be the renderer's
+# exposure table (ipApplyExposureTable), whose generating parameters are not yet decoded.
+PRO_SLR_RGB_GAIN = 2.0 ** (1 / 16)
+
+
+def profile_input(raw, settings, camera_rgb=None):
+    """Scene-linear samples as fed to the source profile of the RGB rendering chain."""
+    if not raw.caps.pro_slr:
+        return scene_linear(raw, settings, camera_rgb)
+    lin = scene_linear(raw, settings, camera_rgb, sensor_codes=True)
+    return np.clip(lin * np.float32(PRO_SLR_RGB_GAIN), 0, 1)
+
+
 def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="better", linear=False):
     """Return a float32 HxWx3 image in [0, 1], oriented and cropped.
 
@@ -1145,7 +1161,7 @@ def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="
         pdir = str(profile_directory or profiles.profile_dir())
         source = source_profile_for(raw, settings, pdir)
         lut = color_lut(source, settings.look, resolve_space(space, pdir), pdir)
-        lin = scene_linear(raw, settings)
+        lin = profile_input(raw, settings) if source else scene_linear(raw, settings)
         if source is None:
             lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
         out = icc.trilinear(lut, lin, power=1 / LUT_INPUT_GAMMA)
