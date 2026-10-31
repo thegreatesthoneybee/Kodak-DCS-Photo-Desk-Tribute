@@ -1415,6 +1415,28 @@ def test_lighting_edit_preserves_kelvin_mode_and_temperature(tmp_path, mode, bal
     assert settings.copy(lighting="Tungsten", balance="preset").kelvin_mode is None
 
 
+def test_balance_edit_keeps_original_settings_on_decode_failure(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+    from photodesk.gui.model import Entry, Sheet
+
+    settings = pipeline.Settings(balance="preset", white_point=5100, white_point_ref=5100,
+                                 saved_balance_point=(2048, 2500, 1800))
+    entry = Entry(tmp_path / "unreadable.DCR", settings)
+    sheet = Sheet(tmp_path)
+    refreshed = []
+    window = SimpleNamespace(active_sheet=lambda: SimpleNamespace(sheet=sheet),
+                             selection=lambda: [entry],
+                             _set_balance_temperature=lambda *_: pytest.fail("unexpected calibration"),
+                             after_edit=lambda entries: refreshed.extend(entries))
+    monkeypatch.setattr(pipeline, "decode", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unreadable")))
+
+    MainWindow.edit(window, "balance", balance="auto")
+
+    assert entry.settings.to_json() == settings.to_json()
+    assert not entry.dirty and not sheet.undo_stack and not refreshed
+
+
 def test_click_balance_does_not_edit_an_unselected_reference(monkeypatch):
     from types import SimpleNamespace
     from photodesk.gui.app import MainWindow

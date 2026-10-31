@@ -1468,9 +1468,15 @@ class MainWindow(QMainWindow):
             def change(e, s):
                 if kind == "lighting" and fields.get("lighting") == s.lighting:
                     return
+                needs_balance = kind != "lighting" or s.kelvin_mode not in (4, 5, 6)
+                if needs_balance and e.raw is None and e.small is None:
+                    try:
+                        e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
+                    except Exception:
+                        return
                 for k, v in fields.items():
                     setattr(s, k, v)
-                if kind == "lighting" and s.kelvin_mode in (4, 5, 6):
+                if not needs_balance:
                     # The native process record retains its mode and temperature; the new
                     # lighting is also used as the Kelvin illuminant when it is applied.
                     s.kelvin_illumination = s.lighting
