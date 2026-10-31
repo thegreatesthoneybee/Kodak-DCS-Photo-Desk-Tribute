@@ -356,6 +356,9 @@ class RawImage:
     custom_kelvin_illumination: str = None
     auto_scene_exposure: float = None
     lens_optimization_baseline: int = None
+    white_level: float = None   # LibRaw's sensor white level that camera_rgb is normalized by
+    # Camera 3x3 colour matrices per lighting (Kodak tags 2010-2013) for Pro SLR rendering.
+    color_matrices: dict = dataclasses.field(default_factory=dict)
 
     @property
     def caps(self):
@@ -432,6 +435,7 @@ def decode(path, half_size=False, algorithm="AHD"):
             wb = daylight
         rgb_xyz = np.array(r.rgb_xyz_matrix[:3], np.float64)
         flip = sizes.flip
+        white_level = float(r.white_level) if r.white_level else None
         o = r.other
         metadata = {
             "make": make, "model": model, "iso": o.iso_speed, "shutter": o.shutter_speed,
@@ -447,7 +451,8 @@ def decode(path, half_size=False, algorithm="AHD"):
                     camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h),
                     camera.balance_points(path), camera.balance_curves(path), camera.balance_factors(path),
                     auto_illumination, camera.custom_kelvin_illumination(path), auto_exposure,
-                    camera.lens_optimization_baseline(path, model))
+                    camera.lens_optimization_baseline(path, model), white_level,
+                    camera.color_matrices(path) if camera.capabilities(model).pro_slr else {})
 
 
 def reduced(raw, long_edge):
@@ -1095,15 +1100,25 @@ def source_profile_for(raw, settings, profile_directory):
     return source
 
 
-def scene_linear(raw, settings, camera_rgb=None):
+def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False):
     """White-balanced camera RGB with exposure and tone applied (float32, clipped to 1).
 
     ``camera_rgb`` optionally supplies samples while retaining ``raw`` as the balance/driver context.
+    ``sensor_codes`` expresses Pro SLR samples on the 12-bit code scale (code / 4095) instead of
+    LibRaw's white-level normalization, as the original Linear Mode TIFFs do.
     """
     cam = raw.camera_rgb if camera_rgb is None else camera_rgb
     lin = cam * white_balance(raw, settings).astype(np.float32)
     lin *= np.float32(2.0 ** settings.exposure)
     if raw.caps.pro_slr:
+        if sensor_codes and getattr(raw, "white_level", None):
+            lin *= np.float32(raw.white_level / 4095)
+        matrix = getattr(raw, "color_matrices", {}).get(settings.lighting)
+        if matrix is not None:
+            # ipDeviantMat: balanced, clipped 12-bit RGB times the camera's illuminant matrix,
+            # clipped again before the tone table.
+            np.clip(lin, 0, 1, out=lin)
+            lin = lin @ np.asarray(matrix, np.float32).reshape(3, 3).T
         if settings.tone_enabled and any(abs(float(np.float32(value)) - reference) > PRO_SLR_TONE_THRESHOLD
                for value, reference in zip(settings.tone, PRO_SLR_TONE_REFERENCE)):
             indices = np.floor(np.clip(lin, 0, 1) * 4095 + 0.5).astype(np.uint16)
@@ -1125,7 +1140,7 @@ def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="
     reduction and sharpening, as Photo Desk's Faster display mode does.
     """
     if linear:
-        out = scene_linear(raw, settings)
+        out = scene_linear(raw, settings, sensor_codes=True)
     else:
         pdir = str(profile_directory or profiles.profile_dir())
         source = source_profile_for(raw, settings, pdir)

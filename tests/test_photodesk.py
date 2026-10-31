@@ -4,6 +4,7 @@ Set PHOTODESK_INSTALLER / PHOTODESK_SAMPLE to override the default locations.
 """
 import io
 import os
+import shutil
 import struct
 from pathlib import Path
 
@@ -350,10 +351,13 @@ def test_saved_kelvin_tuple_normalizes_preset_illumination(tmp_path, monkeypatch
     assert "kelvin_mode" not in camera.stored_process_parameters(path)
 
 
-def test_stored_process_levels_from_slrn_sample():
-    path = ROOT / "raw/SLRn/GQ432034.DCR"
-    if not path.is_file():
+def test_stored_process_levels_from_slrn_sample(tmp_path):
+    sample = ROOT / "raw/SLRn/GQ432034.DCR"
+    if not sample.is_file():
         pytest.skip("SLR/n sample not available")
+    # A copy without the user's sidecar, so only the camera-recorded settings are read.
+    path = tmp_path / sample.name
+    shutil.copyfile(sample, path)
     np.testing.assert_allclose(camera.stored_process_levels(path), (-9.5, -0.2, 4.0), atol=1e-5)
     settings = pipeline.load_settings(path)
     np.testing.assert_allclose(settings.tone, (-9.5, -0.2, 4.0), atol=1e-5)
@@ -788,7 +792,7 @@ def test_render_linear_finishes_then_orients_and_crops_without_profiles(monkeypa
     scene = np.repeat(np.arange(12, dtype=np.float32).reshape(3, 4, 1) / 20, 3, axis=2)
     raw = SimpleNamespace(caps=object(), scale=0.5, flip=0, lens_optimization_baseline=None)
     settings = pipeline.Settings(rotation=1, crop=(1 / 3, 0.25, 1.0, 0.75))
-    monkeypatch.setattr(pipeline, "scene_linear", lambda *_: scene)
+    monkeypatch.setattr(pipeline, "scene_linear", lambda *_, **kwargs: kwargs == {"sensor_codes": True} and scene)
     seen = []
 
     def finish(image, received_settings, caps, scale, lens_optimization_baseline=None):
@@ -1961,6 +1965,7 @@ def _fake_decode(monkeypatch, model, sizes, image):
             self.daylight_whitebalance = [1, 1, 1, 1]
             self.camera_whitebalance = [1, 1, 1, 1]
             self.rgb_xyz_matrix = np.eye(3)
+            self.white_level = 4095
             self.params = None
 
         def __enter__(self):
@@ -1981,6 +1986,7 @@ def _fake_decode(monkeypatch, model, sizes, image):
     monkeypatch.setattr(pipeline.camera, "balance_points", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "balance_curves", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "balance_factors", lambda _path: {})
+    monkeypatch.setattr(pipeline.camera, "color_matrices", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "lens_optimization_baseline", lambda *_: None)
     monkeypatch.setattr(pipeline.camera, "custom_kelvin_illumination", lambda _path: None)
     return raw
@@ -2130,14 +2136,21 @@ def test_linear_render_matches_optional_native_tiff_samples():
     import cv2
     import tifffile
 
-    references = (ROOT / "raw/sample_tiff/linear_0ev.tif",
-                  ROOT / "raw/sample_tiff/linear_plus1ev.tif")
-    if not SLR_N_SAMPLE.is_file() or not all(path.is_file() for path in references):
-        pytest.skip("Pro SLR/n sample RAW and both linear TIFF references are required")
+    # Original Photo Desk Linear Mode exports of GQ432034.DCR: Daylight preset at 5000 K, Product
+    # Look, no lens optimization, noise reduction or sharpening, EV 0 and +1, with tone
+    # (-9.5, -0.2, 4.0) and the neutral tone (-9.5, 0.0, 3.5).
+    cases = (("linear_ev0.tif", 0.0, (-9.5, -0.2, 4.0)), ("linear_ev1.tif", 1.0, (-9.5, -0.2, 4.0)),
+             ("linear_neutral_ev0.tif", 0.0, (-9.5, 0.0, 3.5)),
+             ("linear_neutral_ev1.tif", 1.0, (-9.5, 0.0, 3.5)))
+    references = [(ROOT / "raw/sample_tiff" / name, exposure, tone) for name, exposure, tone in cases]
+    if not SLR_N_SAMPLE.is_file() or not all(path.is_file() for path, *_ in references):
+        pytest.skip("Pro SLR/n sample RAW and the linear TIFF references are required")
 
     raw = pipeline.decode(SLR_N_SAMPLE, half_size=True)
-    settings = pipeline.Settings(tone=(-9.5, -0.2, 4.0))
-    for reference, exposure, rmse_limit in zip(references, (0.0, 1.0), (0.025, 0.035)):
+    settings = pipeline.Settings(balance="preset", lighting="Daylight", white_point=5000,
+                                 white_point_ref=5000, sharpen_amount=0)
+    for reference, exposure, tone in references:
+        rmse_limit = 0.006
         with tifffile.TiffFile(reference) as tiff:
             source = tiff.asarray()
         assert source.dtype == np.uint16 and source.shape == (
@@ -2146,12 +2159,41 @@ def test_linear_render_matches_optional_native_tiff_samples():
                               (raw.camera_rgb.shape[1], raw.camera_rgb.shape[0]),
                               interpolation=cv2.INTER_AREA)
 
-        image = pipeline.render(raw, settings.copy(exposure=exposure), space="missing-space.icc",
+        image = pipeline.render(raw, settings.copy(exposure=exposure, tone=tone), space="missing-space.icc",
                                 profile_directory="missing-profile-directory", quality="faster", linear=True)
         rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-        # Native linear output is close but not pixel-identical: measured RMSE is about .016/.023;
-        # these bounds leave room for decoder variation while staying well below the ICC path.
+        # Measured RMSE is about .003-.005 (LibRaw AHD versus Kodak's own demosaic remains).
         assert rmse < rmse_limit, f"{reference.name} linear-domain RMSE {rmse:.5f} exceeds {rmse_limit}"
+
+
+def test_pro_slr_scene_applies_camera_matrix_after_clipped_balance(monkeypatch):
+    from types import SimpleNamespace
+    matrix = (1.25, -0.25, 0.0, 0.0, 1.0, 0.0, -0.5, 0.0, 1.5)
+    raw = SimpleNamespace(camera_rgb=np.array([[[0.4, 0.2, 0.8]]], np.float32),
+                          caps=SimpleNamespace(pro_slr=True), white_level=3700.0,
+                          color_matrices={"Daylight": matrix})
+    monkeypatch.setattr(pipeline, "white_balance", lambda *_: np.array([1.0, 1.0, 1.5]))
+    settings = pipeline.Settings(lighting="Daylight", tone_enabled=False)
+    balanced = np.clip(raw.camera_rgb * np.float32([1.0, 1.0, 1.5]), 0, 1)   # blue clips at 1
+    expected = np.clip(balanced @ np.array(matrix, np.float32).reshape(3, 3).T, 0, 1)
+    np.testing.assert_allclose(pipeline.scene_linear(raw, settings), expected, rtol=1e-6)
+    # Linear Mode expresses the 3700-white samples on Kodak's 12-bit code scale.
+    codes = np.clip(raw.camera_rgb * np.float32([1.0, 1.0, 1.5]) * np.float32(3700 / 4095), 0, 1)
+    np.testing.assert_allclose(pipeline.scene_linear(raw, settings, sensor_codes=True),
+                               np.clip(codes @ np.array(matrix, np.float32).reshape(3, 3).T, 0, 1), rtol=1e-6)
+    # Lightings without a recorded matrix keep the balanced samples unchanged.
+    np.testing.assert_allclose(pipeline.scene_linear(raw, settings.copy(lighting="Tungsten")), balanced)
+
+
+def test_color_matrices_read_from_slrn_sample():
+    if not SLR_N_SAMPLE.is_file():
+        pytest.skip("SLR/n sample not available")
+    matrices = camera.color_matrices(SLR_N_SAMPLE)
+    assert set(matrices) == set(camera.ILLUMINANTS)
+    np.testing.assert_allclose(matrices["Daylight"], (1.046875, -0.03515625, -0.01171875, -0.0234375,
+                                                      1.1640625, -0.140625, -0.06640625, 0.19140625, 0.875))
+    for values in matrices.values():
+        np.testing.assert_allclose(np.reshape(values, (3, 3)).sum(axis=1), 1.0, atol=1e-6)
 
 
 @pytest.mark.skipif(not SLR_N_SAMPLE.is_file(), reason="Pro SLR/n sample RAW not available")

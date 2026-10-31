@@ -315,6 +315,18 @@ def balance_factors(path):
     return factors
 
 
+def color_matrices(path):
+    """Camera-recorded 3x3 colour matrices per illuminant (Kodak tags 2010-2013), which the Pro SLR
+    renderer applies to balanced camera RGB (ipDeviantMat, tags loaded into scene +0x560..+0x56c)."""
+    tags = read_kodak_tags(path, (2010, 2011, 2012, 2013))
+    matrices = {}
+    for i, name in enumerate(ILLUMINANTS):
+        values = tags.get(2010 + i, ())
+        if len(values) == 9 and all(math.isfinite(v) for v in values):
+            matrices[name] = values
+    return matrices
+
+
 def auto_capture_settings(path):
     """Return a usable camera Auto illuminant and its recorded scene exposure."""
     tags = read_kodak_tags(path, (1019, 2011, 2012, 2121, 2122, 2125, 3110, 3122, 3125))
