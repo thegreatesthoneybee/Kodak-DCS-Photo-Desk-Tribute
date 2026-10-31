@@ -101,8 +101,8 @@ def main(folder, shot):
     w.acts[32815].trigger()                    # Balance > Auto
     assert entry.settings.balance == "auto" and entry.settings.auto_balance_wb is None
     if entry.path.name.upper() == "F5KG7096.DCR":
-        assert entry.settings.kelvin_mode == 5 and entry.settings.white_point == 4800
-        assert entry.settings.saved_balance_point == (2048, 2533, 1798)
+        assert entry.settings.kelvin_mode == 5 and entry.settings.white_point == 5200
+        assert entry.settings.saved_balance_point is None
     if entry.path.name.upper() == "GQ432034.DCR":
         assert entry.settings.kelvin_mode == 5 and entry.settings.white_point == 5000
     w.acts[57643].trigger()
@@ -110,10 +110,10 @@ def main(folder, shot):
     w.acts[32814].trigger()                    # Balance > Custom
     assert entry.settings.balance == "custom"
     if entry.path.name.upper() == "F5KG7096.DCR":
-        assert entry.settings.kelvin_mode == 4 and entry.settings.white_point == 6200
-        assert entry.settings.saved_balance_point == (696, 888, 532)
+        assert entry.settings.kelvin_mode == 4 and entry.settings.white_point == 5200
+        assert entry.settings.saved_balance_point is None
     if entry.path.name.upper() == "GQ432034.DCR":
-        assert entry.settings.kelvin_mode == 4 and entry.settings.white_point == 5800
+        assert entry.settings.kelvin_mode == 4 and entry.settings.white_point == 5000
     w.acts[57643].trigger()
     assert entry.settings.balance == "preset"
     if entry.path.name.upper() in ("F5KG7096.DCR", "GQ432034.DCR"):

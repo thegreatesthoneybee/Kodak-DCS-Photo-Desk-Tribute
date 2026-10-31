@@ -1029,6 +1029,26 @@ def test_auto_balance_uses_recorded_camera_point():
     assert pipeline.camera_auto_wb(raw) is None
 
 
+@pytest.mark.parametrize("balance,mode,low,high", [("auto", 5, 4000, 7500), ("custom", 4, 2500, 7000)])
+@pytest.mark.parametrize("initial", [2000, 5200, 8000])
+def test_pro_balance_mode_clamps_existing_temperature(balance, mode, low, high, initial):
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+
+    if not SLR_C_SAMPLE.is_file():
+        pytest.skip("camera sample not available")
+    raw = pipeline.decode(SLR_C_SAMPLE, half_size=True)
+    entry = SimpleNamespace(raw=raw, small=None)
+    settings = pipeline.Settings(balance=balance, lighting="Daylight", white_point=initial,
+                                 white_point_ref=initial, saved_balance_point=(2048, 2621, 1934))
+    MainWindow._set_balance_temperature(None, entry, settings)
+    assert settings.kelvin_mode == mode
+    assert settings.kelvin_illumination == "Daylight"
+    assert settings.white_point == settings.white_point_ref == max(low, min(high, initial))
+    assert settings.saved_balance_point is None
+    assert np.isfinite(pipeline.white_balance(raw, settings)).all()
+
+
 def test_auto_scene_does_not_change_settings_when_decode_fails(monkeypatch):
     from types import SimpleNamespace
     from photodesk.gui.app import MainWindow

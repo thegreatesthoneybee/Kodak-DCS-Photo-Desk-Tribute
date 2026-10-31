@@ -5,6 +5,7 @@ come from the original PhotoDsk.exe resources (parsed, never executed) and the
 official translation table, so the interface matches Photo Desk 4.3.
 """
 import functools
+import math
 import os
 import subprocess
 import sys
@@ -1509,20 +1510,21 @@ class MainWindow(QMainWindow):
                 return
         if s.balance == "auto" and scene_auto:
             s.auto_balance_wb = tuple(float(v) for v in pipeline.auto_wb(raw.camera_rgb))
-        elif raw.caps.pro_slr and s.balance == "auto":
-            calibration = pipeline.auto_kelvin_calibration(raw)
-            if calibration is not None:
-                s.kelvin_mode = 5
-                s.kelvin_illumination = raw.auto_kelvin_illumination
-                s.saved_balance_point = tuple(float(v) for v in pipeline.camera_auto_point(raw))
-        elif raw.caps.pro_slr and s.balance == "custom":
-            calibration = pipeline.custom_kelvin_calibration(raw)
-            if calibration is not None:
-                s.kelvin_mode = 4
-                s.kelvin_illumination = raw.custom_kelvin_illumination
-                s.saved_balance_point = tuple(int(v) for v in raw.balance_points["custom"])
-                s.white_point = s.white_point_ref = ((calibration[0] + 50) // 100) * 100
-                return
+        elif raw.caps.pro_slr and s.balance in ("auto", "custom"):
+            is_auto = s.balance == "auto"
+            calibration = (pipeline.auto_kelvin_calibration(raw) if is_auto
+                           else pipeline.custom_kelvin_calibration(raw))
+            illumination = raw.auto_kelvin_illumination if is_auto else raw.custom_kelvin_illumination
+            curve = raw.balance_curves.get(illumination)
+            if calibration is not None and curve is not None and len(curve) >= 27:
+                # The inspected SDK builds the mode bounds from the calibration illuminant's
+                # curve; actual runtime property initialization can still reject this record.
+                low, high = float(curve[24]), float(curve[26])
+                if math.isfinite(low) and math.isfinite(high) and 100 <= low <= high <= 11000:
+                    s.kelvin_mode = 5 if is_auto else 4
+                    s.kelvin_illumination = s.lighting
+                    s.white_point = s.white_point_ref = max(int(low), min(int(high), s.white_point))
+                    return
         s.white_point = s.white_point_ref = pipeline.balance_temperature(raw, s)
 
     def after_edit(self, changed):
