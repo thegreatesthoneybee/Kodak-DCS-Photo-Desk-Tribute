@@ -2202,8 +2202,13 @@ class MainWindow(QMainWindow):
                     setattr(s, f, getattr(cap, f))
                 self._restore_capture_balance(e, s, cap)
                 if e.caps.pro_slr:
-                    for f in ("rotation", "look", "noise_type", "noise_radius", "noise_strength", "noise_luma"):
+                    for f in ("exposure", "rotation", "look", "noise_type", "noise_radius", "noise_strength",
+                              "noise_luma"):
                         setattr(s, f, getattr(cap, f))
+                    # The native capture proposal disables tone and restores its reference curve.
+                    # This project currently models the Pro SLR reference with fixed defaults.
+                    s.tone = pipeline.PRO_SLR_TONE_REFERENCE
+                    s.tone_enabled = False
             self.after_edit(sw.sheet.apply(self._raw_selection(), "original", change))
 
     def auto_scene(self):

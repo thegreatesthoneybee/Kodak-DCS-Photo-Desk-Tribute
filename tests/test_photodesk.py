@@ -1541,8 +1541,10 @@ def test_capture_reset_uses_independent_calibrated_balance(
         assert result.color_balance == original.color_balance
         assert result.sharpen_amount == original.sharpen_amount
         assert result.tone == original.tone and result.crop == original.crop
+        assert result.tone_enabled == original.tone_enabled
     else:
-        assert result.exposure == original.exposure and result.tone == original.tone and result.crop == original.crop
+        assert result.exposure == 0.0 and result.tone == pipeline.PRO_SLR_TONE_REFERENCE
+        assert not result.tone_enabled and result.crop == original.crop
     after = result.to_json()
     assert sheet.undo() == [entry]
     assert entry.settings.to_json() == original.to_json()
