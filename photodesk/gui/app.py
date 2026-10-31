@@ -2170,8 +2170,8 @@ class MainWindow(QMainWindow):
                         return
                     s.lighting = raw.auto_kelvin_illumination
                     s.balance = "auto"
-                    # Auto Scene applies the cached Auto record, unlike the Balance > Auto
-                    # command, which clamps the currently edited temperature.
+                    # Approximate the cached Auto temperature from the calibration, rather
+                    # than reusing the edited temperature as Balance > Auto does.
                     s.white_point = ((calibration[0] + 50) // 100) * 100
                     self._set_balance_temperature(e, s)
                     s.exposure = exposure
