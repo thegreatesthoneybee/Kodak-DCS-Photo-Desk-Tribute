@@ -1469,11 +1469,8 @@ class MainWindow(QMainWindow):
                 if kind == "lighting" and fields.get("lighting") == s.lighting:
                     return
                 needs_balance = kind != "lighting" or s.kelvin_mode not in (4, 5, 6)
-                if needs_balance and e.raw is None and e.small is None:
-                    try:
-                        e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
-                    except Exception:
-                        return
+                if needs_balance and MainWindow._balance_raw(e) is None:
+                    return
                 for k, v in fields.items():
                     setattr(s, k, v)
                 if not needs_balance:
@@ -1502,18 +1499,25 @@ class MainWindow(QMainWindow):
             changed = sw.sheet.set_fields(entries, kind, **fields)
         self.after_edit(changed)
 
+    @staticmethod
+    def _balance_raw(e):
+        raw = e.raw or e.small
+        if raw is None:
+            try:
+                raw = e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
+            except Exception:
+                return None
+        return raw
+
     def _set_balance_temperature(self, e, s, scene_auto=False):
         """White Point slider shows the colour temperature of the new balance (and starts from it)."""
         s.kelvin_mode = None
         s.kelvin_illumination = None
         s.saved_balance_point = None
         s.auto_balance_wb = None
-        raw = e.raw or e.small
+        raw = MainWindow._balance_raw(e)
         if raw is None:
-            try:
-                raw = e.small = pipeline.reduced(pipeline.decode(e.path, half_size=True), THUMB_EDGE)
-            except Exception:
-                return
+            return
         if s.balance == "auto" and scene_auto:
             s.auto_balance_wb = tuple(float(v) for v in pipeline.auto_wb(raw.camera_rgb))
         elif raw.caps.pro_slr and s.balance in ("auto", "custom"):
@@ -2122,6 +2126,8 @@ class MainWindow(QMainWindow):
             return
 
         def change(e, s):
+            if MainWindow._balance_raw(e) is None:
+                return
             cap = pipeline.capture_settings(e.path)
             for f in ("balance", "lighting"):
                 setattr(s, f, getattr(cap, f))
@@ -2135,6 +2141,8 @@ class MainWindow(QMainWindow):
         sw = self.active_sheet()
         if sw:
             def change(e, s):
+                if MainWindow._balance_raw(e) is None:
+                    return
                 cap = pipeline.capture_settings(e.path)
                 for f in ("sharpen_amount", "sharpen_radius", "sharpen_threshold", "balance", "lighting",
                           "color_balance", "lens_optimization"):
