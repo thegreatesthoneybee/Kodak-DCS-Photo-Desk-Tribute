@@ -235,13 +235,59 @@ def apply_noise_preset(values, name, presets):
     return values
 
 
-def capture_settings(raw_path):
-    """at_capture() of a file, reading what the camera recorded in it."""
+def capture_settings(raw_path, raw=None):
+    """at_capture() of a file, reading what the camera recorded in it.
+
+    When a decoded Pro SLR RAW is supplied, valid calibration metadata can provide an approximate
+    capture Kelvin mode and slider value. This does not reconstruct the native capture snapshot.
+    """
     try:
         _, model = camera.read_make_model(raw_path)
-        return at_capture(camera.capture_info(raw_path, model))
+        info = camera.capture_info(raw_path, model)
+        settings = at_capture(info)
     except OSError:
         return Settings()
+    if raw is None or not raw.caps.pro_slr:
+        return settings
+    try:
+        source = camera.read_kodak_tags(raw_path, (1018,)).get(1018, ())
+    except OSError:
+        return settings
+    if len(source) != 1 or type(source[0]) is not int:
+        return settings
+
+    wb = info.get("white_balance")
+    if wb == "camera_auto" and source[0] == 1:
+        mode, calibration = 5, auto_kelvin_calibration(raw)
+        illumination = raw.auto_kelvin_illumination
+    elif wb == "custom" and source[0] == 0 and settings.balance == "custom":
+        mode, calibration = 4, custom_kelvin_calibration(raw)
+        illumination = raw.custom_kelvin_illumination
+    else:
+        return settings
+    if calibration is None:
+        return settings
+    curve = raw.balance_curves.get(illumination)
+    if curve is None or len(curve) != 27:
+        return settings
+    try:
+        low, high = int(curve[24]), int(curve[26])
+        temperature = int(calibration[0])
+    except (TypeError, ValueError, OverflowError, IndexError):
+        return settings
+    if not (100 <= low <= high <= 11000 and 100 <= temperature <= 11000):
+        return settings
+
+    # The native capture record is separate; use a rounded calibrated value only for the valid
+    # mode-specific RAW branch, rather than claiming this recreates its cached temperature word.
+    settings.balance = "auto" if mode == 5 else "custom"
+    settings.lighting = illumination
+    settings.kelvin_mode = mode
+    settings.kelvin_illumination = illumination
+    settings.white_point = settings.white_point_ref = max(low, min(high, (temperature + 50) // 100 * 100))
+    settings.saved_balance_point = None
+    settings.auto_balance_wb = None
+    return settings
 
 
 def load_settings(raw_path):

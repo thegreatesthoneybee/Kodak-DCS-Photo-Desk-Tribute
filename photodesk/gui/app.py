@@ -1547,6 +1547,16 @@ class MainWindow(QMainWindow):
                     return
         s.white_point = s.white_point_ref = pipeline.balance_temperature(raw, s)
 
+    def _restore_capture_balance(self, e, s, capture):
+        """Apply a validated capture-balance approximation, or retain the existing fallback."""
+        if capture.kelvin_mode in (4, 5):
+            for field in ("balance", "lighting", "white_point", "white_point_ref", "kelvin_mode",
+                          "kelvin_illumination", "saved_balance_point", "auto_balance_wb"):
+                setattr(s, field, getattr(capture, field))
+            return
+        s.balance, s.lighting = capture.balance, capture.lighting
+        self._set_balance_temperature(e, s)
+
     def after_edit(self, changed):
         if changed:
             self._click_balance_generation = getattr(self, "_click_balance_generation", 0) + 1
@@ -1900,8 +1910,10 @@ class MainWindow(QMainWindow):
         raw = entry.raw if entry.raw is not None and not thumb else entry.small
         if raw is None:
             return
+        serial = entry.serial
+        entries = [e for e in self.selection() if e.is_raw and
+                   (e is entry or (serial and e.serial == serial))]
         if getattr(getattr(raw, "caps", None), "pro_slr", False):
-            entries = [e for e in self.selection() if e.is_raw and e.serial == entry.serial]
             if not entries:
                 return
             sheet = self.active_sheet()
@@ -1940,7 +1952,6 @@ class MainWindow(QMainWindow):
             return
         # Applied to the selected images captured on the same camera (same serial number) as the
         # clicked image, which may itself be an unselected reference (gray card) shot.
-        entries = [e for e in self.selection() if e.is_raw and e.serial == entry.serial]
         self.edit("click_balance", entries, balance="click", click_wb=wb)
 
     def show_closeup(self, entry, x, y):
@@ -2160,7 +2171,7 @@ class MainWindow(QMainWindow):
         self.edit("balance", entries, balance=bal)
 
     def balance_at_capture(self, entries=None):
-        """Balance > At Capture: balance method, lighting and white point as the camera set them."""
+        """Restore the recorded balance selection and use a calibrated Kelvin approximation when valid."""
         sw = self.active_sheet()
         entries = [e for e in (entries if entries is not None else self.selection()) if e.is_raw]
         if not sw or not entries:
@@ -2168,12 +2179,11 @@ class MainWindow(QMainWindow):
             return
 
         def change(e, s):
-            if MainWindow._balance_raw(e) is None:
+            raw = MainWindow._balance_raw(e)
+            if raw is None:
                 return
-            cap = pipeline.capture_settings(e.path)
-            for f in ("balance", "lighting"):
-                setattr(s, f, getattr(cap, f))
-            self._set_balance_temperature(e, s)
+            cap = pipeline.capture_settings(e.path, raw)
+            self._restore_capture_balance(e, s, cap)
         changed = sw.sheet.apply(entries, "balance", change)
         self.after_edit(changed)
         if not changed:
@@ -2183,13 +2193,15 @@ class MainWindow(QMainWindow):
         sw = self.active_sheet()
         if sw:
             def change(e, s):
-                if MainWindow._balance_raw(e) is None:
+                raw = MainWindow._balance_raw(e)
+                if raw is None:
                     return
-                cap = pipeline.capture_settings(e.path)
+                cap = pipeline.capture_settings(e.path, raw)
                 for f in ("sharpen_amount", "sharpen_radius", "sharpen_threshold", "balance", "lighting",
                           "color_balance", "lens_optimization"):
-                    setattr(s, f, getattr(cap, f))
-                self._set_balance_temperature(e, s)
+                    if f not in ("balance", "lighting"):
+                        setattr(s, f, getattr(cap, f))
+                self._restore_capture_balance(e, s, cap)
                 if e.caps.pro_slr:
                     for f in ("rotation", "look", "noise_type", "noise_radius", "noise_strength", "noise_luma"):
                         setattr(s, f, getattr(cap, f))

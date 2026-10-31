@@ -32,6 +32,10 @@ PASTE_GROUPS = {
 }
 ALL_FIELDS = tuple(f for g in PASTE_GROUPS.values() for f in g)
 FINISHED_FIELDS = ("crop", "rotation", "iptc", "tagged")
+CLICK_BALANCE_FIELDS = frozenset((
+    "balance", "click_wb", "auto_balance_wb", "lighting", "white_point", "white_point_ref",
+    "kelvin_mode", "kelvin_illumination", "saved_balance_point",
+))
 
 
 @dataclasses.dataclass
@@ -112,7 +116,8 @@ def paste_into(entry, settings, source, fields, source_serial):
     for f in fields:
         if not entry.is_raw and f not in FINISHED_FIELDS:
             continue
-        if f in ("click_wb", "balance") and source.balance == "click" and entry.serial != source_serial:
+        if (f in CLICK_BALANCE_FIELDS and source.balance == "click" and
+                (not source_serial or entry.serial != source_serial)):
             continue
         setattr(settings, f, getattr(source, f))
 

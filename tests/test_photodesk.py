@@ -1460,6 +1460,117 @@ def test_capture_reset_keeps_original_settings_on_decode_failure(tmp_path, monke
     assert not entry.dirty and not sheet.undo_stack and not refreshed
 
 
+def _capture_balance_raw():
+    from types import SimpleNamespace
+
+    curves = {}
+    for illumination in ("Daylight", "Tungsten"):
+        curve = [0.0] * 27
+        curve[24], curve[25], curve[26] = 2500.0, 5000.0, 7500.0
+        curves[illumination] = curve
+    return SimpleNamespace(caps=camera.capabilities("DCS Pro SLR/c"),
+                           auto_kelvin_illumination="Daylight", custom_kelvin_illumination="Tungsten",
+                           balance_curves=curves)
+
+
+@pytest.mark.skipif(not SLR_C_SAMPLE.is_file(), reason="Pro SLR/c sample not available")
+def test_f5_capture_balance_uses_valid_recorded_auto_calibration():
+    raw = pipeline.decode(SLR_C_SAMPLE, half_size=True)
+    capture = pipeline.capture_settings(SLR_C_SAMPLE, raw)
+    assert (capture.balance, capture.kelvin_mode, capture.kelvin_illumination) == ("auto", 5, "Daylight")
+    assert capture.white_point == capture.white_point_ref == 4800
+    assert capture.saved_balance_point is None
+    assert np.isfinite(pipeline.white_balance(raw, capture)).all()
+
+
+def _stub_capture_balance_metadata(monkeypatch, white_balance, source):
+    monkeypatch.setattr(camera, "read_make_model", lambda _path: ("Kodak", "DCS Pro SLR/c"))
+    monkeypatch.setattr(camera, "capture_info", lambda _path, model: {
+        "model": model, "white_balance": white_balance,
+    })
+    monkeypatch.setattr(camera, "read_kodak_tags", lambda _path, tags: {1018: source} if 1018 in tags else {})
+
+
+@pytest.mark.parametrize("command", ["balance_at_capture", "original_settings"])
+@pytest.mark.parametrize("initial_temperature", [2300, 7200])
+@pytest.mark.parametrize("white_balance,source,mode,illumination,calibrated,expected_temperature", [
+    ("camera_auto", (1,), 5, "Daylight", "auto", 4800),
+    ("custom", (0,), 4, "Tungsten", "custom", 6200),
+])
+def test_capture_reset_uses_independent_calibrated_balance(
+        tmp_path, monkeypatch, command, initial_temperature, white_balance, source, mode, illumination,
+        calibrated, expected_temperature):
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+    from photodesk.gui.model import Entry, Sheet
+
+    raw = _capture_balance_raw()
+    _stub_capture_balance_metadata(monkeypatch, white_balance, source)
+    calls = []
+    monkeypatch.setattr(pipeline, "auto_kelvin_calibration",
+                        lambda _raw: calls.append("auto") or (4818, (1.0, 1.0, 1.0)))
+    monkeypatch.setattr(pipeline, "custom_kelvin_calibration",
+                        lambda _raw: calls.append("custom") or (6174, (1.0, 1.0, 1.0)))
+
+    original = pipeline.Settings(
+        balance="auto", lighting="Flash", white_point=initial_temperature, white_point_ref=initial_temperature,
+        kelvin_mode=5, kelvin_illumination="Flash", saved_balance_point=(2048, 2500, 1800),
+        auto_balance_wb=(1.2, 1.0, 0.9), exposure=0.75, color_balance=(2, -3, 4),
+        sharpen_amount=17, tone=(-5.0, 0.0, 3.0), crop=(0.1, 0.2, 0.8, 0.9), rotation=2,
+    )
+    entry = Entry(tmp_path / "capture.DCR", original, model="DCS Pro SLR/c", raw=raw)
+    sheet = Sheet(tmp_path)
+    changed = []
+    window = SimpleNamespace(active_sheet=lambda: SimpleNamespace(sheet=sheet), selection=lambda: [entry],
+                             _raw_selection=lambda: [entry], after_edit=lambda entries: changed.extend(entries),
+                             _set_balance_temperature=lambda *_: pytest.fail("calibrated capture used fallback"))
+    window._restore_capture_balance = lambda e, s, cap: MainWindow._restore_capture_balance(window, e, s, cap)
+
+    getattr(MainWindow, command)(window)
+
+    result = entry.settings
+    assert result.balance == calibrated
+    assert result.lighting == result.kelvin_illumination == illumination
+    assert result.kelvin_mode == mode
+    assert result.white_point == result.white_point_ref == expected_temperature
+    assert result.saved_balance_point is None and result.auto_balance_wb is None
+    assert calls == [calibrated]
+    assert changed == [entry]
+    if command == "balance_at_capture":
+        assert result.exposure == original.exposure
+        assert result.color_balance == original.color_balance
+        assert result.sharpen_amount == original.sharpen_amount
+        assert result.tone == original.tone and result.crop == original.crop
+    else:
+        assert result.exposure == original.exposure and result.tone == original.tone and result.crop == original.crop
+    after = result.to_json()
+    assert sheet.undo() == [entry]
+    assert entry.settings.to_json() == original.to_json()
+    assert sheet.redo() == [entry]
+    assert entry.settings.to_json() == after
+
+
+@pytest.mark.parametrize("source,calibration", [((2,), (4818, (1, 1, 1))), ((1, 1), (4818, (1, 1, 1))),
+                                                  ((1,), None)])
+def test_capture_auto_keeps_legacy_fallback_without_valid_calibration(tmp_path, monkeypatch, source, calibration):
+    from types import SimpleNamespace
+    from photodesk.gui.app import MainWindow
+
+    raw = _capture_balance_raw()
+    _stub_capture_balance_metadata(monkeypatch, "camera_auto", source)
+    monkeypatch.setattr(pipeline, "auto_kelvin_calibration", lambda _raw: calibration)
+    capture = pipeline.capture_settings(tmp_path / "capture.DCR", raw)
+    assert capture.balance == "preset" and capture.kelvin_mode is None
+    # The no-RAW API retains its historical tag-1020 mapping rather than guessing Auto.
+    assert pipeline.capture_settings(tmp_path / "capture.DCR").balance == "preset"
+
+    settings = pipeline.Settings(balance="custom", white_point=6800, white_point_ref=6800)
+    fallback = []
+    window = SimpleNamespace(_set_balance_temperature=lambda _e, s: fallback.append(s.white_point))
+    MainWindow._restore_capture_balance(window, object(), settings, capture)
+    assert settings.balance == "preset" and fallback == [6800]
+
+
 def test_pro_slr_click_balance_roi_is_even_aligned_and_bounded():
     cam = np.zeros((32, 34, 3), dtype=np.float32)
     cam[..., 0] = np.arange(34, dtype=np.float32)[None, :]
@@ -1529,6 +1640,11 @@ def test_click_balance_does_not_edit_an_unselected_reference(monkeypatch):
     MainWindow.click_balance(window, reference, 0.5, 0.5)
     assert edits[-1][0][1] == [matching]
     assert clicks[-1][1:] == (8, 8, 1)
+    reference.serial = None
+    unknown = SimpleNamespace(is_raw=True, serial=None)
+    window.selection = lambda: [reference, unknown]
+    MainWindow.click_balance(window, reference, 0.5, 0.5)
+    assert edits[-1][0][1] == [reference]
 
 
 def test_pro_slr_thumbnail_click_uses_full_decode_and_preserves_camera_selection(monkeypatch, tmp_path):
@@ -2148,6 +2264,28 @@ def test_jpeg_upscale_cubic_overshoot_saturates(tmp_path):
     # would instead turn these overshoots into dark and bright values, respectively.
     assert actual[peak].min() > 160
     assert actual[trough].max() < 95
+
+
+@pytest.mark.parametrize("target_serial,source_serial,allowed", [
+    ("camera-a", "camera-a", True), ("camera-b", "camera-a", False), (None, None, False),
+])
+def test_paste_click_balance_requires_matching_known_camera(target_serial, source_serial, allowed):
+    from types import SimpleNamespace
+    from photodesk.gui.model import PASTE_GROUPS, paste_into
+
+    source = pipeline.Settings(balance="click", click_wb=(1.3, 1.0, 1.4), lighting="Tungsten",
+                               white_point=4500, white_point_ref=4500, kelvin_mode=6,
+                               kelvin_illumination="Tungsten", saved_balance_point=(2048, 2500, 1800),
+                               color_balance=(3, 4, 5))
+    destination = pipeline.Settings(balance="preset", lighting="Daylight", white_point=5500,
+                                    white_point_ref=5500, kelvin_mode=0, kelvin_illumination="Daylight")
+    before = destination.copy()
+    paste_into(SimpleNamespace(is_raw=True, serial=target_serial), destination, source,
+               PASTE_GROUPS[1344], source_serial)
+    assert destination.color_balance == source.color_balance
+    for field in ("balance", "click_wb", "lighting", "white_point", "white_point_ref", "kelvin_mode",
+                  "kelvin_illumination", "saved_balance_point"):
+        assert getattr(destination, field) == getattr(source if allowed else before, field)
 
 
 def test_sheet_undo_redo_rename_paste(tmp_path):
