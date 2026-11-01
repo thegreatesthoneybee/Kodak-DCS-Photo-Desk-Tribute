@@ -1151,8 +1151,13 @@ def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False):
 
 # Gain between Linear Mode output and the source-profile input of Pro SLR RGB rendering, fitted
 # (2^(1/16)) on original Photo Desk sRGB/Linear export pairs of the same SLR/n image at EV 0 and +1;
-# 5000 K, 5500 K and Tungsten exports agree. The native stage is presumed to be the renderer's
-# exposure table (ipApplyExposureTable), whose generating parameters are not yet decoded.
+# 5000 K, 5500 K and Tungsten exports agree. Static analysis of DCSPro4SLR.dll shows the gain is
+# not an exposure-table term: the native RGB route is tone table (ipApplyExposureTable, offset
+# 8.533673272, unity output scale outside mode 3) -> tag 2020-2023 matrix (ipUniqueMat) -> built-in
+# ERIMM table, with no extra gain. Matching our source-profile route to that native ERIMM signal
+# needs 2^0.04 (1.027-1.031 over all four lightings, EV -1..+1); the remaining ~2^0.02 belongs to
+# a later, unidentified stage, since the native route fed with native Linear exports still needs
+# per-channel gains (1.025, 1.011, 1.011) to reach the original sRGB exports.
 PRO_SLR_RGB_GAIN = 2.0 ** (1 / 16)
 
 
