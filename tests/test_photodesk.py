@@ -1999,9 +1999,11 @@ def _coordinate_image(height, width):
     return np.stack((x, y, x + y), axis=-1).astype(np.uint16)
 
 
-def _normalise_test_image(image):
+def _normalise_test_image(image, model="DCS Pro SLR/n"):
     image = image.astype(np.float32)
     image *= np.float32(1 / 65535)
+    if model in pipeline.PRO_SLR_SENSOR_GAINS:
+        image *= pipeline.PRO_SLR_SENSOR_GAINS[model]
     return image
 
 
@@ -2057,7 +2059,7 @@ def test_decode_crop_offsets_are_relative_to_visible_area(monkeypatch):
     decoded = pipeline.decode("synthetic.dcr")
 
     np.testing.assert_array_equal(decoded.camera_rgb,
-                                  _normalise_test_image(image[2:4, 2:6]))
+                                  _normalise_test_image(image[2:4, 2:6], "DCS Pro SLR/c"))
     assert decoded.metadata["width"] == 4 and decoded.metadata["height"] == 2
 
 
@@ -2277,14 +2279,15 @@ def test_rgb_render_matches_optional_native_srgb_samples(profile_dir):
                                  white_point_ref=5000, tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
     for reference, fields in references:
         # Compared at a quarter of full size, which averages out most of the remaining
-        # LibRaw AHD versus Kodak demosaic differences; measured RMSE is about .011-.012.
+        # LibRaw AHD versus Kodak demosaic differences; measured RMSE is about .0092 (native
+        # Linear exports fed through the same chain reach .0034-.0035).
         size = (raw.camera_rgb.shape[1] // 2, raw.camera_rgb.shape[0] // 2)
         source = tifffile.imread(reference)
         expected = cv2.resize(source.astype(np.float32) / 65535.0, size, interpolation=cv2.INTER_AREA)
         image = pipeline.render(raw, settings.copy(**fields), profile_directory=profile_dir, quality="faster")
         image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
         rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-        assert rmse < 0.014, f"{reference.name} sRGB RMSE {rmse:.5f}"
+        assert rmse < 0.010, f"{reference.name} sRGB RMSE {rmse:.5f}"
 
 
 def test_color_matrices_read_from_slrn_sample():

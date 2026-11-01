@@ -27,7 +27,8 @@ import rawpy
 
 from . import camera, icc, profiles
 
-LUT_SIZE = 65
+# 129^3 keeps trilinear error of the baked colour chain near 0.001 RMS (65^3: ~0.003).
+LUT_SIZE = 129
 LUT_INPUT_GAMMA = 2.2  # LUT is indexed by lin ** (1/2.2) for shadow precision
 # Camera value of an 18% grey in the Kodak source profiles (L* 57.3 scene grey,
 # Photo Desk's "midpoint gray").  Exposure/tone EV are relative to this level.
@@ -408,6 +409,14 @@ def _crop_rendered_image(image, crop, visible_width, visible_height):
     return image[py0:py1, px0:px1]
 
 
+# Per-channel gains between LibRaw's demosaiced camera RGB and the samples behind original Photo
+# Desk Linear Mode exports, measured (median ratio after inverting tone and the lighting matrix) on
+# eleven SLR/n exports spanning EV -1.5..+2, 3200-7500 K, all lightings, Colour Balance and Custom
+# balance; spread +-0.001 on G and +-0.002 on B. LibRaw preserves local CFA means, so the native
+# source of the offset is not identified. Click Balance divides it out.
+PRO_SLR_SENSOR_GAINS = {"DCS Pro SLR/n": np.array([1.0, 0.9975, 1.009], np.float32)}
+
+
 def decode(path, half_size=False, algorithm="AHD"):
     path = Path(path)
     make, model = camera.read_make_model(path)
@@ -427,6 +436,8 @@ def decode(path, half_size=False, algorithm="AHD"):
             cam = _crop_rendered_image(cam, crop, visible_w, visible_h)
         cam = cam.astype(np.float32)
         cam *= np.float32(1 / 65535)
+        if model in PRO_SLR_SENSOR_GAINS:
+            cam *= PRO_SLR_SENSOR_GAINS[model]
         daylight = np.array(r.daylight_whitebalance[:3], np.float64)
         if not np.all(daylight > 0):
             daylight = np.ones(3)
