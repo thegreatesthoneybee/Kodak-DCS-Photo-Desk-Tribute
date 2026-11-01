@@ -19,6 +19,8 @@ INSTALLER = Path(os.environ.get("PHOTODESK_INSTALLER", ROOT / "vendor/original/P
 SAMPLE = Path(os.environ.get("PHOTODESK_SAMPLE", ROOT / "raw/ProBack645/4H6B9130.DCR"))
 SLR_C_SAMPLE = ROOT / "raw/SLRc/F5KG7096.DCR"
 SLR_N_SAMPLE = ROOT / "raw/SLRn/GQ432034.DCR"
+if os.environ.get("PHOTODESK_SLRN_SAMPLE"):     # e.g. a copy while Photo Desk holds the original open
+    SLR_N_SAMPLE = Path(os.environ["PHOTODESK_SLRN_SAMPLE"])
 PRO14N_SAMPLE = ROOT / "raw/14n/CX458821.DCR"
 
 need_installer = pytest.mark.skipif(not INSTALLER.is_file(), reason="Photo Desk installer not available")
@@ -352,7 +354,7 @@ def test_saved_kelvin_tuple_normalizes_preset_illumination(tmp_path, monkeypatch
 
 
 def test_stored_process_levels_from_slrn_sample(tmp_path):
-    sample = ROOT / "raw/SLRn/GQ432034.DCR"
+    sample = SLR_N_SAMPLE
     if not sample.is_file():
         pytest.skip("SLR/n sample not available")
     # A copy without the user's sidecar, so only the camera-recorded settings are read.
@@ -563,7 +565,7 @@ def test_auto_kelvin_calibration_requires_valid_metadata(monkeypatch):
 
 @pytest.mark.parametrize("path,illumination,temperature,factors,point", [
     (ROOT / "raw/SLRc/F5KG7096.DCR", "Fluorescent", 6174, (1, 0.98863626, 0.87797266), (2048, 2579, 1529)),
-    (ROOT / "raw/SLRn/GQ432034.DCR", "Daylight", 5782, (1, 0.97900057, 0.94161063), (2048, 2764, 1994)),
+    (SLR_N_SAMPLE, "Daylight", 5782, (1, 0.97900057, 0.94161063), (2048, 2764, 1994)),
 ])
 def test_custom_kelvin_calibration_from_capture(path, illumination, temperature, factors, point):
     if not path.is_file():
@@ -2117,7 +2119,7 @@ def test_pro_slr_crop_matches_optional_tiff_reference():
     import tifffile
 
     reference = ROOT / "raw/sample_tiff/GQ432034.tif"
-    source = ROOT / "raw/SLRn/GQ432034.DCR"
+    source = SLR_N_SAMPLE
     if not reference.is_file() or not source.is_file():
         pytest.skip("Pro SLR/n sample RAW or golden TIFF not available")
     with tifffile.TiffFile(reference) as tiff:
@@ -2166,6 +2168,35 @@ def test_linear_render_matches_optional_native_tiff_samples():
         assert rmse < rmse_limit, f"{reference.name} linear-domain RMSE {rmse:.5f} exceeds {rmse_limit}"
 
 
+def test_linear_render_matches_optional_native_control_samples(tmp_path):
+    import cv2
+    import tifffile
+
+    # Original Linear Mode exports of GQ432034.DCR, each changing one control from Daylight preset
+    # 5000 K, EV 0, tone (-9.5, -0.2, 4.0), colour balance 0, no lens/noise/sharpening.
+    cases = (("minus1.5.tif", {"exposure": -1.5}), ("plus2.0.tif", {"exposure": 2.0}),
+             ("4000K.tif", {"white_point": 4000, "white_point_ref": 4000}),
+             ("7500K.tif", {"white_point": 7500, "white_point_ref": 7500}),
+             ("R50B-50.tif", {"color_balance": (50, 0, -50)}),
+             ("tone_s-8_m+8_h+3.tif", {"tone": (-8.0, 0.5, 3.0)}),
+             ("텅스텐.tif", {"lighting": "Tungsten", "white_point": 3200, "white_point_ref": 3200}),
+             ("형광등.tif", {"lighting": "Fluorescent"}),
+             ("플래쉬.tif", {"lighting": "Flash", "white_point": 5500, "white_point_ref": 5500}))
+    folder = ROOT / "raw/sample_tiff/test1"
+    if not SLR_N_SAMPLE.is_file() or not all((folder / name).is_file() for name, _ in cases):
+        pytest.skip("Pro SLR/n sample RAW and the control TIFF references are required")
+    raw = pipeline.decode(SLR_N_SAMPLE, half_size=True)
+    settings = pipeline.Settings(balance="preset", lighting="Daylight", white_point=5000,
+                                 white_point_ref=5000, tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
+    for name, fields in cases:
+        expected = cv2.resize(tifffile.imread(folder / name).astype(np.float32) / 65535.0,
+                              (raw.camera_rgb.shape[1], raw.camera_rgb.shape[0]), interpolation=cv2.INTER_AREA)
+        image = pipeline.render(raw, settings.copy(**fields), quality="faster", linear=True)
+        rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
+        # Measured RMSE is .0013-.0045; the remainder is LibRaw AHD versus Kodak's demosaic.
+        assert rmse < 0.006, f"{name} linear-domain RMSE {rmse:.5f}"
+
+
 def test_pro_slr_scene_applies_camera_matrix_after_clipped_balance(monkeypatch):
     from types import SimpleNamespace
     matrix = (1.25, -0.25, 0.0, 0.0, 1.0, 0.0, -0.5, 0.0, 1.5)
@@ -2205,8 +2236,7 @@ def test_rgb_render_matches_optional_native_srgb_samples(profile_dir):
     import cv2
     import tifffile
 
-    cases = (("srgb_ev0.tif", {}), ("srgb_ev1.tif", {"exposure": 1.0}),
-             ("5500k.tif", {"white_point": 5500, "white_point_ref": 5500}))
+    cases = (("srgb_ev0.tif", {}), ("srgb_ev1.tif", {"exposure": 1.0}))
     references = [(ROOT / "raw/sample_tiff" / name, fields) for name, fields in cases]
     if not SLR_N_SAMPLE.is_file() or not all(path.is_file() for path, _ in references):
         pytest.skip("Pro SLR/n sample RAW and the sRGB TIFF references are required")
