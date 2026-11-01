@@ -327,6 +327,18 @@ def color_matrices(path):
     return matrices
 
 
+def unique_matrices(path):
+    """Per-illuminant 3x3 matrices (Kodak tags 2020-2023) that the Pro SLR RGB renderer applies to
+    toned camera RGB before its ERIMM table (ipUniqueMat, scene +0x57c)."""
+    tags = read_kodak_tags(path, (2020, 2021, 2022, 2023))
+    matrices = {}
+    for i, name in enumerate(ILLUMINANTS):
+        values = tags.get(2020 + i, ())
+        if len(values) == 9 and all(math.isfinite(v) for v in values):
+            matrices[name] = values
+    return matrices
+
+
 def auto_capture_settings(path):
     """Return a usable camera Auto illuminant and its recorded scene exposure."""
     tags = read_kodak_tags(path, (1019, 2011, 2012, 2121, 2122, 2125, 3110, 3122, 3125))

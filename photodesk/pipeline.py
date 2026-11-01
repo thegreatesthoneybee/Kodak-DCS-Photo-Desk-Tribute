@@ -360,6 +360,8 @@ class RawImage:
     white_level: float = None   # LibRaw's sensor white level that camera_rgb is normalized by
     # Camera 3x3 colour matrices per lighting (Kodak tags 2010-2013) for Pro SLR rendering.
     color_matrices: dict = dataclasses.field(default_factory=dict)
+    # Per-lighting matrices of the Pro SLR RGB route (Kodak tags 2020-2023, ipUniqueMat).
+    unique_matrices: dict = dataclasses.field(default_factory=dict)
 
     @property
     def caps(self):
@@ -469,7 +471,8 @@ def decode(path, half_size=False, algorithm=None):
                     camera.balance_points(path), camera.balance_curves(path), camera.balance_factors(path),
                     auto_illumination, camera.custom_kelvin_illumination(path), auto_exposure,
                     camera.lens_optimization_baseline(path, model), white_level,
-                    camera.color_matrices(path) if camera.capabilities(model).pro_slr else {})
+                    camera.color_matrices(path) if camera.capabilities(model).pro_slr else {},
+                    camera.unique_matrices(path) if camera.capabilities(model).pro_slr else {})
 
 
 def reduced(raw, long_edge):
@@ -970,13 +973,7 @@ def tone_curve(raw, settings, space=DISPLAY_SPACE, profile_directory=None, n=256
     render_settings = settings.copy(exposure=0)
     wb = white_balance(raw, render_settings).astype(np.float32)
     camera_rgb = (scene[:, None] / wb[None, :])[None, :, :]
-    source = source_profile_for(raw, render_settings, pdir)
-    lin = (profile_input(raw, render_settings, camera_rgb) if source
-           else scene_linear(raw, render_settings, camera_rgb=camera_rgb))
-    if source is None:
-        lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
-    lut = color_lut(source, render_settings.look, resolve_space(space, pdir), pdir)
-    rgb = icc.trilinear(lut, lin, power=1 / LUT_INPUT_GAMMA)[0]
+    rgb = _rgb_render(raw, render_settings, space, pdir, camera_rgb)[0]
     return ev, rgb @ np.array([0.299, 0.587, 0.114], np.float32)
 
 
@@ -1088,15 +1085,49 @@ def color_lut(source_name, look_name, space_path, profile_directory):
     else:
         erimm = erimm_encode(scene_xyz @ XYZ50_TO_PROPHOTO.T.astype(np.float32))
     out_lab = _profile(str(look_path(look_name, d))).lut("A2B0")(erimm)
-    tone_profiles = (("DCSProSLRn", "DCSProSLRnToneCurve.icm"),
-                     ("DCSProSLRc", "DCSProSLRcToneCurve.icm"),
-                     ("DCSPro14", "DCSPro14ToneCurve.icm"))
-    tone_profile = next((name for prefix, name in tone_profiles if source_name and source_name.startswith(prefix)), None)
+    tone_profile = _tone_profile(source_name)
     if tone_profile:
+        out_lab = np.clip(out_lab * _ABSTRACT_LAB_INPUT, 0, 1)
         out_lab = _profile(str(d / tone_profile)).lut("A2B0")(out_lab)
     out_xyz = icc.lab_to_xyz(icc.lab_decode(out_lab))
     rgb = _profile(space_path).encoder()(out_xyz)
     return np.clip(rgb, 0, 1).astype(np.float32).reshape(LUT_SIZE, LUT_SIZE, LUT_SIZE, 3)
+
+
+# Kodak CMS reads Lab entering an abstract profile on the full 16-bit range (L* 0..100 over
+# 0..65535, a*/b* over 0..65535 for -128..127) while profile PCS output uses ICC v2 encoding
+# (L* over 0..65280, a*/b* in 1/256 steps); kodakcms.dll carries the 65535/65280 and 255/256
+# conversion constants. Re-encoding at that hop cuts SLR/n sRGB error from .0056 to .0036 when
+# the chain is fed with original Linear exports.
+_ABSTRACT_LAB_INPUT = np.array([65535 / 65280, 256 / 255, 256 / 255], np.float32)
+
+
+@functools.lru_cache(maxsize=16)
+def erimm_lut(look_name, tone_profile, space_path, profile_directory):
+    """Bake ERIMM -> Look -> camera tone profile -> working space into a LUT_SIZE^3 table indexed
+    by ERIMM code values (the Pro SLR renderer's own ERIMM output)."""
+    d = Path(profile_directory)
+    g = np.linspace(0, 1, LUT_SIZE, dtype=np.float32)
+    erimm = np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3)
+    out_lab = _profile(str(look_path(look_name, d))).lut("A2B0")(erimm)
+    if tone_profile:
+        out_lab = np.clip(out_lab * _ABSTRACT_LAB_INPUT, 0, 1)
+        out_lab = _profile(str(d / tone_profile)).lut("A2B0")(out_lab)
+    rgb = _profile(space_path).encoder()(icc.lab_to_xyz(icc.lab_decode(out_lab)))
+    return np.clip(rgb, 0, 1).astype(np.float32).reshape(LUT_SIZE, LUT_SIZE, LUT_SIZE, 3)
+
+
+def _tone_profile(source_name):
+    tone_profiles = (("DCSProSLRn", "DCSProSLRnToneCurve.icm"),
+                     ("DCSProSLRc", "DCSProSLRcToneCurve.icm"),
+                     ("DCSPro14", "DCSPro14ToneCurve.icm"))
+    return next((name for prefix, name in tone_profiles if source_name and source_name.startswith(prefix)), None)
+
+
+# Pro SLR 12-bit code -> 12-bit ERIMM table built into DCSPro3SLR/DCSPro4SLR/DCSProBack.dll
+# (DCSPro4SLR .data 0x66035bd8). It is the ERIMM encoding of code/4095 scaled by 1.989, rounded:
+# that form reproduces 4095 of its 4096 entries (code 2 gives 116 where the DLL stores 115).
+PRO_SLR_ERIMM_SCALE = 1.989
 
 
 def erimm_encode(scene):
@@ -1110,6 +1141,19 @@ def erimm_encode(scene):
     return np.where(s <= e_t, low, high).astype(np.float32)
 
 
+def _pro_slr_erimm_table():
+    e_min, e_clip = 0.001, 10 ** 2.5
+    e_t = np.e * e_min
+    den = np.log10(e_clip) - np.log10(e_min)
+    s = np.arange(4096) / 4095 * PRO_SLR_ERIMM_SCALE
+    encoded = np.where(s <= e_t, (np.log10(e_t) - np.log10(e_min)) / den * s / e_t,
+                       (np.log10(np.maximum(s, e_t)) - np.log10(e_min)) / den)
+    return (np.floor(encoded * 4095 + 0.5) / 4095).astype(np.float32)
+
+
+PRO_SLR_ERIMM_TABLE = _pro_slr_erimm_table()
+
+
 # ---------------------------------------------------------------------- render
 def source_profile_for(raw, settings, profile_directory):
     source = camera.source_profile(raw.model, settings.lighting)
@@ -1118,12 +1162,13 @@ def source_profile_for(raw, settings, profile_directory):
     return source
 
 
-def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False):
+def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False, matrix=True):
     """White-balanced camera RGB with exposure and tone applied (float32, clipped to 1).
 
     ``camera_rgb`` optionally supplies samples while retaining ``raw`` as the balance/driver context.
     ``sensor_codes`` expresses Pro SLR samples on the 12-bit code scale (code / 4095) instead of
-    LibRaw's white-level normalization, as the original Linear Mode TIFFs do.
+    LibRaw's white-level normalization, as the original Linear Mode TIFFs do. ``matrix`` False
+    skips the Linear Mode (tag 2010-2013) matrix, for the RGB route that applies its own after tone.
     """
     cam = raw.camera_rgb if camera_rgb is None else camera_rgb
     lin = cam * white_balance(raw, settings).astype(np.float32)
@@ -1131,12 +1176,12 @@ def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False):
     if raw.caps.pro_slr:
         if sensor_codes and getattr(raw, "white_level", None):
             lin *= np.float32(raw.white_level / 4095)
-        matrix = getattr(raw, "color_matrices", {}).get(settings.lighting)
-        if matrix is not None:
+        deviant = getattr(raw, "color_matrices", {}).get(settings.lighting) if matrix else None
+        np.clip(lin, 0, 1, out=lin)
+        if deviant is not None:
             # ipDeviantMat: balanced, clipped 12-bit RGB times the camera's illuminant matrix,
             # clipped again before the tone table.
-            np.clip(lin, 0, 1, out=lin)
-            lin = lin @ np.asarray(matrix, np.float32).reshape(3, 3).T
+            lin = lin @ np.asarray(deviant, np.float32).reshape(3, 3).T
         if settings.tone_enabled and any(abs(float(np.float32(value)) - reference) > PRO_SLR_TONE_THRESHOLD
                for value, reference in zip(settings.tone, PRO_SLR_TONE_REFERENCE)):
             indices = np.floor(np.clip(lin, 0, 1) * 4095 + 0.5).astype(np.uint16)
@@ -1149,24 +1194,32 @@ def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False):
     return np.clip(lin, 0, 1, out=lin)
 
 
-# Gain between Linear Mode output and the source-profile input of Pro SLR RGB rendering, fitted
-# (2^(1/16)) on original Photo Desk sRGB/Linear export pairs of the same SLR/n image at EV 0 and +1;
-# 5000 K, 5500 K and Tungsten exports agree. Static analysis of DCSPro4SLR.dll shows the gain is
-# not an exposure-table term: the native RGB route is tone table (ipApplyExposureTable, offset
-# 8.533673272, unity output scale outside mode 3) -> tag 2020-2023 matrix (ipUniqueMat) -> built-in
-# ERIMM table, with no extra gain. Matching our source-profile route to that native ERIMM signal
-# needs 2^0.04 (1.027-1.031 over all four lightings, EV -1..+1); the remaining ~2^0.02 belongs to
-# a later, unidentified stage, since the native route fed with native Linear exports still needs
-# per-channel gains (1.025, 1.011, 1.011) to reach the original sRGB exports.
-PRO_SLR_RGB_GAIN = 2.0 ** (1 / 16)
+def pro_slr_erimm(raw, settings, camera_rgb=None):
+    """ERIMM code values of the Pro SLR RGB renderer, or None without the camera's matrices.
+
+    DCSPro4SLR.dll renders RGB as: balanced, exposed, clipped 12-bit codes -> tone table
+    (ipApplyExposureTable) -> per-lighting tag 2020-2023 matrix (ipUniqueMat) -> built-in ERIMM
+    table; Linear Mode instead applies the tag 2010-2013 matrix (ipDeviantMat) before the tone.
+    """
+    matrix = getattr(raw, "unique_matrices", {}).get(settings.lighting)
+    if not raw.caps.pro_slr or matrix is None:
+        return None
+    toned = scene_linear(raw, settings, camera_rgb, sensor_codes=True, matrix=False)
+    codes = np.clip(toned @ np.asarray(matrix, np.float32).reshape(3, 3).T, 0, 1)
+    return PRO_SLR_ERIMM_TABLE[np.floor(codes * 4095 + 0.5).astype(np.uint16)]
 
 
-def profile_input(raw, settings, camera_rgb=None):
-    """Scene-linear samples as fed to the source profile of the RGB rendering chain."""
-    if not raw.caps.pro_slr:
-        return scene_linear(raw, settings, camera_rgb)
-    lin = scene_linear(raw, settings, camera_rgb, sensor_codes=True)
-    return np.clip(lin * np.float32(PRO_SLR_RGB_GAIN), 0, 1)
+def _rgb_render(raw, settings, space, pdir, camera_rgb=None):
+    source = source_profile_for(raw, settings, pdir)
+    erimm = pro_slr_erimm(raw, settings, camera_rgb) if source else None
+    if erimm is not None:
+        lut = erimm_lut(settings.look, _tone_profile(source), resolve_space(space, pdir), pdir)
+        return icc.trilinear(lut, erimm)
+    lut = color_lut(source, settings.look, resolve_space(space, pdir), pdir)
+    lin = scene_linear(raw, settings, camera_rgb)
+    if source is None:
+        lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
+    return icc.trilinear(lut, lin, power=1 / LUT_INPUT_GAMMA)
 
 
 def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="better", linear=False):
@@ -1180,13 +1233,7 @@ def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="
     if linear:
         out = scene_linear(raw, settings, sensor_codes=True)
     else:
-        pdir = str(profile_directory or profiles.profile_dir())
-        source = source_profile_for(raw, settings, pdir)
-        lut = color_lut(source, settings.look, resolve_space(space, pdir), pdir)
-        lin = profile_input(raw, settings) if source else scene_linear(raw, settings)
-        if source is None:
-            lin = np.clip(lin @ raw.xyz_from_cam.T.astype(np.float32), 0, 1)
-        out = icc.trilinear(lut, lin, power=1 / LUT_INPUT_GAMMA)
+        out = _rgb_render(raw, settings, space, str(profile_directory or profiles.profile_dir()))
     if quality == "better":
         out = finish(out, settings, raw.caps, raw.scale,
                      lens_optimization_baseline=getattr(raw, "lens_optimization_baseline", None))

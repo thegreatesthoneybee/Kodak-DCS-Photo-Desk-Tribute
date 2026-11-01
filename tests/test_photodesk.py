@@ -1989,6 +1989,7 @@ def _fake_decode(monkeypatch, model, sizes, image):
     monkeypatch.setattr(pipeline.camera, "balance_curves", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "balance_factors", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "color_matrices", lambda _path: {})
+    monkeypatch.setattr(pipeline.camera, "unique_matrices", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "lens_optimization_baseline", lambda *_: None)
     monkeypatch.setattr(pipeline.camera, "custom_kelvin_illumination", lambda _path: None)
     return raw
@@ -2250,19 +2251,30 @@ def test_pro_slr_scene_applies_camera_matrix_after_clipped_balance(monkeypatch):
     np.testing.assert_allclose(pipeline.scene_linear(raw, settings.copy(lighting="Tungsten")), balanced)
 
 
-def test_pro_slr_profile_input_scales_code_domain_scene(monkeypatch):
+def test_pro_slr_erimm_route_tones_before_unique_matrix(monkeypatch):
     from types import SimpleNamespace
-    raw = SimpleNamespace(caps=camera.capabilities("DCS Pro SLR/n"))
-    scene = np.array([[[0.2, 0.5, 0.99]]], np.float32)
-    calls = []
-    monkeypatch.setattr(pipeline, "scene_linear",
-                        lambda *args, **kwargs: calls.append(kwargs) or scene)
-    out = pipeline.profile_input(raw, pipeline.Settings())
-    assert calls == [{"sensor_codes": True}]
-    np.testing.assert_allclose(out, np.clip(scene * np.float32(2 ** (1 / 16)), 0, 1))
-    assert out[0, 0, 2] == 1.0
-    other = SimpleNamespace(caps=camera.capabilities("DCS660M"))
-    assert pipeline.profile_input(other, pipeline.Settings()) is scene and calls[-1] == {}
+    deviant = (2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0)
+    unique = (1.25, -0.25, 0.0, 0.0, 1.0, 0.0, -0.5, 0.0, 1.5)
+    raw = SimpleNamespace(camera_rgb=np.array([[[0.4, 0.2, 0.8]]], np.float32),
+                          caps=camera.capabilities("DCS Pro SLR/n"), white_level=4095.0,
+                          color_matrices={"Daylight": deviant}, unique_matrices={"Daylight": unique})
+    monkeypatch.setattr(pipeline, "white_balance", lambda *_: np.array([1.0, 1.0, 1.5]))
+    settings = pipeline.Settings(lighting="Daylight", tone=(-8.0, 0.5, 3.0))
+    balanced = np.clip(raw.camera_rgb * np.float32([1.0, 1.0, 1.5]), 0, 1)
+    toned = pipeline.pro_slr_tone_lut(settings.tone)[np.floor(balanced * 4095 + 0.5).astype(np.uint16)]
+    codes = np.clip(toned @ np.array(unique, np.float32).reshape(3, 3).T, 0, 1)
+    expected = pipeline.PRO_SLR_ERIMM_TABLE[np.floor(codes * 4095 + 0.5).astype(np.uint16)]
+    np.testing.assert_array_equal(pipeline.pro_slr_erimm(raw, settings), expected)
+    assert pipeline.pro_slr_erimm(raw, settings.copy(lighting="Tungsten")) is None
+
+
+def test_pro_slr_erimm_table_follows_native_erimm_encoding():
+    table = np.round(pipeline.PRO_SLR_ERIMM_TABLE * 4095).astype(int)
+    # Entries read from DCSPro4SLR.dll .data 0x66035bd8; the analytic form gives 116 where the DLL
+    # stores 115 at code 2, its only differing entry.
+    assert table[[0, 1, 3, 16, 256, 1024, 2048, 4095]].tolist() == [0, 58, 173, 663, 1560, 2008, 2232, 2456]
+    assert table[2] - 115 == 1
+    assert np.all(np.diff(table) >= 0)
 
 
 @need_installer
@@ -2279,15 +2291,14 @@ def test_rgb_render_matches_optional_native_srgb_samples(profile_dir):
                                  white_point_ref=5000, tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
     for reference, fields in references:
         # Compared at a quarter of full size, which averages out most of the remaining
-        # LibRaw versus Kodak demosaic differences; measured RMSE is about .0092 (native
-        # Linear exports fed through the same chain reach .0034-.0035).
+        # LibRaw versus Kodak demosaic differences; measured RMSE is about .0089-.0091.
         size = (raw.camera_rgb.shape[1] // 2, raw.camera_rgb.shape[0] // 2)
         source = tifffile.imread(reference)
         expected = cv2.resize(source.astype(np.float32) / 65535.0, size, interpolation=cv2.INTER_AREA)
         image = pipeline.render(raw, settings.copy(**fields), profile_directory=profile_dir, quality="faster")
         image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
         rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-        assert rmse < 0.010, f"{reference.name} sRGB RMSE {rmse:.5f}"
+        assert rmse < 0.0095, f"{reference.name} sRGB RMSE {rmse:.5f}"
 
 
 @need_installer
@@ -2303,8 +2314,8 @@ def test_full_size_rgb_render_matches_optional_native_srgb_sample(profile_dir):
     image = pipeline.render(raw, settings, profile_directory=profile_dir, quality="faster")
     expected = tifffile.imread(reference).astype(np.float32) / 65535.0
     rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-    # Pixel-for-pixel, demosaic included: about .0080 with DHT (AHD measured .0108).
-    assert rmse < 0.009, f"full-size sRGB RMSE {rmse:.5f}"
+    # Pixel-for-pixel, demosaic included: about .0078 with DHT.
+    assert rmse < 0.0085, f"full-size sRGB RMSE {rmse:.5f}"
 
 
 def test_color_matrices_read_from_slrn_sample():
