@@ -2197,6 +2197,38 @@ def test_linear_render_matches_optional_native_control_samples(tmp_path):
         assert rmse < 0.006, f"{name} linear-domain RMSE {rmse:.5f}"
 
 
+def test_linear_render_matches_optional_native_balance_mode_samples():
+    import cv2
+    import tifffile
+
+    folder = ROOT / "raw/sample_tiff/test2"
+    names = ("자동.tif", "커스텀.tif", "클릭.tif")
+    if not SLR_N_SAMPLE.is_file() or not all((folder / name).is_file() for name in names):
+        pytest.skip("Pro SLR/n sample RAW and the balance-mode TIFF references are required")
+    full = pipeline.decode(SLR_N_SAMPLE)
+    raw = pipeline.decode(SLR_N_SAMPLE, half_size=True)
+    base = pipeline.Settings(lighting="Daylight", white_point=5000, white_point_ref=5000,
+                             tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
+    auto_temperature, custom_temperature = 5000, 5800   # the app's Auto/Custom proposals here
+    cases = (
+        # Native Auto keeps the current 5000 K over the camera Auto calibration; the remaining
+        # gap (about .005 versus a best-fit .0026) is an unresolved calibration difference.
+        (names[0], base.copy(balance="auto", kelvin_mode=5, kelvin_illumination="Daylight",
+                             white_point=auto_temperature, white_point_ref=auto_temperature), 0.006),
+        (names[1], base.copy(balance="custom", kelvin_mode=4, kelvin_illumination="Daylight",
+                             white_point=custom_temperature, white_point_ref=custom_temperature), 0.004),
+        # Click Balance at image pixel (837, 892), as shown in Photo Desk's status bar.
+        (names[2], base.copy(balance="click", click_wb=pipeline.click_wb_pro_slr(full.camera_rgb, 837, 892)),
+         0.003),
+    )
+    for name, settings, limit in cases:
+        expected = cv2.resize(tifffile.imread(folder / name).astype(np.float32) / 65535.0,
+                              (raw.camera_rgb.shape[1], raw.camera_rgb.shape[0]), interpolation=cv2.INTER_AREA)
+        image = pipeline.render(raw, settings, quality="faster", linear=True)
+        rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
+        assert rmse < limit, f"{name} linear-domain RMSE {rmse:.5f}"
+
+
 def test_pro_slr_scene_applies_camera_matrix_after_clipped_balance(monkeypatch):
     from types import SimpleNamespace
     matrix = (1.25, -0.25, 0.0, 0.0, 1.0, 0.0, -0.5, 0.0, 1.5)
