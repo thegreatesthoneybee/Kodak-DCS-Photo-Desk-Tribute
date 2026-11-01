@@ -417,9 +417,15 @@ def _crop_rendered_image(image, crop, visible_width, visible_height):
 PRO_SLR_SENSOR_GAINS = {"DCS Pro SLR/n": np.array([1.0, 0.9975, 1.009], np.float32)}
 
 
-def decode(path, half_size=False, algorithm="AHD"):
+# LibRaw demosaic closest to the original Photo Desk SLR/n exports at full size (sRGB RMSE .0080
+# versus AHD .0108, Linear .0026 versus .0028; VNG, AAHD, DCB, PPG and LINEAR also compared).
+PRO_SLR_DEMOSAIC = {"DCS Pro SLR/n": "DHT"}
+
+
+def decode(path, half_size=False, algorithm=None):
     path = Path(path)
     make, model = camera.read_make_model(path)
+    algorithm = algorithm or PRO_SLR_DEMOSAIC.get(model, "AHD")
     with rawpy.imread(str(path)) as r:
         sizes = r.sizes
         visible_w, visible_h = sizes.width, sizes.height

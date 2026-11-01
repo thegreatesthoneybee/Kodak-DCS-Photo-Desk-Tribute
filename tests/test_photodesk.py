@@ -2166,7 +2166,7 @@ def test_linear_render_matches_optional_native_tiff_samples():
         image = pipeline.render(raw, settings.copy(exposure=exposure, tone=tone), space="missing-space.icc",
                                 profile_directory="missing-profile-directory", quality="faster", linear=True)
         rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-        # Measured RMSE is about .003-.005 (LibRaw AHD versus Kodak's own demosaic remains).
+        # Measured RMSE is about .003-.005 (LibRaw versus Kodak demosaic remains).
         assert rmse < rmse_limit, f"{reference.name} linear-domain RMSE {rmse:.5f} exceeds {rmse_limit}"
 
 
@@ -2195,7 +2195,7 @@ def test_linear_render_matches_optional_native_control_samples(tmp_path):
                               (raw.camera_rgb.shape[1], raw.camera_rgb.shape[0]), interpolation=cv2.INTER_AREA)
         image = pipeline.render(raw, settings.copy(**fields), quality="faster", linear=True)
         rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-        # Measured RMSE is .0013-.0045; the remainder is LibRaw AHD versus Kodak's demosaic.
+        # Measured RMSE is .0013-.0045; the remainder is LibRaw versus Kodak demosaic.
         assert rmse < 0.006, f"{name} linear-domain RMSE {rmse:.5f}"
 
 
@@ -2279,7 +2279,7 @@ def test_rgb_render_matches_optional_native_srgb_samples(profile_dir):
                                  white_point_ref=5000, tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
     for reference, fields in references:
         # Compared at a quarter of full size, which averages out most of the remaining
-        # LibRaw AHD versus Kodak demosaic differences; measured RMSE is about .0092 (native
+        # LibRaw versus Kodak demosaic differences; measured RMSE is about .0092 (native
         # Linear exports fed through the same chain reach .0034-.0035).
         size = (raw.camera_rgb.shape[1] // 2, raw.camera_rgb.shape[0] // 2)
         source = tifffile.imread(reference)
@@ -2288,6 +2288,23 @@ def test_rgb_render_matches_optional_native_srgb_samples(profile_dir):
         image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
         rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
         assert rmse < 0.010, f"{reference.name} sRGB RMSE {rmse:.5f}"
+
+
+@need_installer
+def test_full_size_rgb_render_matches_optional_native_srgb_sample(profile_dir):
+    import tifffile
+
+    reference = ROOT / "raw/sample_tiff/srgb_ev0.tif"
+    if not SLR_N_SAMPLE.is_file() or not reference.is_file():
+        pytest.skip("Pro SLR/n sample RAW and the sRGB TIFF reference are required")
+    raw = pipeline.decode(SLR_N_SAMPLE)
+    settings = pipeline.Settings(balance="preset", lighting="Daylight", white_point=5000,
+                                 white_point_ref=5000, tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
+    image = pipeline.render(raw, settings, profile_directory=profile_dir, quality="faster")
+    expected = tifffile.imread(reference).astype(np.float32) / 65535.0
+    rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
+    # Pixel-for-pixel, demosaic included: about .0080 with DHT (AHD measured .0108).
+    assert rmse < 0.009, f"full-size sRGB RMSE {rmse:.5f}"
 
 
 def test_color_matrices_read_from_slrn_sample():
