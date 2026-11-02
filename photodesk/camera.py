@@ -410,13 +410,18 @@ def capture_info(path, model):
 # rational strength scale (lo, hi); tags 0xa60 and 0xa5e carry the default and the in-camera
 # strengths as the third LONG of [56, 0, strength, 0].
 OMEN_TAGS = (0xa5a, 0xa5b, 0xa5c, 0xa5e, 0xa5f, 0xa60, 0xa61, 0xa64, 0xa67, 0xa73)
+# Kodak IFD tag 0x90d: SHORT table from the stored CFA codes to linear sensor codes. 0x65ff9b90
+# builds ipApplyBalanceGainsCFA's tables from it, so stages before the balance (ipApplyOmenCFA)
+# work on the stored codes.
+LINEARIZATION_TAG = 0x90d
 
 
 def lens_omen(path, model):
     """The validated Pro SLR/n or /c lens optimization record as a dict, or None.
 
-    Keys: ``grid`` (rows x cols int array), ``unit`` (tag 0xa5a), ``scale`` ((lo, hi) of tag 0xa67)
-    and ``baseline`` (tag 0xa5e strength). The checks are those 0x65ff7c60 makes before it enables
+    Keys: ``grid`` (rows x cols int array), ``unit`` (tag 0xa5a), ``scale`` ((lo, hi) of tag 0xa67),
+    ``baseline`` (tag 0xa5e strength) and ``linearization`` (tag 0x90d as an int array, or None when
+    the stored codes are already linear). The checks are those 0x65ff7c60 makes before it enables
     the correction (scene +0xae8).
     """
     model_name = (model or "").lower()
@@ -436,8 +441,13 @@ def lens_omen(path, model):
             or any(len(r) != 4 or r[2] > 99 for r in records)
             or not 1 <= len(step) <= 14 or not 0 < step[0] < 1 << 15):
         return None
+    curve = read_kodak_tags(path, (LINEARIZATION_TAG,), expected_types={LINEARIZATION_TAG: 3},
+                            max_count=4096).get(LINEARIZATION_TAG)
+    curve = np.asarray(curve, np.int64) if curve is not None else None
+    if curve is not None and (len(curve) < 2 or np.any(np.diff(curve) < 0)):
+        curve = None
     return {"grid": np.asarray(grid, np.int64).reshape(rows, cols), "unit": unit,
-            "scale": (float(scale[0]), float(scale[1])), "baseline": records[2][2]}
+            "scale": (float(scale[0]), float(scale[1])), "baseline": records[2][2], "linearization": curve}
 
 
 def read_gps(path):

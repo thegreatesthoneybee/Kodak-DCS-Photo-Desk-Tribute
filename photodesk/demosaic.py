@@ -64,6 +64,23 @@ def omen_tiles(grid, unit, scale, strength, baseline):
     return t
 
 
+def omen_linear(codes, gain, linearization):
+    """Linear sensor codes after the Omen ``gain`` (Q12 / 4096) on B samples given as linear codes.
+
+    ipApplyOmenCFA scales the stored CFA codes, which the camera's linearization table (tag 0x90d,
+    stored -> linear) maps to linear codes only afterwards in the balance tables; the gain acts
+    on the inverted (stored) code, interpolated through the table both ways. Without a table the
+    stored codes are linear and the gain applies directly.
+    """
+    codes = np.asarray(codes, np.float64)
+    if linearization is None:
+        return codes * gain
+    table = np.asarray(linearization, np.float64)
+    index = np.arange(len(table), dtype=np.float64)
+    stored = np.interp(codes, table, index) * gain
+    return np.interp(np.minimum(stored, 4095), index, table)
+
+
 def apply_omen_cfa(cfa, tiles):
     """ipApplyOmenCFA (0x65ffe530): B sites (odd rows, even columns) times their tile gain,
     (code * gain + 0x800) >> 12 clamped to 0..4095."""

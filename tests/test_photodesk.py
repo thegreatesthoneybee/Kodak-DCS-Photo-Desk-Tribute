@@ -292,6 +292,31 @@ def test_apply_omen_cfa_scales_only_blue_sites():
     assert demosaic.apply_omen_cfa(np.full((2, 2), 4000), tiles)[1, 0] == 4095
 
 
+def test_omen_linear_scales_stored_codes_through_the_linearization_table():
+    np.testing.assert_allclose(demosaic.omen_linear([1000.0], 1.5, None), [1500.0])
+    # stored 0..1023 -> linear 0, 2, 4, ... (gain 1.25 on stored 400 = linear 800 -> stored 500)
+    table = np.arange(1024) * 2
+    np.testing.assert_allclose(demosaic.omen_linear([800.0], 1.25, table), [1000.0])
+    # A steeper table above stored 512: the same gain lifts the linear code by more than 1.25x.
+    knee = np.where(np.arange(1024) < 512, np.arange(1024) * 2, 1024 + (np.arange(1024) - 512) * 6)
+    assert demosaic.omen_linear([1200.0], 1.25, knee)[0] > 1.25 * 1200
+    np.testing.assert_allclose(demosaic.omen_linear([1200.0], 1.0, knee), [1200.0])
+
+
+def test_scene_linear_applies_lens_gain_to_stored_blue_before_balance(monkeypatch):
+    from types import SimpleNamespace
+    table = np.where(np.arange(1024) < 512, np.arange(1024) * 2, 1024 + (np.arange(1024) - 512) * 6)
+    raw = SimpleNamespace(camera_rgb=np.full((2, 2, 3), 1200 / 3700, np.float32), white_level=3700.0,
+                          caps=SimpleNamespace(pro_slr=True), color_matrices={}, scale=1.0, origin=(0, 0),
+                          lens_omen={"linearization": table})
+    monkeypatch.setattr(pipeline, "lens_omen_gain", lambda *_: np.full((2, 2), 1.25, np.float32))
+    monkeypatch.setattr(pipeline, "white_balance", lambda *_: np.array([1.0, 1.0, 1.5]))
+    out = pipeline.scene_linear(raw, pipeline.Settings(lighting="Tungsten", tone_enabled=False))
+    expected_b = min(1.0, demosaic.omen_linear([1200.0], 1.25, table)[0] / 3700 * 1.5)
+    np.testing.assert_allclose(out[..., 2], expected_b, rtol=1e-5)
+    np.testing.assert_allclose(out[..., 0], 1200 / 3700, rtol=1e-6)
+
+
 def test_lens_omen_gain_follows_strength_tiles_and_region_origin():
     from types import SimpleNamespace
 
@@ -313,6 +338,8 @@ def test_lens_omen_reads_the_slrn_record():
     assert record["grid"].shape == (48, 71) and record["unit"] == 4096
     assert record["scale"] == (0.0, 2.5) and record["baseline"] == 10
     assert record["grid"][24, 35] == 4103
+    curve = record["linearization"]
+    assert len(curve) == 1024 and curve[0] == 0 and curve[-1] == 3700 and np.all(np.diff(curve) > 0)
     assert camera.lens_omen(SLR_N_SAMPLE, "DCS Pro 14N") is None
 
 
@@ -2385,10 +2412,10 @@ def test_full_size_rgb_render_matches_optional_native_srgb_sample(profile_dir):
     import tifffile
 
     # srgb_ev0 was exported at Lens Optimization 0, the GQ432034/exposure references at the
-    # camera's 10; measured RMSE .0046, .0079 and .0084 with the native Omen blue gain map
-    cases = (("srgb_ev0.tif", {"lens_optimization": 0}, 0.0052),
-             ("GQ432034.tif", {"lens_optimization": 10}, 0.0088),
-             ("exposure_plus1.tif", {"lens_optimization": 10, "exposure": 1.0}, 0.0092))
+    # camera's 10; measured RMSE .0043, .0073 and .0078 with the Omen gain on stored codes
+    cases = (("srgb_ev0.tif", {"lens_optimization": 0}, 0.0048),
+             ("GQ432034.tif", {"lens_optimization": 10}, 0.0080),
+             ("exposure_plus1.tif", {"lens_optimization": 10, "exposure": 1.0}, 0.0085))
     references = [(ROOT / "raw/sample_tiff" / name, fields, limit) for name, fields, limit in cases]
     if not SLR_N_SAMPLE.is_file() or not all(path.is_file() for path, _, _ in references):
         pytest.skip("Pro SLR/n sample RAW and the sRGB TIFF references are required")
@@ -2418,10 +2445,11 @@ def test_full_size_rgb_render_matches_optional_native_balance_and_lighting_sampl
     flash = base.copy(lighting="Flash")
     flash_temperature = pipeline.balance_temperature(raw, flash)   # the Flash curve's nominal 5500 K
     cases = (
-        (names[0], base.copy(balance="auto", kelvin_mode=5, kelvin_illumination="Daylight"), 0.0052),
-        (names[1], base.copy(balance="click", click_wb=click), 0.0052),
-        (names[2], base.copy(lighting="Fluorescent"), 0.0053),
-        (names[3], flash.copy(white_point=flash_temperature, white_point_ref=flash_temperature), 0.0053),
+        # measured RMSE .0044, .0046, .0044 and .0042
+        (names[0], base.copy(balance="auto", kelvin_mode=5, kelvin_illumination="Daylight"), 0.0049),
+        (names[1], base.copy(balance="click", click_wb=click), 0.0051),
+        (names[2], base.copy(lighting="Fluorescent"), 0.0049),
+        (names[3], flash.copy(white_point=flash_temperature, white_point_ref=flash_temperature), 0.0047),
     )
     for name, settings, limit in cases:
         image = pipeline.render(raw, settings, profile_directory=profile_dir, quality="faster")

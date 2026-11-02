@@ -417,9 +417,9 @@ def _crop_rendered_image(image, crop, visible_width, visible_height):
 # Per-channel gains between the raw CFA samples and the samples behind original Photo Desk Linear
 # Mode exports, measured (median ratio after inverting tone and the lighting matrix) on eleven
 # SLR/n exports spanning EV -1.5..+2, 3200-7500 K, all lightings, Colour Balance and Custom
-# balance; spread +-0.001 on G and +-0.002 on B. The same ratios hold at the CFA sites themselves,
-# so they precede the demosaic; their native source is not identified.
-PRO_SLR_SENSOR_GAINS = {"DCS Pro SLR/n": np.array([1.0, 0.9975, 1.009], np.float32)}
+# balance; spread +-0.001. The G ratio's native source is not identified. (A former B 1.009 was
+# the Lens Optimization gain applied to linear instead of stored codes; see demosaic.omen_linear.)
+PRO_SLR_SENSOR_GAINS = {"DCS Pro SLR/n": np.array([1.0, 0.9975, 1.0], np.float32)}
 
 
 # Cameras demosaiced at full size with the DCSPro4SLR.dll AH2 kernels (photodesk.demosaic) instead
@@ -672,7 +672,7 @@ def click_point_pro_slr(cfa, x, y, lens_optimization=None):
     ProImage::CalculateClickBalance (0x4cc290) centres a 16x16 rectangle on the click at
     left = 2 * ((x + 1) // 2) - 8, clamped to the image. KPDCSampleBalance renders that rectangle
     through the CFA stages with unity balance gains (so a Lens Optimization strength other than
-    the camera's scales the B sites, as ipApplyOmenCFA does) and no demosaic, collects each
+    the camera's scales the stored B codes, as ipApplyOmenCFA does) and no demosaic, collects each
     channel's own CFA sites, sorts them and averages the middle half (indices n/4 .. n - n/4 - 1),
     rounding with +0.5.
     """
@@ -697,8 +697,9 @@ def click_point_pro_slr(cfa, x, y, lens_optimization=None):
         for dy in (0, 1):
             for dx in (0, 1):
                 if cfa.colors[dy, dx] == 2:
-                    site = patch[dy::2, dx::2]
-                    patch[dy::2, dx::2] = np.clip((site * gain[dy::2, dx::2] + 0x800) >> 12, 0, 4095)
+                    linear = demosaic.omen_linear(patch[dy::2, dx::2], gain[dy::2, dx::2] / 4096,
+                                                  omen.get("linearization"))
+                    patch[dy::2, dx::2] = np.floor(linear + 0.5).astype(np.int64)
     point = []
     for channel in range(3):
         sites = [patch[dy::2, dx::2].ravel() for dy in (0, 1) for dx in (0, 1) if cfa.colors[dy, dx] == channel]
@@ -1256,15 +1257,17 @@ def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False, matrix=True
     skips the Linear Mode (tag 2010-2013) matrix, for the RGB route that applies its own after tone.
     """
     cam = raw.camera_rgb if camera_rgb is None else camera_rgb
+    gain = lens_omen_gain(raw, settings.lens_optimization, cam.shape[:2]) if raw.caps.pro_slr else None
+    if gain is not None:
+        # ipApplyOmenCFA scales the stored B codes ahead of the balance tables, which linearize.
+        white = np.float32(raw.white_level or 4095)
+        cam = cam.copy()
+        cam[..., 2] = demosaic.omen_linear(cam[..., 2] * white, gain, raw.lens_omen.get("linearization")) / white
     lin = cam * white_balance(raw, settings).astype(np.float32)
     if raw.caps.pro_slr:
         # ipApplyBalanceGainsCFA saturates balanced codes at the sensor white level; exposure is
         # applied afterwards by the exposure table.
         np.minimum(lin, 1, out=lin)
-        gain = lens_omen_gain(raw, settings.lens_optimization, lin.shape[:2])
-        if gain is not None:
-            lin[..., 2] *= gain
-            np.minimum(lin[..., 2], np.float32(4095 / (raw.white_level or 4095)), out=lin[..., 2])
     lin *= np.float32(2.0 ** settings.exposure)
     if raw.caps.pro_slr:
         if sensor_codes and getattr(raw, "white_level", None):
@@ -1296,10 +1299,10 @@ def _omen_tiles(grid_bytes, shape, unit, scale, strength, baseline):
 def lens_omen_gain(raw, strength, shape):
     """Blue gain (HxW float32) of the native Pro SLR lens optimization for camera_rgb, or None.
 
-    ipApplyOmenCFA scales the balanced, saturated B sites of the CFA by a Q12 gain per 16-pixel
-    tile before the demosaic; here the tile gain multiplies the demosaiced blue channel at the
-    same stage, which tracks the CFA application to about 1.5 of 4095 codes RMS. The strength
-    equal to the camera's own (tag 0xa5e) leaves the image unchanged.
+    ipApplyOmenCFA scales the stored B sites of the CFA by a Q12 gain per 16-pixel tile before
+    the balance and the demosaic; scene_linear applies the tile gain to the demosaiced blue
+    channel through demosaic.omen_linear. The strength equal to the camera's own (tag 0xa5e)
+    leaves the image unchanged.
     """
     omen = getattr(raw, "lens_omen", None)
     if omen is None or not 0 <= strength <= 99 or strength == omen["baseline"]:
