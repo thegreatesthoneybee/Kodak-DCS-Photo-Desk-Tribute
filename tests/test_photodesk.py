@@ -969,6 +969,48 @@ def test_lab_xyz_roundtrip():
     np.testing.assert_allclose(icc.lab_decode(icc.lab_encode(lab)), lab, atol=1e-3)
 
 
+def test_kcms_uvl_encoding_roundtrips_lab_and_maps_white_and_black_to_d50():
+    lab = icc.lab_encode(np.array([[50.0, 20.0, -30.0], [90.0, -5.0, 5.0], [10.0, 40.0, 30.0]], np.float32))
+    np.testing.assert_allclose(icc.uvl_to_lab(icc.lab_to_uvl(lab)), lab, atol=2e-6)
+    white, black = icc.lab_to_uvl(icc.lab_encode(np.array([[100.0, 0, 0], [0.0, 0, 0]], np.float32)))
+    np.testing.assert_allclose(white[:2], black[:2], atol=1e-6)
+    # D50 u'v' = (0.2092, 0.4881) in Kodak's 0.07 + 0.41 u / 0.165 + 0.42 v encoding
+    np.testing.assert_allclose(white, [(0.20916 - 0.07) / 0.40996784565916, (0.48808 - 0.165) / 0.4198682766191, 1.0],
+                               atol=1e-4)
+    assert black[2] == 0
+
+
+def test_tetrahedral_interpolation_is_exact_on_nodes_and_uses_the_main_diagonal():
+    g = np.linspace(0, 1, 3, dtype=np.float32)
+    grid = np.stack(np.meshgrid(g, g, g, indexing="ij"), -1)
+    lut = grid ** 2                                           # not multilinear between nodes
+    np.testing.assert_allclose(icc.tetrahedral(lut, grid), lut, atol=1e-7)
+    # On the cell diagonal the four tetrahedra agree: the midpoint of black and the next node.
+    np.testing.assert_allclose(icc.tetrahedral(lut, np.full((1, 3), 0.25, np.float32)), [[0.125] * 3], atol=1e-7)
+    # Off-diagonal points use only the corners of their own tetrahedron (x >= y >= z here).
+    point = np.array([[0.4, 0.2, 0.0]], np.float32)
+    fx, fy = 0.8, 0.4
+    expected = (1 - fx) * lut[0, 0, 0] + (fx - fy) * lut[1, 0, 0] + fy * lut[1, 1, 0]
+    np.testing.assert_allclose(icc.tetrahedral(lut, point), [expected], atol=1e-6)
+    many = np.random.default_rng(1).random((70000, 3), dtype=np.float32)   # crosses the chunk size
+    np.testing.assert_allclose(icc.tetrahedral(lut, many)[:5], icc.tetrahedral(lut, many[:5]), atol=1e-7)
+
+
+def test_lab_output_luts_interpolate_in_kcms_uvl(profile_dir):
+    look = icc.Profile(profile_dir / "DCSPortraitHiColor.icm")
+    lut = look.lut()
+    assert lut.uvl_nodes is not None
+    assert icc.Profile(profile_dir / "ERIMM_PCS3.icm").lut("B2A0").uvl_nodes is None   # XYZ in, RGB out
+    n = lut.clut.shape[0]
+    node = np.array([[3, 17, 9]], np.float32) / (n - 1)
+    stored = np.stack([icc._curve(lut.out_curves[c], lut.clut[3, 17, 9, c]) for c in range(3)], -1)
+    np.testing.assert_allclose(lut(node)[0], stored, atol=5e-5)   # float32 node coordinates
+    # Between nodes the uvL result differs from interpolating the stored Lab directly.
+    mid = (np.array([[3, 17, 9]], np.float32) + 0.5) / (n - 1)
+    lab_tri = icc.trilinear(lut.clut, mid)
+    assert np.abs(lut(mid) - lab_tri).max() > 1e-4
+
+
 def test_erimm_encoding_reference_points():
     assert pipeline.erimm_encode(np.float32(10 ** 2.5)) == pytest.approx(1.0, abs=1e-6)
     assert pipeline.erimm_encode(np.float32(0)) == 0
@@ -2412,10 +2454,12 @@ def test_full_size_rgb_render_matches_optional_native_srgb_sample(profile_dir):
     import tifffile
 
     # srgb_ev0 was exported at Lens Optimization 0, the GQ432034/exposure references at the
-    # camera's 10; measured RMSE .0043, .0073 and .0078 with the Omen gain on stored codes
-    cases = (("srgb_ev0.tif", {"lens_optimization": 0}, 0.0048),
-             ("GQ432034.tif", {"lens_optimization": 10}, 0.0080),
-             ("exposure_plus1.tif", {"lens_optimization": 10, "exposure": 1.0}, 0.0085))
+    # camera's 10; test3 used the Portrait HiColor look. Measured RMSE .0042, .0074, .0078 and
+    # .0077 with the Omen gain on stored codes and Lab-output LUTs interpolated in KCMS uvL.
+    cases = (("srgb_ev0.tif", {"lens_optimization": 0}, 0.0046),
+             ("GQ432034.tif", {"lens_optimization": 10}, 0.0078),
+             ("exposure_plus1.tif", {"lens_optimization": 10, "exposure": 1.0}, 0.0082),
+             ("test3/portrait hicolor.tif", {"look": "DCSPortraitHiColor.icm"}, 0.0081))
     references = [(ROOT / "raw/sample_tiff" / name, fields, limit) for name, fields, limit in cases]
     if not SLR_N_SAMPLE.is_file() or not all(path.is_file() for path, _, _ in references):
         pytest.skip("Pro SLR/n sample RAW and the sRGB TIFF references are required")
@@ -2445,11 +2489,11 @@ def test_full_size_rgb_render_matches_optional_native_balance_and_lighting_sampl
     flash = base.copy(lighting="Flash")
     flash_temperature = pipeline.balance_temperature(raw, flash)   # the Flash curve's nominal 5500 K
     cases = (
-        # measured RMSE .0044, .0046, .0044 and .0042
-        (names[0], base.copy(balance="auto", kelvin_mode=5, kelvin_illumination="Daylight"), 0.0049),
-        (names[1], base.copy(balance="click", click_wb=click), 0.0051),
-        (names[2], base.copy(lighting="Fluorescent"), 0.0049),
-        (names[3], flash.copy(white_point=flash_temperature, white_point_ref=flash_temperature), 0.0047),
+        # measured RMSE .0042, .0044, .0043 and .0041
+        (names[0], base.copy(balance="auto", kelvin_mode=5, kelvin_illumination="Daylight"), 0.0045),
+        (names[1], base.copy(balance="click", click_wb=click), 0.0047),
+        (names[2], base.copy(lighting="Fluorescent"), 0.0046),
+        (names[3], flash.copy(white_point=flash_temperature, white_point_ref=flash_temperature), 0.0044),
     )
     for name, settings, limit in cases:
         image = pipeline.render(raw, settings, profile_directory=profile_dir, quality="faster")

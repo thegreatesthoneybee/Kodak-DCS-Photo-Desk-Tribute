@@ -10,9 +10,13 @@ D50 = np.array([0.9642, 1.0, 0.8249])
 
 
 class Lut16:
-    """ICC lut16Type: input curves -> 3D CLUT -> output curves (matrix must be identity)."""
+    """ICC lut16Type: input curves -> 3D CLUT -> output curves (matrix must be identity).
 
-    def __init__(self, tag):
+    Kodak's CMS (kodakcms.dll) connects Lab PCS transforms through its uvL space (the built-in
+    CP31/CP32 Lab<->uvL PTs, ``u2labs``/``l2uabs``), so a LUT whose output is Lab is evaluated the
+    same way: its nodes are converted to uvL and interpolated tetrahedrally there."""
+
+    def __init__(self, tag, lab_output=False):
         if tag[:4] != b"mft2":
             raise ValueError(f"unsupported LUT type {tag[:4]!r}")
         nin, nout, grid = tag[8], tag[9], tag[10]
@@ -28,10 +32,16 @@ class Lut16:
         self.clut = np.frombuffer(tag, ">u2", 3 * grid ** 3, p).reshape(grid, grid, grid, 3).astype(np.float32) / 65535
         p += 6 * grid ** 3
         self.out_curves = np.frombuffer(tag, ">u2", 3 * n_out, p).reshape(3, n_out).astype(np.float32) / 65535
+        self.uvl_nodes = None
+        if lab_output:
+            nodes = np.stack([_curve(self.out_curves[c], self.clut[..., c]) for c in range(3)], -1)
+            self.uvl_nodes = lab_to_uvl(nodes)
 
     def __call__(self, x):
         x = np.asarray(x, np.float32)
         x = np.stack([_curve(self.in_curves[c], x[..., c]) for c in range(3)], -1)
+        if self.uvl_nodes is not None:
+            return uvl_to_lab(tetrahedral(self.uvl_nodes, x))
         y = trilinear(self.clut, x)
         return np.stack([_curve(self.out_curves[c], y[..., c]) for c in range(3)], -1)
 
@@ -99,6 +109,41 @@ def trilinear(lut, x, power=None):
     return out.reshape(shape)
 
 
+def _tetrahedral_flat(flat, n, x):
+    """tetrahedral() on an (m, 3) block."""
+    x = np.clip(x, 0, 1) * np.float32(n - 1)
+    i = np.minimum(x.astype(np.int32), n - 2)
+    f = x - i
+    base = (i[:, 0] * n + i[:, 1]) * n + i[:, 2]
+    order = np.argsort(-f, axis=1, kind="stable")          # axes by decreasing fraction
+    fs = np.take_along_axis(f, order, 1)
+    step = np.array([n * n, n, 1], np.int32)[order]
+    v1 = base + step[:, 0]
+    v2 = v1 + step[:, 1]
+    out = np.take(flat, base, axis=0) * (1 - fs[:, 0:1])
+    out += np.take(flat, v1, axis=0) * (fs[:, 0:1] - fs[:, 1:2])
+    out += np.take(flat, v2, axis=0) * (fs[:, 1:2] - fs[:, 2:3])
+    out += np.take(flat, base + (n * n + n + 1), axis=0) * fs[:, 2:3]
+    return out
+
+
+def tetrahedral(lut, x):
+    """Tetrahedral interpolation of an (n, n, n, 3) lattice at points x in [0, 1]^3."""
+    n = lut.shape[0]
+    flat = np.ascontiguousarray(lut, np.float32).reshape(-1, 3)
+    x = np.asarray(x, np.float32)
+    shape = x.shape
+    xf = x.reshape(-1, 3)
+    if len(xf) <= _CHUNK:
+        return _tetrahedral_flat(flat, n, xf).reshape(shape)
+    out = np.empty((len(xf), 3), np.float32)
+
+    def block(s):
+        out[s:s + _CHUNK] = _tetrahedral_flat(flat, n, xf[s:s + _CHUNK])
+    list(_pool().map(block, range(0, len(xf), _CHUNK)))
+    return out.reshape(shape)
+
+
 class Profile:
     def __init__(self, path):
         self.path = Path(path)
@@ -117,7 +162,8 @@ class Profile:
         self.description = _desc(self.tags.get("desc", b"")) or self.path.stem
 
     def lut(self, sig="A2B0"):
-        return Lut16(self.tags[sig])
+        output = self.pcs if sig.startswith("A2B") else self.color_space
+        return Lut16(self.tags[sig], lab_output=output == "Lab")
 
     @property
     def is_working_space(self):
@@ -213,6 +259,37 @@ def lab_to_xyz(lab):
         return np.where(t > d, t ** 3, 3 * d * d * (t - 4 / 29))
 
     return np.stack([finv(fx), finv(fy), finv(fz)], -1).astype(np.float32) * D50.astype(np.float32)
+
+
+# Kodak CMS uvL encoding (kodakcms.dll CP31/CP32 PTs): u' = 0.07 + 0.41 u, v' = 0.165 + 0.42 v,
+# L = L*/100. Chromaticity is undefined at black; the D50 white point's is used there.
+_UVL_U0, _UVL_US = 0.07, 0.40996784565916
+_UVL_V0, _UVL_VS = 0.165, 0.4198682766191
+
+
+def lab_to_uvl(v):
+    """16-bit-normalised ICC Lab -> KCMS uvL in [0, 1]."""
+    lab = lab_decode(v)
+    xyz = lab_to_xyz(lab).astype(np.float64)
+    den = xyz[..., 0] + 15 * xyz[..., 1] + 3 * xyz[..., 2]
+    white = D50[0] + 15 * D50[1] + 3 * D50[2]
+    black = den <= 0
+    den = np.where(black, white, den)
+    up = np.where(black, 4 * D50[0] / white, 4 * xyz[..., 0] / den)
+    vp = np.where(black, 9 * D50[1] / white, 9 * xyz[..., 1] / den)
+    return np.stack([(up - _UVL_U0) / _UVL_US, (vp - _UVL_V0) / _UVL_VS, lab[..., 0] / 100], -1).astype(np.float32)
+
+
+def uvl_to_lab(u):
+    """KCMS uvL -> 16-bit-normalised ICC Lab."""
+    u = np.asarray(u, np.float64)
+    up = _UVL_U0 + _UVL_US * u[..., 0]
+    vp = np.maximum(_UVL_V0 + _UVL_VS * u[..., 1], 1e-9)
+    L = u[..., 2] * 100
+    fy = (L + 16) / 116
+    Y = np.where(fy > 6 / 29, fy ** 3, 3 * (6 / 29) ** 2 * (fy - 4 / 29))
+    xyz = np.stack([Y * 9 * up / (4 * vp), Y, Y * (12 - 3 * up - 20 * vp) / (4 * vp)], -1)
+    return lab_encode(xyz_to_lab(xyz.astype(np.float32))).astype(np.float32)
 
 
 def xyz_to_lab(xyz):
