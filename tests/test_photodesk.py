@@ -1969,6 +1969,10 @@ def _fake_decode(monkeypatch, model, sizes, image):
             self.rgb_xyz_matrix = np.eye(3)
             self.white_level = 4095
             self.params = None
+            # An R G / G B layout, which the native Kodak demosaic declines.
+            self.raw_pattern = np.array([[0, 1], [3, 2]])
+            self.color_desc = b"RGBG"
+            self.black_level_per_channel = [0, 0, 0, 0]
 
         def __enter__(self):
             return self
@@ -2029,6 +2033,33 @@ def test_decode_crops_pro_slr_full_and_half_size(monkeypatch, half_size, shape, 
     np.testing.assert_array_equal(decoded.camera_rgb, _normalise_test_image(image[y0:y1, x0:x1]))
     assert decoded.metadata["width"] == 8 and decoded.metadata["height"] == 6
     assert decoded.scale == expected_scale
+
+
+def test_decode_demosaics_full_size_pro_slr_n_with_balanced_kodak_ah2(monkeypatch):
+    from types import SimpleNamespace
+
+    sizes = SimpleNamespace(raw_width=12, raw_height=10, width=12, height=10,
+                            left_margin=0, top_margin=0, crop_left_margin=2,
+                            crop_top_margin=2, crop_width=8, crop_height=6, flip=0)
+    fake = _fake_decode(monkeypatch, "DCS Pro SLR/n", sizes, _coordinate_image(10, 12))
+    fake.raw_pattern = np.array([[1, 0], [2, 3]])   # G R / B G at the crop origin
+    fake.color_desc = b"RGBG"
+    fake.white_level = 3700
+    fake.camera_whitebalance = [2.0, 1.0, 1.5, 1.0]
+    cfa = np.zeros((10, 12), np.uint16)
+    cfa[0::2, 0::2], cfa[0::2, 1::2], cfa[1::2, 0::2], cfa[1::2, 1::2] = 900, 500, 1000, 900
+    cfa[0, 1] = 3000   # outside the crop
+    fake.raw_image_visible = cfa
+    decoded = pipeline.decode("synthetic.dcr")
+
+    assert fake.params is None   # LibRaw postprocess is not used
+    assert decoded.camera_rgb.shape == (6, 8, 3)
+    # Flat field: every pixel gets the site samples back, unbalanced and white-level normalised.
+    expected = np.array([500, 900, 1000], np.float32) / 3700 * pipeline.PRO_SLR_SENSOR_GAINS["DCS Pro SLR/n"]
+    np.testing.assert_allclose(decoded.camera_rgb, np.broadcast_to(expected, (6, 8, 3)), rtol=1e-6)
+    # Half-size previews still bin through LibRaw.
+    pipeline.decode("synthetic.dcr", half_size=True)
+    assert fake.params["half_size"] is True
 
 
 @pytest.mark.parametrize("shape", [(4, 5), (5, 6)])
@@ -2167,7 +2198,7 @@ def test_linear_render_matches_optional_native_tiff_samples():
         image = pipeline.render(raw, settings.copy(exposure=exposure, tone=tone), space="missing-space.icc",
                                 profile_directory="missing-profile-directory", quality="faster", linear=True)
         rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-        # Measured RMSE is about .003-.005 (LibRaw versus Kodak demosaic remains).
+        # Measured RMSE is about .003-.005 (half-size binning instead of the Kodak demosaic).
         assert rmse < rmse_limit, f"{reference.name} linear-domain RMSE {rmse:.5f} exceeds {rmse_limit}"
 
 
@@ -2196,7 +2227,7 @@ def test_linear_render_matches_optional_native_control_samples(tmp_path):
                               (raw.camera_rgb.shape[1], raw.camera_rgb.shape[0]), interpolation=cv2.INTER_AREA)
         image = pipeline.render(raw, settings.copy(**fields), quality="faster", linear=True)
         rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-        # Measured RMSE is .0013-.0045; the remainder is LibRaw versus Kodak demosaic.
+        # Measured RMSE is .0013-.0045; half-size previews bin the CFA instead of demosaicing it.
         assert rmse < 0.006, f"{name} linear-domain RMSE {rmse:.5f}"
 
 
@@ -2291,7 +2322,7 @@ def test_rgb_render_matches_optional_native_srgb_samples(profile_dir):
                                  white_point_ref=5000, tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
     for reference, fields in references:
         # Compared at a quarter of full size, which averages out most of the remaining
-        # LibRaw versus Kodak demosaic differences; measured RMSE is about .0089-.0091.
+        # half-size binning versus Kodak demosaic differences; measured RMSE is about .0089-.0091.
         size = (raw.camera_rgb.shape[1] // 2, raw.camera_rgb.shape[0] // 2)
         source = tifffile.imread(reference)
         expected = cv2.resize(source.astype(np.float32) / 65535.0, size, interpolation=cv2.INTER_AREA)
@@ -2314,8 +2345,56 @@ def test_full_size_rgb_render_matches_optional_native_srgb_sample(profile_dir):
     image = pipeline.render(raw, settings, profile_directory=profile_dir, quality="faster")
     expected = tifffile.imread(reference).astype(np.float32) / 65535.0
     rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-    # Pixel-for-pixel, demosaic included: about .0078 with DHT.
-    assert rmse < 0.0085, f"full-size sRGB RMSE {rmse:.5f}"
+    # Pixel-for-pixel with the native AH2 demosaic: about .0055 (LibRaw DHT gave .0078).
+    assert rmse < 0.0062, f"full-size sRGB RMSE {rmse:.5f}"
+
+
+def test_full_size_linear_render_matches_optional_native_samples():
+    import tifffile
+
+    folder = ROOT / "raw/sample_tiff"
+    cases = (("linear_ev0.tif", {}), ("linear_ev1.tif", {"exposure": 1.0}),
+             ("test1/plus2.0.tif", {"exposure": 2.0}),
+             ("test1/텅스텐.tif", {"lighting": "Tungsten", "white_point": 3200, "white_point_ref": 3200}),
+             ("test1/7500K.tif", {"white_point": 7500, "white_point_ref": 7500}))
+    if not SLR_N_SAMPLE.is_file() or not all((folder / name).is_file() for name, _ in cases):
+        pytest.skip("Pro SLR/n sample RAW and the linear TIFF references are required")
+    raw = pipeline.decode(SLR_N_SAMPLE)
+    settings = pipeline.Settings(balance="preset", lighting="Daylight", white_point=5000,
+                                 white_point_ref=5000, tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
+    for name, fields in cases:
+        expected = tifffile.imread(folder / name).astype(np.float32) / 65535.0
+        image = pipeline.render(raw, settings.copy(**fields), quality="faster", linear=True)
+        rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
+        # Pixel-for-pixel with the native AH2 demosaic: .0016-.0022 (LibRaw DHT gave .0026-.0039).
+        assert rmse < 0.0026, f"{name} full-size linear RMSE {rmse:.5f}"
+
+
+def test_kodak_balance_cfa_uses_fixed_point_gains_and_saturates():
+    from photodesk import demosaic
+
+    cfa = np.array([[1000, 1000], [1000, 3700]], np.uint16)   # G R / B G
+    out = demosaic.balance_cfa(cfa, (1.23633, 1.0, 1.4297), 3700)
+    # round(1.23633 * 1024) = 1266, round(1.4297 * 1024) = 1464
+    assert out.tolist() == [[1000, (1000 * 1266 + 512) >> 10], [(1000 * 1464 + 512) >> 10, 3700]]
+    assert demosaic.balance_cfa(np.array([[3000, 3000], [3000, 3000]]), (1.5, 1.0, 1.5), 3700).max() == 3700
+
+
+def test_kodak_ah2_demosaic_reproduces_flat_fields_and_keeps_site_samples():
+    from photodesk import demosaic
+
+    flat = np.zeros((16, 20), np.int32)
+    flat[0::2, 0::2], flat[0::2, 1::2], flat[1::2, 0::2], flat[1::2, 1::2] = 800, 1200, 600, 800
+    rgb = demosaic.ah2(flat)
+    assert rgb.dtype == np.uint16 and rgb.shape == (16, 20, 3)
+    assert np.all(rgb[..., 0] == 1200) and np.all(rgb[..., 1] == 800) and np.all(rgb[..., 2] == 600)
+    # A vertical edge: green at red/blue sites is interpolated along the edge, never across it.
+    edge = np.where(np.arange(20)[None, :] < 10, 400, 2400).repeat(16, 0).astype(np.int32)
+    rgb = demosaic.ah2(edge, threshold=0)
+    assert np.all(rgb[2:-2, :9, 1] == 400) and np.all(rgb[2:-2, 11:, 1] == 2400)
+    # Banded processing matches a single pass.
+    noise = np.random.default_rng(1).integers(0, 4096, (40, 24)).astype(np.int32)
+    np.testing.assert_array_equal(demosaic.ah2(noise, band=8), demosaic.ah2(noise, band=64))
 
 
 def test_color_matrices_read_from_slrn_sample():

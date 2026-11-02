@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 import rawpy
 
-from . import camera, icc, profiles
+from . import camera, demosaic, icc, profiles
 
 # 129^3 keeps trilinear error of the baked colour chain near 0.001 RMS (65^3: ~0.003).
 LUT_SIZE = 129
@@ -411,23 +411,44 @@ def _crop_rendered_image(image, crop, visible_width, visible_height):
     return image[py0:py1, px0:px1]
 
 
-# Per-channel gains between LibRaw's demosaiced camera RGB and the samples behind original Photo
-# Desk Linear Mode exports, measured (median ratio after inverting tone and the lighting matrix) on
-# eleven SLR/n exports spanning EV -1.5..+2, 3200-7500 K, all lightings, Colour Balance and Custom
-# balance; spread +-0.001 on G and +-0.002 on B. LibRaw preserves local CFA means, so the native
-# source of the offset is not identified. Click Balance divides it out.
+# Per-channel gains between the raw CFA samples and the samples behind original Photo Desk Linear
+# Mode exports, measured (median ratio after inverting tone and the lighting matrix) on eleven
+# SLR/n exports spanning EV -1.5..+2, 3200-7500 K, all lightings, Colour Balance and Custom
+# balance; spread +-0.001 on G and +-0.002 on B. The same ratios hold at the CFA sites themselves,
+# so they precede the demosaic; their native source is not identified. Click Balance divides them out.
 PRO_SLR_SENSOR_GAINS = {"DCS Pro SLR/n": np.array([1.0, 0.9975, 1.009], np.float32)}
 
 
-# LibRaw demosaic closest to the original Photo Desk SLR/n exports at full size (sRGB RMSE .0080
-# versus AHD .0108, Linear .0026 versus .0028; VNG, AAHD, DCB, PPG and LINEAR also compared).
-PRO_SLR_DEMOSAIC = {"DCS Pro SLR/n": "DHT"}
+# Cameras demosaiced at full size with the DCSPro4SLR.dll AH2 kernels (photodesk.demosaic) instead
+# of LibRaw; their CFA must be G R / B G at the default crop origin.
+PRO_SLR_NATIVE_DEMOSAIC = {"DCS Pro SLR/n"}
 
 
-def decode(path, half_size=False, algorithm=None):
+def _native_demosaic(r, crop, wb):
+    """Kodak AH2 demosaic of the cropped CFA, balanced by ``wb`` as ipApplyBalanceGainsCFA does.
+
+    Returns unbalanced float32 samples normalised by the white level, like LibRaw's output, or
+    None when the CFA layout is not the one the kernels were read for.
+    """
+    x0, y0, x1, y1 = crop
+    pattern = np.asarray(r.raw_pattern)
+    colors = [int(pattern[(y0 + dy) % 2, (x0 + dx) % 2]) for dy in (0, 1) for dx in (0, 1)]
+    if [r.color_desc.decode()[c] for c in colors] != list("GRBG") or not r.white_level:
+        return None
+    if any(r.black_level_per_channel):
+        return None
+    cfa = r.raw_image_visible[y0:y1, x0:x1]
+    gains = np.asarray(wb, np.float64)
+    # ipApplyBalanceGainsCFA saturates the balanced codes at the sensor white level.
+    rgb = demosaic.ah2(demosaic.balance_cfa(cfa, gains, int(r.white_level)))
+    fixed = np.round(gains * 1024) / 1024
+    return rgb.astype(np.float32) * (1 / (fixed * r.white_level)).astype(np.float32)
+
+
+def decode(path, half_size=False):
     path = Path(path)
     make, model = camera.read_make_model(path)
-    algorithm = algorithm or PRO_SLR_DEMOSAIC.get(model, "AHD")
+    native = not half_size and model in PRO_SLR_NATIVE_DEMOSAIC
     with rawpy.imread(str(path)) as r:
         sizes = r.sizes
         visible_w, visible_h = sizes.width, sizes.height
@@ -437,21 +458,23 @@ def decode(path, half_size=False, algorithm=None):
             output_color=rawpy.ColorSpace.raw, gamma=(1, 1), no_auto_bright=True,
             output_bps=16, user_wb=[1, 1, 1, 1], user_flip=0, half_size=half_size,
             adjust_maximum_thr=0.0, highlight_mode=rawpy.HighlightMode.Clip,
-            demosaic_algorithm=rawpy.DemosaicAlgorithm[algorithm],
+            demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
         )
-        cam = r.postprocess(**params)
-        if crop:
-            cam = _crop_rendered_image(cam, crop, visible_w, visible_h)
-        cam = cam.astype(np.float32)
-        cam *= np.float32(1 / 65535)
-        if model in PRO_SLR_SENSOR_GAINS:
-            cam *= PRO_SLR_SENSOR_GAINS[model]
         daylight = np.array(r.daylight_whitebalance[:3], np.float64)
         if not np.all(daylight > 0):
             daylight = np.ones(3)
         wb = np.array(r.camera_whitebalance[:3], np.float64)
         if not np.all(wb > 0):
             wb = daylight
+        cam = _native_demosaic(r, crop, wb / wb[1]) if native and crop else None
+        if cam is None:
+            cam = r.postprocess(**params)
+            if crop:
+                cam = _crop_rendered_image(cam, crop, visible_w, visible_h)
+            cam = cam.astype(np.float32)
+            cam *= np.float32(1 / 65535)
+        if model in PRO_SLR_SENSOR_GAINS:
+            cam *= PRO_SLR_SENSOR_GAINS[model]
         rgb_xyz = np.array(r.rgb_xyz_matrix[:3], np.float64)
         flip = sizes.flip
         white_level = float(r.white_level) if r.white_level else None
@@ -1172,6 +1195,10 @@ def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False, matrix=True
     """
     cam = raw.camera_rgb if camera_rgb is None else camera_rgb
     lin = cam * white_balance(raw, settings).astype(np.float32)
+    if raw.caps.pro_slr:
+        # ipApplyBalanceGainsCFA saturates balanced codes at the sensor white level; exposure is
+        # applied afterwards by the exposure table.
+        np.minimum(lin, 1, out=lin)
     lin *= np.float32(2.0 ** settings.exposure)
     if raw.caps.pro_slr:
         if sensor_codes and getattr(raw, "white_level", None):
