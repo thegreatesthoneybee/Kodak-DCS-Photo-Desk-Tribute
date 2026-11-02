@@ -3,6 +3,7 @@
 Set PHOTODESK_INSTALLER / PHOTODESK_SAMPLE to override the default locations.
 """
 import io
+import math
 import os
 import shutil
 import struct
@@ -11,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from photodesk import camera, export, icc, iptc, mscab, pipeline, profiles, ui_strings
+from photodesk import camera, demosaic, export, icc, iptc, mscab, pipeline, profiles, ui_strings
 from photodesk.peres import PEResources
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -261,32 +262,58 @@ def _tiff_with_lens_baseline(path, tag_type=4, count=4, values=(56, 0, 10, 0)):
                      + (payload if len(payload) > 4 else b""))
 
 
-@pytest.mark.parametrize("model", ["DCS Pro SLR/n", "DCS Pro SLR/c"])
-def test_lens_baseline_reads_valid_third_long_only_for_slr_family(tmp_path, model):
-    path = tmp_path / "sample.dcr"
-    _tiff_with_lens_baseline(path)
-    assert camera.lens_optimization_baseline(path, model) == 10
+def _omen_record(**changes):
+    grid = np.full((48, 71), 4096, np.int64)
+    grid[:, :35] = 3584                              # left half: blue gain map below unity
+    record = {"grid": grid, "unit": 0x1000, "scale": (0.0, 2.5), "baseline": 10}
+    record.update(changes)
+    return record
 
 
-@pytest.mark.parametrize("tag_type,count,values", [
-    (3, 4, (56, 0, 10, 0)),       # SHORT is not the native LONG record
-    (4, 2, (56, 0)),             # no third LONG
-    (4, 3, (56, 0, 10)),         # incomplete four-LONG record
-    (4, 4, (56, 0, 100, 0)),     # outside the accepted strength range
-])
-def test_lens_baseline_rejects_invalid_metadata(tmp_path, tag_type, count, values):
-    path = tmp_path / "invalid.dcr"
-    _tiff_with_lens_baseline(path, tag_type, count, values)
-    assert camera.lens_optimization_baseline(path, "DCS Pro SLR/n") is None
+def test_omen_tiles_are_unity_at_the_camera_strength_and_scale_blue_otherwise():
+    record = _omen_record()
+    same = demosaic.omen_tiles(record["grid"], 0x1000, (0.0, 2.5), 10, 10)
+    assert same.shape == demosaic.OMEN_TILES and np.all(same == 4096)
+    # x = -512, A = 0, B = 0.25: 4096 * 4096 / (4096 - 128) -> 4228 (truncated), unit gain at x = 0
+    off = demosaic.omen_tiles(record["grid"], 0x1000, (0.0, 2.5), 0, 10)
+    assert off[0, 0] == 4228 and off[0, 280] == 4096 and off[188, 282] == 4096
+    # nodes on every fourth tile, (a + b + 1) >> 1 midpoints in between
+    assert off[0, 136] == 4228 and off[0, 140] == 4096
+    assert list(off[0, 137:140]) == [4195, 4162, 4129]
+    assert np.all(off[1:4, 137] == off[0, 137])
 
 
-def test_lens_baseline_preserves_zero_and_rejects_missing_or_non_target_metadata(tmp_path):
-    path = tmp_path / "sample.dcr"
-    _tiff_with_lens_baseline(path, values=(56, 0, 0, 0))
-    assert camera.lens_optimization_baseline(path, "DCS Pro SLR/c") == 0
-    assert camera.lens_optimization_baseline(path, "DCS Pro 14n") is None
-    _tiff_with_lens_baseline(path, tag_type=None)
-    assert camera.lens_optimization_baseline(path, "DCS Pro SLR/n") is None
+def test_apply_omen_cfa_scales_only_blue_sites():
+    cfa = np.full((4, 4), 1000, np.int64)
+    tiles = np.full(demosaic.OMEN_TILES, 4096 + 2048, np.int64)
+    out = demosaic.apply_omen_cfa(cfa, tiles)
+    assert np.all(out[1::2, 0::2] == 1500)
+    assert np.all(out[0::2, :] == 1000) and np.all(out[1::2, 1::2] == 1000)
+    assert demosaic.apply_omen_cfa(np.full((2, 2), 4000), tiles)[1, 0] == 4095
+
+
+def test_lens_omen_gain_follows_strength_tiles_and_region_origin():
+    from types import SimpleNamespace
+
+    raw = SimpleNamespace(lens_omen=_omen_record(), scale=1.0, origin=(0, 0), white_level=3700)
+    assert pipeline.lens_omen_gain(raw, 10, (32, 32)) is None
+    assert pipeline.lens_omen_gain(raw, 100, (32, 32)) is None
+    gain = pipeline.lens_omen_gain(raw, 0, (32, 32))
+    np.testing.assert_allclose(gain[0, 0], 4228 / 4096)
+    shifted = SimpleNamespace(**{**vars(raw), "origin": (0, 2240)})
+    np.testing.assert_allclose(pipeline.lens_omen_gain(shifted, 0, (32, 32)), 1.0)
+    half = SimpleNamespace(**{**vars(raw), "scale": 0.5})
+    np.testing.assert_allclose(pipeline.lens_omen_gain(half, 0, (16, 16)), gain[::2, ::2])
+
+
+def test_lens_omen_reads_the_slrn_record():
+    if not SLR_N_SAMPLE.is_file():
+        pytest.skip("SLR/n sample not available")
+    record = camera.lens_omen(SLR_N_SAMPLE, "DCS Pro SLR/n")
+    assert record["grid"].shape == (48, 71) and record["unit"] == 4096
+    assert record["scale"] == (0.0, 2.5) and record["baseline"] == 10
+    assert record["grid"][24, 35] == 4103
+    assert camera.lens_omen(SLR_N_SAMPLE, "DCS Pro 14N") is None
 
 
 DCS560_SAMPLE = ROOT / "raw/560/3R7D2667.TIF"
@@ -718,43 +745,42 @@ def test_lens_auto_measures_corner_cast():
     assert pipeline.lens_auto(red) is None
 
 
-def test_finish_skips_lens_heuristic_only_for_matching_validated_baseline(monkeypatch):
+def test_finish_leaves_native_lens_optimization_to_scene_linear(monkeypatch):
     calls = []
     monkeypatch.setattr(pipeline, "lens_optimize", lambda img, strength: calls.append(strength) or img)
     caps = camera.capabilities("DCS Pro SLR/n")
     img = np.zeros((2, 2, 3), np.float32)
 
-    def finish(strength, baseline):
+    def finish(strength, native):
         settings = pipeline.Settings(lens_optimization=strength, sharpen_amount=0)
-        return pipeline.finish(img, settings, caps, lens_optimization_baseline=baseline)
+        return pipeline.finish(img, settings, caps, native_lens=native)
 
-    finish(10, 10)       # equal nonzero values take the native no-grid branch
-    finish(11, 10)       # unequal strength retains the existing heuristic
-    finish(10, None)     # missing metadata retains the existing heuristic
-    finish(10, 0)        # zero baseline is distinct from a nonzero request
-    finish(0, 0)         # the existing zero-request behavior remains unchanged
-    assert calls == [11, 10, 10]
+    finish(10, True)     # the camera's record is applied before the colour chain
+    finish(11, False)    # without a record the Lab heuristic remains
+    finish(0, False)
+    assert calls == [11]
 
 
-def test_render_passes_raw_lens_baseline_to_finish(monkeypatch):
+def test_render_marks_native_lens_for_finish(monkeypatch):
     from types import SimpleNamespace
 
     raw = SimpleNamespace(caps=camera.capabilities("DCS Pro SLR/n"), scale=0.5, flip=0,
-                          lens_optimization_baseline=10, xyz_from_cam=np.eye(3, dtype=np.float32))
+                          lens_omen=_omen_record(), xyz_from_cam=np.eye(3, dtype=np.float32))
     monkeypatch.setattr(pipeline, "source_profile_for", lambda *_: "source.icm")
     monkeypatch.setattr(pipeline, "color_lut", lambda *args: None)
     monkeypatch.setattr(pipeline, "resolve_space", lambda *_: "space.icm")
+    monkeypatch.setattr(pipeline, "pro_slr_erimm", lambda *_: None)
     monkeypatch.setattr(pipeline, "scene_linear", lambda *_, **__: np.zeros((1, 1, 3), np.float32))
     monkeypatch.setattr(pipeline.icc, "trilinear", lambda *_args, **_kwargs: np.zeros((1, 1, 3), np.float32))
     seen = []
 
-    def finish(img, settings, caps, scale, lens_optimization_baseline=None):
-        seen.append((caps, scale, lens_optimization_baseline))
+    def finish(img, settings, caps, scale, native_lens=False):
+        seen.append((caps, scale, native_lens))
         return img
 
     monkeypatch.setattr(pipeline, "finish", finish)
     pipeline.render(raw, pipeline.Settings(sharpen_amount=0), profile_directory=".")
-    assert seen == [(raw.caps, 0.5, 10)]
+    assert seen == [(raw.caps, 0.5, True)]
 
 
 def test_render_linear_uses_white_balanced_exposed_toned_scene_without_profiles(monkeypatch):
@@ -792,13 +818,13 @@ def test_render_linear_finishes_then_orients_and_crops_without_profiles(monkeypa
     from types import SimpleNamespace
 
     scene = np.repeat(np.arange(12, dtype=np.float32).reshape(3, 4, 1) / 20, 3, axis=2)
-    raw = SimpleNamespace(caps=object(), scale=0.5, flip=0, lens_optimization_baseline=None)
+    raw = SimpleNamespace(caps=object(), scale=0.5, flip=0, lens_omen=None)
     settings = pipeline.Settings(rotation=1, crop=(1 / 3, 0.25, 1.0, 0.75))
     monkeypatch.setattr(pipeline, "scene_linear", lambda *_, **kwargs: kwargs == {"sensor_codes": True} and scene)
     seen = []
 
-    def finish(image, received_settings, caps, scale, lens_optimization_baseline=None):
-        seen.append((image, received_settings, caps, scale, lens_optimization_baseline))
+    def finish(image, received_settings, caps, scale, native_lens=False):
+        seen.append((image, received_settings, caps, scale, native_lens))
         return image + 0.1
 
     monkeypatch.setattr(pipeline, "finish", finish)
@@ -818,7 +844,7 @@ def test_render_linear_finishes_then_orients_and_crops_without_profiles(monkeypa
     expected = np.repeat(np.array([[5, 1], [6, 2]], np.float32)[..., None] / 20 + 0.1, 3, axis=2)
     np.testing.assert_allclose(image, expected)
     assert len(seen) == 1 and seen[0][0] is scene and seen[0][1] is settings
-    assert seen[0][2] is raw.caps and seen[0][3:] == (raw.scale, None)
+    assert seen[0][2] is raw.caps and seen[0][3:] == (raw.scale, False)
 
 
 def _test_tiles(noise=0.0, blur=0.0, seed=0):
@@ -1001,6 +1027,8 @@ def test_auto_balance_region_uses_whole_scene(monkeypatch):
         flip: int = 0
         balance_points: dict = dataclasses.field(default_factory=dict)
         caps: object = dataclasses.field(default_factory=lambda: type("Caps", (), {"pro_back": False})())
+        scale: float = 1.0
+        origin: tuple = (0, 0)
     scene = np.empty((64, 64, 3), dtype=np.float32)
     scene[:, :32] = (0.1, 0.5, 0.2)
     scene[:, 32:] = (0.7, 0.2, 0.3)
@@ -1579,40 +1607,60 @@ def test_capture_auto_keeps_legacy_fallback_without_valid_calibration(tmp_path, 
     assert settings.balance == "preset" and fallback == [6800]
 
 
-def test_pro_slr_click_balance_roi_is_even_aligned_and_bounded():
-    cam = np.zeros((32, 34, 3), dtype=np.float32)
-    cam[..., 0] = np.arange(34, dtype=np.float32)[None, :]
-    cam[..., 1] = np.arange(32, dtype=np.float32)[:, None]
-
-    center = pipeline._click_balance_roi(cam, 17, 17)
-    assert center.shape == (16, 16, 3)
-    np.testing.assert_array_equal(center[0, 0, :2], [10, 10])
-    np.testing.assert_array_equal(center[-1, -1, :2], [25, 25])
-
-    top_left = pipeline._click_balance_roi(cam, 0, 0)
-    assert top_left.shape == (16, 16, 3)
-    np.testing.assert_array_equal(top_left[0, 0, :2], [0, 0])
-    bottom_right = pipeline._click_balance_roi(cam, 33, 31)
-    np.testing.assert_array_equal(bottom_right[0, 0, :2], [18, 16])
-    assert bottom_right.shape == (16, 16, 3)
-
-    small = pipeline._click_balance_roi(np.zeros((7, 9, 3), np.float32), 8, 6)
-    assert small.shape == (7, 9, 3)
+def _grbg_cfa(shape, r, g, b, lens_omen=None, origin=(0, 0)):
+    codes = np.empty(shape, np.uint16)
+    codes[0::2, 0::2] = g
+    codes[1::2, 1::2] = g
+    codes[0::2, 1::2] = r
+    codes[1::2, 0::2] = b
+    return pipeline.SensorCFA(codes, np.array([[1, 0], [2, 1]]), 0, lens_omen, origin)
 
 
-def test_pro_slr_click_balance_trims_per_channel_without_native_integer_thresholds():
-    cam = np.empty((32, 32, 3), dtype=np.float32)
-    cam[:] = (0.4, 0.2, 0.1)
-    cam[10, 10] = (0.7, 0.8, 1.0)
-    np.testing.assert_allclose(pipeline.click_wb_pro_slr(cam, 15, 15), [0.5, 1.0, 2.0])
+def test_pro_slr_click_rectangle_is_even_aligned_and_bounded():
+    # Unique codes per site reveal which 16x16 rectangle the trimmed means came from.
+    cfa = _grbg_cfa((32, 34), 0, 0, 0)
+    ys, xs = np.mgrid[0:32, 0:34]
+    cfa.codes[:] = 100 + ys * 34 + xs
 
-    low = np.empty((16, 16, 3), dtype=np.float32)
-    low[:] = (0.03, 0.02, 0.01)
-    np.testing.assert_allclose(pipeline.click_wb_pro_slr(low, 8, 8), [2 / 3, 1.0, 2.0])
-    with pytest.raises(pipeline.ClickBalanceError, match="too dark"):
-        pipeline.click_wb_pro_slr(np.zeros((16, 16, 3), np.float32), 8, 8)
+    def rect(x0, y0):
+        patch = cfa.codes[y0:y0 + 16, x0:x0 + 16].astype(np.int64)
+        means = []
+        for sites in (patch[0::2, 1::2].ravel(), np.concatenate([patch[0::2, 0::2].ravel(), patch[1::2, 1::2].ravel()]),
+                      patch[1::2, 0::2].ravel()):
+            v = np.sort(sites)
+            means.append(math.floor(v[len(v) // 4:len(v) - len(v) // 4].mean() + 0.5))
+        return tuple(means)
+
+    assert pipeline.click_point_pro_slr(cfa, 17, 17) == rect(10, 10)
+    assert pipeline.click_point_pro_slr(cfa, 16, 16) == rect(8, 8)
+    assert pipeline.click_point_pro_slr(cfa, 0, 0) == rect(0, 0)
+    assert pipeline.click_point_pro_slr(cfa, 33, 31) == rect(18, 16)
+
+
+def test_pro_slr_click_balance_trims_cfa_sites_with_native_code_thresholds():
+    cfa = _grbg_cfa((32, 32), 1000, 2000, 500)
+    cfa.codes[10, 11] = 4000          # an R outlier is trimmed away
+    cfa.codes[11, 10] = 0             # so is a dead B site
+    assert pipeline.click_point_pro_slr(cfa, 15, 15) == (1000, 2000, 500)
+    np.testing.assert_allclose(pipeline.click_wb_pro_slr(cfa, 15, 15), [2.0, 1.0, 4.0])
+
+    assert pipeline.click_point_pro_slr(_grbg_cfa((16, 16), 0xc80, 0xc80, 0x32), 8, 8) == (0xc80, 0xc80, 0x32)
     with pytest.raises(pipeline.ClickBalanceError, match="saturated"):
-        pipeline.click_wb_pro_slr(np.ones((16, 16, 3), np.float32), 8, 8)
+        pipeline.click_wb_pro_slr(_grbg_cfa((16, 16), 0xc81, 2000, 500), 8, 8)
+    with pytest.raises(pipeline.ClickBalanceError, match="too dark"):
+        pipeline.click_wb_pro_slr(_grbg_cfa((16, 16), 1000, 2000, 0x31), 8, 8)
+
+
+def test_pro_slr_click_balance_applies_requested_lens_optimization_to_blue_sites():
+    grid = np.full((48, 71), 0x1200, np.int64)        # blue falloff: x = 0x200 everywhere
+    omen = {"grid": grid, "unit": 0x1000, "scale": (0.0, 1.0), "baseline": 0}
+    cfa = _grbg_cfa((32, 32), 1000, 2000, 1000, omen, origin=(6, 8))
+    assert pipeline.click_point_pro_slr(cfa, 15, 15) == (1000, 2000, 1000)
+    assert pipeline.click_point_pro_slr(cfa, 15, 15, lens_optimization=0) == (1000, 2000, 1000)
+    gain = int(demosaic.omen_tiles(grid, 0x1000, (0.0, 1.0), 50, 0)[0, 0])
+    assert gain > 4096
+    expected_b = (1000 * gain + 0x800) >> 12
+    assert pipeline.click_point_pro_slr(cfa, 15, 15, lens_optimization=50) == (1000, 2000, expected_b)
 
     # Other camera families keep the legacy ordinary patch mean, including its outlier influence.
     generic = np.full((5, 5, 3), (0.4, 0.2, 0.1), dtype=np.float32)
@@ -1682,7 +1730,7 @@ def test_pro_slr_thumbnail_click_uses_full_decode_and_preserves_camera_selection
     small = SimpleNamespace(camera_rgb=np.zeros((10, 12, 3), np.float32), flip=6,
                             caps=SimpleNamespace(pro_slr=True))
     entry = SimpleNamespace(is_raw=True, raw=None, small=small, serial="camera-a", path=tmp_path / "x.DCR",
-                            settings=SimpleNamespace(rotation=1))
+                            settings=SimpleNamespace(rotation=1, lens_optimization=10))
     matching = SimpleNamespace(is_raw=True, serial="camera-a")
     other = SimpleNamespace(is_raw=True, serial="camera-b")
     sheet = object()
@@ -1690,22 +1738,22 @@ def test_pro_slr_thumbnail_click_uses_full_decode_and_preserves_camera_selection
     window = SimpleNamespace(selection=lambda: [matching, other], active_sheet=lambda: sheet,
                              edit=lambda *args, **kwargs: edits.append((args, kwargs)), thumb_pool=Pool())
 
-    def decode(path, half_size):
-        callbacks["decode"] = (path, half_size)
-        return SimpleNamespace(camera_rgb=np.zeros((40, 60, 3), np.float32), flip=6)
+    def read_cfa(path):
+        callbacks["read"] = path
+        return SimpleNamespace(codes=np.zeros((40, 60), np.uint16), flip=6)
 
-    def sample(cam, x, y):
-        callbacks["sample"] = (cam.shape[:2], x, y)
+    def sample(cfa, x, y, lens):
+        callbacks["sample"] = (cfa.codes.shape, x, y, lens)
         return (1.25, 1.0, 0.75)
 
     monkeypatch.setattr(gui_app, "Task", Task)
-    monkeypatch.setattr(pipeline, "decode", decode)
+    monkeypatch.setattr(pipeline, "read_cfa", read_cfa)
     monkeypatch.setattr(pipeline, "click_wb_pro_slr", sample)
 
     MainWindow.click_balance(window, entry, 0.25, 0.75, thumb=True)
 
-    assert callbacks["decode"] == (entry.path, False)
-    assert callbacks["sample"] == ((40, 60), 45, 10)
+    assert callbacks["read"] == entry.path
+    assert callbacks["sample"] == ((40, 60), 45, 10, 10)
     assert callbacks["priority"] == 1
     assert edits == [(("click_balance", [matching]), {"balance": "click", "click_wb": (1.25, 1.0, 0.75)})]
 
@@ -1729,7 +1777,7 @@ def test_pro_slr_click_discards_older_async_result(monkeypatch, tmp_path):
     raw = SimpleNamespace(camera_rgb=np.zeros((20, 20, 3), np.float32), flip=0,
                           caps=SimpleNamespace(pro_slr=True))
     entry = SimpleNamespace(is_raw=True, raw=raw, small=raw, serial="camera-a", path=tmp_path / "x.DCR",
-                            settings=SimpleNamespace(rotation=0))
+                            settings=SimpleNamespace(rotation=0, lens_optimization=0))
     sheet = object()
     window = SimpleNamespace(selection=lambda: [entry], active_sheet=lambda: sheet,
                              edit=lambda *args, **kwargs: edits.append((args, kwargs)),
@@ -1994,7 +2042,7 @@ def _fake_decode(monkeypatch, model, sizes, image):
     monkeypatch.setattr(pipeline.camera, "balance_factors", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "color_matrices", lambda _path: {})
     monkeypatch.setattr(pipeline.camera, "unique_matrices", lambda _path: {})
-    monkeypatch.setattr(pipeline.camera, "lens_optimization_baseline", lambda *_: None)
+    monkeypatch.setattr(pipeline.camera, "lens_omen", lambda *_: None)
     monkeypatch.setattr(pipeline.camera, "custom_kelvin_illumination", lambda _path: None)
     return raw
 
@@ -2095,25 +2143,26 @@ def test_decode_crop_offsets_are_relative_to_visible_area(monkeypatch):
     assert decoded.metadata["width"] == 4 and decoded.metadata["height"] == 2
 
 
-def test_decode_reduction_and_region_preserve_lens_baseline(monkeypatch):
+def test_decode_reduction_and_region_preserve_lens_record_and_origin(monkeypatch):
     from types import SimpleNamespace
 
     sizes = SimpleNamespace(raw_width=10, raw_height=8, width=10, height=8, flip=0)
     _fake_decode(monkeypatch, "DCS Pro SLR/n", sizes, _coordinate_image(8, 10))
-    monkeypatch.setattr(pipeline.camera, "lens_optimization_baseline", lambda *_: 10)
+    record = _omen_record()
+    monkeypatch.setattr(pipeline.camera, "lens_omen", lambda *_: record)
     raw = pipeline.decode("synthetic.dcr")
-    assert raw.lens_optimization_baseline == 10
-    assert pipeline.reduced(raw, 4).lens_optimization_baseline == 10
+    assert raw.lens_omen is record
+    assert pipeline.reduced(raw, 4).lens_omen is record
 
     seen = []
 
     def render(sub, settings, *args, **kwargs):
-        seen.append(sub.lens_optimization_baseline)
+        seen.append((sub.lens_omen, sub.origin))
         return sub.camera_rgb
 
     monkeypatch.setattr(pipeline, "render", render)
-    pipeline.render_region(raw, pipeline.Settings(sharpen_amount=0), (0, 0, 0.5, 1), margin=0)
-    assert seen == [10]
+    pipeline.render_region(raw, pipeline.Settings(sharpen_amount=0), (0.5, 0.5, 1, 1), margin=0)
+    assert seen == [(record, (raw.origin[0] + 4, raw.origin[1] + 5))]
 
 
 @pytest.mark.parametrize("crop_values", [None, (2, 2, 0, 6), (10, 2, 4, 6)])
@@ -2239,7 +2288,6 @@ def test_linear_render_matches_optional_native_balance_mode_samples():
     names = ("자동.tif", "커스텀.tif", "클릭.tif")
     if not SLR_N_SAMPLE.is_file() or not all((folder / name).is_file() for name in names):
         pytest.skip("Pro SLR/n sample RAW and the balance-mode TIFF references are required")
-    full = pipeline.decode(SLR_N_SAMPLE)
     raw = pipeline.decode(SLR_N_SAMPLE, half_size=True)
     base = pipeline.Settings(lighting="Daylight", white_point=5000, white_point_ref=5000,
                              tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
@@ -2252,7 +2300,7 @@ def test_linear_render_matches_optional_native_balance_mode_samples():
         (names[1], base.copy(balance="custom", kelvin_mode=4, kelvin_illumination="Daylight",
                              white_point=custom_temperature, white_point_ref=custom_temperature), 0.004),
         # Click Balance at image pixel (837, 892), as shown in Photo Desk's status bar.
-        (names[2], base.copy(balance="click", click_wb=pipeline.click_wb_pro_slr(full.camera_rgb, 837, 892)),
+        (names[2], base.copy(balance="click", click_wb=pipeline.click_wb_pro_slr(pipeline.read_cfa(SLR_N_SAMPLE), 837, 892, 0)),
          0.003),
     )
     for name, settings, limit in cases:
@@ -2336,17 +2384,50 @@ def test_rgb_render_matches_optional_native_srgb_samples(profile_dir):
 def test_full_size_rgb_render_matches_optional_native_srgb_sample(profile_dir):
     import tifffile
 
-    reference = ROOT / "raw/sample_tiff/srgb_ev0.tif"
-    if not SLR_N_SAMPLE.is_file() or not reference.is_file():
-        pytest.skip("Pro SLR/n sample RAW and the sRGB TIFF reference are required")
+    # srgb_ev0 was exported at Lens Optimization 0, the GQ432034/exposure references at the
+    # camera's 10; measured RMSE .0046, .0079 and .0084 with the native Omen blue gain map
+    cases = (("srgb_ev0.tif", {"lens_optimization": 0}, 0.0052),
+             ("GQ432034.tif", {"lens_optimization": 10}, 0.0088),
+             ("exposure_plus1.tif", {"lens_optimization": 10, "exposure": 1.0}, 0.0092))
+    references = [(ROOT / "raw/sample_tiff" / name, fields, limit) for name, fields, limit in cases]
+    if not SLR_N_SAMPLE.is_file() or not all(path.is_file() for path, _, _ in references):
+        pytest.skip("Pro SLR/n sample RAW and the sRGB TIFF references are required")
     raw = pipeline.decode(SLR_N_SAMPLE)
     settings = pipeline.Settings(balance="preset", lighting="Daylight", white_point=5000,
                                  white_point_ref=5000, tone=(-9.5, -0.2, 4.0), sharpen_amount=0)
-    image = pipeline.render(raw, settings, profile_directory=profile_dir, quality="faster")
-    expected = tifffile.imread(reference).astype(np.float32) / 65535.0
-    rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
-    # Pixel-for-pixel with the native AH2 demosaic: about .0055 (LibRaw DHT gave .0078).
-    assert rmse < 0.0062, f"full-size sRGB RMSE {rmse:.5f}"
+    for reference, fields, limit in references:
+        image = pipeline.render(raw, settings.copy(**fields), profile_directory=profile_dir, quality="faster")
+        expected = tifffile.imread(reference).astype(np.float32) / 65535.0
+        rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
+        assert rmse < limit, f"{reference.name} full-size sRGB RMSE {rmse:.5f}"
+
+
+@need_installer
+def test_full_size_rgb_render_matches_optional_native_balance_and_lighting_samples(profile_dir):
+    import tifffile
+
+    folder = ROOT / "raw/sample_tiff/test4"
+    names = ("밸런스-자동.tif", "클릭.tif", "형광등.tif", "플래쉬.tif")
+    if not SLR_N_SAMPLE.is_file() or not all((folder / name).is_file() for name in names):
+        pytest.skip("Pro SLR/n sample RAW and the balance/lighting sRGB references are required")
+    raw = pipeline.decode(SLR_N_SAMPLE)
+    base = pipeline.Settings(balance="preset", lighting="Daylight", white_point=5000, white_point_ref=5000,
+                             tone=(-9.5, -0.2, 4.0), sharpen_amount=0, lens_optimization=0)
+    # Click at image pixel (2188, 2078), as shown in Photo Desk's status bar.
+    click = pipeline.click_wb_pro_slr(pipeline.read_cfa(SLR_N_SAMPLE), 2188, 2078, 0)
+    flash = base.copy(lighting="Flash")
+    flash_temperature = pipeline.balance_temperature(raw, flash)   # the Flash curve's nominal 5500 K
+    cases = (
+        (names[0], base.copy(balance="auto", kelvin_mode=5, kelvin_illumination="Daylight"), 0.0052),
+        (names[1], base.copy(balance="click", click_wb=click), 0.0052),
+        (names[2], base.copy(lighting="Fluorescent"), 0.0053),
+        (names[3], flash.copy(white_point=flash_temperature, white_point_ref=flash_temperature), 0.0053),
+    )
+    for name, settings, limit in cases:
+        image = pipeline.render(raw, settings, profile_directory=profile_dir, quality="faster")
+        expected = tifffile.imread(folder / name).astype(np.float32) / 65535.0
+        rmse = float(np.sqrt(np.mean((image - expected) ** 2, dtype=np.float64)))
+        assert rmse < limit, f"{name} full-size sRGB RMSE {rmse:.5f}"
 
 
 def test_full_size_linear_render_matches_optional_native_samples():
@@ -2410,16 +2491,21 @@ def test_color_matrices_read_from_slrn_sample():
 
 @pytest.mark.skipif(not SLR_N_SAMPLE.is_file(), reason="Pro SLR/n sample RAW not available")
 @need_installer
-def test_pro_slrn_matching_validated_baseline_renders_without_lab_heuristic(profile_dir):
+def test_pro_slrn_native_lens_optimization_is_identity_at_the_camera_strength(profile_dir):
     raw = pipeline.decode(SLR_N_SAMPLE, half_size=True)
-    assert raw.lens_optimization_baseline == 10
+    assert raw.lens_omen["baseline"] == 10
     settings = pipeline.Settings(sharpen_amount=0)
-    matching = pipeline.render(raw, settings.copy(lens_optimization=10), profile_directory=profile_dir)
     unadjusted = pipeline.render(raw, settings.copy(lens_optimization=0), profile_directory=profile_dir)
-    mae = float(np.mean(np.abs(matching - unadjusted), dtype=np.float64))
-    # This proves the validated baseline-10 bypass for this sample only; it does not claim native
-    # Lens Optimization strength zero is a no-op for captures with another baseline.
-    assert mae == 0.0
+    matching = pipeline.render(raw, settings.copy(lens_optimization=10), profile_directory=profile_dir)
+    stronger = pipeline.render(raw, settings.copy(lens_optimization=40), profile_directory=profile_dir)
+    # strength 10 is the camera's own: no Omen gain and no Lab heuristic; any other strength
+    # changes the blue falloff only away from the centre
+    h, w = unadjusted.shape[:2]
+    centre = (slice(h // 2 - 8, h // 2 + 8), slice(w // 2 - 8, w // 2 + 8))
+    edge = (slice(None), slice(0, w // 16))
+    assert not np.allclose(matching, unadjusted)
+    assert np.abs(stronger[centre] - matching[centre]).mean() < 2e-3
+    assert np.abs(stronger[edge][..., 2] - matching[edge][..., 2]).mean() > 5e-3
 
 
 @need_sample

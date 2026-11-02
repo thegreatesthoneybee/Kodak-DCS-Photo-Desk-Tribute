@@ -135,14 +135,14 @@ def _decode_job(path):
     return pipeline.decode(path, half_size=True)
 
 
-def _click_balance_job(path, x, y, rotation):
-    """Sample a Pro SLR click from full-resolution decoded camera RGB off the UI thread."""
-    raw = pipeline.decode(path, half_size=False)
-    h, w = raw.camera_rgb.shape[:2]
-    turns = ({0: 0, 3: 2, 5: 3, 6: 1}.get(raw.flip, 0) + rotation) % 4
+def _click_balance_job(path, x, y, rotation, lens_optimization):
+    """Sample a Pro SLR click from the full-size sensor CFA off the UI thread."""
+    cfa = pipeline.read_cfa(path)
+    h, w = cfa.codes.shape
+    turns = ({0: 0, 3: 2, 5: 3, 6: 1}.get(cfa.flip, 0) + rotation) % 4
     for _ in range(turns):
         x, y = y, 1 - x
-    return pipeline.click_wb_pro_slr(raw.camera_rgb, min(w - 1, int(x * w)), min(h - 1, int(y * h)))
+    return pipeline.click_wb_pro_slr(cfa, min(w - 1, int(x * w)), min(h - 1, int(y * h)), lens_optimization)
 
 
 def _region_job(raw, settings, rect, pdir, space):
@@ -1919,7 +1919,8 @@ class MainWindow(QMainWindow):
             sheet = self.active_sheet()
             if sheet is None:
                 return
-            task = Task((sheet, entries), _click_balance_job, entry.path, x, y, entry.settings.rotation)
+            task = Task((sheet, entries), _click_balance_job, entry.path, x, y, entry.settings.rotation,
+                        entry.settings.lens_optimization)
 
             def clicked(token, wb):
                 target_sheet, targets = token

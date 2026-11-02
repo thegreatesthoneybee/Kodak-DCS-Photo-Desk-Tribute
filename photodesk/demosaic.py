@@ -29,6 +29,51 @@ def balance_cfa(cfa, gains, saturation):
     return out
 
 
+OMEN_TILE = 16                     # ipApplyOmenCFA gain tiles are 16 x 16 sensor pixels
+OMEN_TILES = (189, 283)            # 0xd0ef words; grid nodes sit on every fourth tile
+
+
+def omen_tiles(grid, unit, scale, strength, baseline):
+    """Q12 blue gain per 16-pixel tile built by the lens optimization object (0x65fe66d0).
+
+    Node gain: _ftol((x * A + 4096) * 4096 / (x * B + 4096)) clamped to 0..0x3fff, where
+    x = grid * (4096 // unit) - 4096, A = lo + (hi - lo) * strength / 100 for the requested
+    strength (object +0x70) and B the same for the in-camera strength of tag 0xa5e (+0x5c);
+    (lo, hi) is tag 0xa67. Equal strengths give unity gains. Nodes are filled in between with the
+    native (a + b + 1) >> 1 midpoint chain, rows first, and the last three columns repeat col 280.
+    """
+    lo, hi = scale
+    a = lo + (hi - lo) * (strength * 0.01)
+    b = lo + (hi - lo) * (baseline * 0.01)
+    x = (np.asarray(grid, np.int64) * (0x1000 // unit) - 0x1000).astype(np.float64)
+    nodes = np.trunc((x * a + 4096) * 4096 / (x * b + 4096))
+    nodes = np.clip(np.nan_to_num(nodes, nan=0x3fff), 0, 0x3fff).astype(np.int64)
+    t = np.zeros(OMEN_TILES, np.int64)
+    rows, cols = nodes.shape
+    t[0:rows * 4:4, 0:cols * 4:4] = nodes
+
+    def fill(a_, b_):
+        m = (a_ + b_ + 1) >> 1
+        return (a_ + m + 1) >> 1, m, (m + b_ + 1) >> 1
+
+    for c in range(0, (cols - 1) * 4, 4):
+        t[0::4, c + 1], t[0::4, c + 2], t[0::4, c + 3] = fill(t[0::4, c], t[0::4, c + 4])
+    t[0::4, (cols - 1) * 4 + 1:] = t[0::4, (cols - 1) * 4:(cols - 1) * 4 + 1]
+    for r in range(0, (rows - 1) * 4 - 3, 4):
+        t[r + 1], t[r + 2], t[r + 3] = fill(t[r], t[r + 4])
+    return t
+
+
+def apply_omen_cfa(cfa, tiles):
+    """ipApplyOmenCFA (0x65ffe530): B sites (odd rows, even columns) times their tile gain,
+    (code * gain + 0x800) >> 12 clamped to 0..4095."""
+    out = np.array(cfa, np.int64)
+    rows = np.minimum(np.arange(1, out.shape[0], 2) // OMEN_TILE, OMEN_TILES[0] - 1)
+    cols = np.minimum(np.arange(0, out.shape[1], 2) // OMEN_TILE, OMEN_TILES[1] - 1)
+    out[1::2, 0::2] = np.clip((out[1::2, 0::2] * tiles[rows[:, None], cols[None, :]] + 0x800) >> 12, 0, 4095)
+    return out
+
+
 def ah2(cfa, threshold=AH2_THRESHOLD, band=512):
     """Demosaic balanced 12-bit codes (G R / B G) to a uint16 HxWx3 RGB image, in row bands."""
     height = cfa.shape[0]

@@ -3,6 +3,8 @@ import dataclasses
 import math
 import struct
 
+import numpy as np
+
 # Order of the Image > Lighting menu.
 ILLUMINANTS = ("Daylight", "Tungsten", "Fluorescent", "Flash")
 
@@ -182,10 +184,10 @@ WB_SETTING_TAG = 1020
 WB_SETTINGS = ("Daylight", "Tungsten", "Fluorescent", "Flash", "custom", "camera_auto")
 
 
-def read_kodak_tags(path, tags, expected_types=None):
+def read_kodak_tags(path, tags, expected_types=None, max_count=64):
     """Integer values of the given Kodak IFD (tag 0x8290) tags as {tag: tuple}; reads only the
     IFD entries and those values, not the whole file. ``expected_types`` optionally maps tag IDs
-    to required TIFF type codes."""
+    to required TIFF type codes; tags with more than ``max_count`` values are skipped."""
     out = {}
     with open(path, "rb") as f:
         head = f.read(8)
@@ -222,7 +224,7 @@ def read_kodak_tags(path, tags, expected_types=None):
                 if len(raw) == count:
                     out[tag] = tuple(raw)
                 continue
-            if cnt > 64:
+            if cnt > max_count:
                 continue
             size = struct.calcsize(code) * cnt
             if size <= 4:
@@ -403,21 +405,39 @@ def capture_info(path, model):
     return info
 
 
-def lens_optimization_baseline(path, model):
-    """Return the validated DCS Pro SLR/n or /c Lens Optimization baseline, or None.
+# DCSPro4SLR.dll lens optimization (ipApplyOmenCFA) record, loaded by 0x65ff7c60: tag 0xa64 selects
+# the gain map tag 0xa46 + index (tag 0xa5b x 0xa5c words, unity tag 0xa5a); tag 0xa67 holds the
+# rational strength scale (lo, hi); tags 0xa60 and 0xa5e carry the default and the in-camera
+# strengths as the third LONG of [56, 0, strength, 0].
+OMEN_TAGS = (0xa5a, 0xa5b, 0xa5c, 0xa5e, 0xa5f, 0xa60, 0xa61, 0xa64, 0xa67, 0xa73)
 
-    The native Pro SLR correction compares the requested strength against the third LONG in Kodak
-    tag 0xa5e. Other camera families, malformed records, and out-of-range strengths have no usable
-    baseline; they must not be treated as zero.
+
+def lens_omen(path, model):
+    """The validated Pro SLR/n or /c lens optimization record as a dict, or None.
+
+    Keys: ``grid`` (rows x cols int array), ``unit`` (tag 0xa5a), ``scale`` ((lo, hi) of tag 0xa67)
+    and ``baseline`` (tag 0xa5e strength). The checks are those 0x65ff7c60 makes before it enables
+    the correction (scene +0xae8).
     """
     model_name = (model or "").lower()
     if not capabilities(model).pro_slr or not any(name in model_name for name in ("slr/n", "slr/c")):
         return None
-    values = read_kodak_tags(path, (LENS_BASELINE_TAG,), expected_types={LENS_BASELINE_TAG: 4}).get(
-        LENS_BASELINE_TAG, ())
-    if len(values) != 4 or not 0 <= values[2] <= 99:
+    tags = read_kodak_tags(path, OMEN_TAGS)
+    index = tags.get(0xa64, (0,))[0]
+    grid_tag = 0xa46 + index
+    grid = read_kodak_tags(path, (grid_tag,), expected_types={grid_tag: 3}, max_count=1 << 16).get(grid_tag)
+    rows, cols = tags.get(0xa5b, (0,))[0], tags.get(0xa5c, (0,))[0]
+    unit = tags.get(0xa5a, (0,))[0]
+    scale = tags.get(0xa67, ())
+    records = [tags.get(tag, ()) for tag in (0xa60, 0xa5f, LENS_BASELINE_TAG)]
+    step = tags.get(0xa73, ())
+    if (grid is None or (rows, cols) != (48, 71) or len(grid) != rows * cols or unit not in (0x1000, 0x400)
+            or len(scale) != 2 or scale[1] == 0 or 0xa61 not in tags
+            or any(len(r) != 4 or r[2] > 99 for r in records)
+            or not 1 <= len(step) <= 14 or not 0 < step[0] < 1 << 15):
         return None
-    return values[2]
+    return {"grid": np.asarray(grid, np.int64).reshape(rows, cols), "unit": unit,
+            "scale": (float(scale[0]), float(scale[1])), "baseline": records[2][2]}
 
 
 def read_gps(path):

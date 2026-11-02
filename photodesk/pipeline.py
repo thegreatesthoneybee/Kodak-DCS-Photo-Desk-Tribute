@@ -356,12 +356,15 @@ class RawImage:
     auto_kelvin_illumination: str = None
     custom_kelvin_illumination: str = None
     auto_scene_exposure: float = None
-    lens_optimization_baseline: int = None
+    # Native Pro SLR/n and /c lens optimization record (camera.lens_omen), or None.
+    lens_omen: dict = None
     white_level: float = None   # LibRaw's sensor white level that camera_rgb is normalized by
     # Camera 3x3 colour matrices per lighting (Kodak tags 2010-2013) for Pro SLR rendering.
     color_matrices: dict = dataclasses.field(default_factory=dict)
     # Per-lighting matrices of the Pro SLR RGB route (Kodak tags 2020-2023, ipUniqueMat).
     unique_matrices: dict = dataclasses.field(default_factory=dict)
+    # Position of camera_rgb[0, 0] in the full-size image, in full-size pixels.
+    origin: tuple = (0, 0)
 
     @property
     def caps(self):
@@ -415,7 +418,7 @@ def _crop_rendered_image(image, crop, visible_width, visible_height):
 # Mode exports, measured (median ratio after inverting tone and the lighting matrix) on eleven
 # SLR/n exports spanning EV -1.5..+2, 3200-7500 K, all lightings, Colour Balance and Custom
 # balance; spread +-0.001 on G and +-0.002 on B. The same ratios hold at the CFA sites themselves,
-# so they precede the demosaic; their native source is not identified. Click Balance divides them out.
+# so they precede the demosaic; their native source is not identified.
 PRO_SLR_SENSOR_GAINS = {"DCS Pro SLR/n": np.array([1.0, 0.9975, 1.009], np.float32)}
 
 
@@ -493,9 +496,10 @@ def decode(path, half_size=False):
                     camera_to_xyz(rgb_xyz), flip, metadata, max(cam.shape[:2]) / max(full_w, full_h),
                     camera.balance_points(path), camera.balance_curves(path), camera.balance_factors(path),
                     auto_illumination, camera.custom_kelvin_illumination(path), auto_exposure,
-                    camera.lens_optimization_baseline(path, model), white_level,
+                    camera.lens_omen(path, model), white_level,
                     camera.color_matrices(path) if camera.capabilities(model).pro_slr else {},
-                    camera.unique_matrices(path) if camera.capabilities(model).pro_slr else {})
+                    camera.unique_matrices(path) if camera.capabilities(model).pro_slr else {},
+                    (crop[1], crop[0]) if crop else (0, 0))
 
 
 def reduced(raw, long_edge):
@@ -624,39 +628,97 @@ def click_wb(cam, x, y, radius=2):
     return tuple(float(v) for v in mean[1] / mean)
 
 
-def _click_balance_roi(cam, x, y, size=16):
-    """Bound an even-aligned square around a sensor pixel, shifting it inward at image edges."""
-    h, w = cam.shape[:2]
-    if h == 0 or w == 0:
-        return cam[:0, :0]
-    roi_h, roi_w = min(size, h), min(size, w)
-    x, y = min(w - 1, max(0, int(x))), min(h - 1, max(0, int(y)))
-    x0 = max(0, min(w - roi_w, 2 * ((x + 1) // 2) - roi_w // 2))
-    y0 = max(0, min(h - roi_h, 2 * ((y + 1) // 2) - roi_h // 2))
-    x0 -= x0 % 2
-    y0 -= y0 % 2
-    return cam[y0:y0 + roi_h, x0:x0 + roi_w]
+@dataclasses.dataclass
+class SensorCFA:
+    """Undemosaiced 12-bit sensor codes of the full-size (default-cropped) image."""
+    codes: np.ndarray           # uint16 HxW
+    colors: np.ndarray          # 2x2 channel index (0 R, 1 G, 2 B) of the sites at codes[0:2, 0:2]
+    flip: int                   # LibRaw orientation code
+    lens_omen: dict = None      # camera.lens_omen record, as on RawImage
+    origin: tuple = (0, 0)      # position of codes[0, 0] in the sensor's visible area
 
 
-def click_wb_pro_slr(cam, x, y):
-    """Pro SLR click-balance approximation over a 16x16 sensor RGB ROI.
+def read_cfa(path):
+    """Read the sensor CFA over the area that decode() renders at full size."""
+    path = Path(path)
+    _, model = camera.read_make_model(path)
+    with rawpy.imread(str(path)) as r:
+        sizes = r.sizes
+        crop = _pro_slr_default_crop(model, sizes) or (0, 0, sizes.width, sizes.height)
+        x0, y0, x1, y1 = crop
+        desc = r.color_desc.decode()
+        pattern = np.asarray(r.raw_pattern)
+        colors = np.array([["RGB".index(desc[pattern[(y0 + dy) % 2, (x0 + dx) % 2]])
+                            for dx in (0, 1)] for dy in (0, 1)])
+        black = np.asarray(r.black_level_per_channel, np.int32)
+        codes = r.raw_image_visible[y0:y1, x0:x1].astype(np.int32)
+        if np.any(black):
+            sites = np.asarray(r.raw_colors_visible[y0:y1, x0:x1])
+            codes = np.maximum(codes - black[sites], 0)
+        flip = sizes.flip
+    return SensorCFA(codes.astype(np.uint16), colors, flip, camera.lens_omen(path, model), (y0, x0))
 
-    LibRaw supplies demosaiced, normalized RGB rather than the native CFA samples used by the
-    camera DLL.  Per-channel middle-half trimming limits isolated outliers, but does not reproduce
-    the native sampler or its integer thresholds.
+
+# KPDCSampleBalance (scene vtable +0x4c, 0x65fd7810) rejects a click point whose channel exceeds
+# 0xc80 (0x202, saturated) or is below 0x32 (0x203, too dark).
+CLICK_SATURATED_CODE = 0xc80
+CLICK_DARK_CODE = 0x32
+CLICK_SAMPLE_SIZE = 16
+
+
+def click_point_pro_slr(cfa, x, y, lens_optimization=None):
+    """Neutral balance point (R, G, B codes) the native Pro SLR Click Balance samples at (x, y).
+
+    ProImage::CalculateClickBalance (0x4cc290) centres a 16x16 rectangle on the click at
+    left = 2 * ((x + 1) // 2) - 8, clamped to the image. KPDCSampleBalance renders that rectangle
+    through the CFA stages with unity balance gains (so a Lens Optimization strength other than
+    the camera's scales the B sites, as ipApplyOmenCFA does) and no demosaic, collects each
+    channel's own CFA sites, sorts them and averages the middle half (indices n/4 .. n - n/4 - 1),
+    rounding with +0.5.
     """
-    patch = _click_balance_roi(cam, x, y).reshape(-1, 3)
-    if len(patch) == 0:
+    codes = np.asarray(cfa.codes)
+    h, w = codes.shape
+    size_y, size_x = min(CLICK_SAMPLE_SIZE, h - h % 2), min(CLICK_SAMPLE_SIZE, w - w % 2)
+    if size_x < 2 or size_y < 2:
         raise ClickBalanceError(SATURATED_MSG)
-    samples = np.sort(patch, axis=0)
-    trim = len(samples) // 4
-    central = samples[trim:len(samples) - trim] if trim else samples
-    mean = central.mean(0, dtype=np.float64)
-    if mean.max() >= 0.98:
+    x, y = min(w - 1, max(0, int(x))), min(h - 1, max(0, int(y)))
+    x0 = max(0, min(w - size_x, 2 * ((x + 1) // 2) - size_x // 2)) & ~1
+    y0 = max(0, min(h - size_y, 2 * ((y + 1) // 2) - size_y // 2)) & ~1
+    patch = codes[y0:y0 + size_y, x0:x0 + size_x].astype(np.int64)
+    omen = cfa.lens_omen
+    if (omen is not None and lens_optimization is not None and 0 <= lens_optimization <= 99
+            and lens_optimization != omen["baseline"]):
+        tiles = demosaic.omen_tiles(omen["grid"], omen["unit"], omen["scale"], int(lens_optimization),
+                                    int(omen["baseline"]))
+        oy, ox = cfa.origin
+        rows = np.minimum((oy + y0 + np.arange(size_y)) // demosaic.OMEN_TILE, tiles.shape[0] - 1)
+        cols = np.minimum((ox + x0 + np.arange(size_x)) // demosaic.OMEN_TILE, tiles.shape[1] - 1)
+        gain = tiles[rows[:, None], cols[None, :]]
+        for dy in (0, 1):
+            for dx in (0, 1):
+                if cfa.colors[dy, dx] == 2:
+                    site = patch[dy::2, dx::2]
+                    patch[dy::2, dx::2] = np.clip((site * gain[dy::2, dx::2] + 0x800) >> 12, 0, 4095)
+    point = []
+    for channel in range(3):
+        sites = [patch[dy::2, dx::2].ravel() for dy in (0, 1) for dx in (0, 1) if cfa.colors[dy, dx] == channel]
+        values = np.sort(np.concatenate(sites)) if sites else np.zeros(0, np.int64)
+        n = len(values)
+        if n == 0:
+            raise ClickBalanceError(TOO_DARK_MSG)
+        central = values[n // 4:n - n // 4]
+        point.append(math.floor(central.mean(dtype=np.float64) + 0.5))
+    if max(point) > CLICK_SATURATED_CODE:
         raise ClickBalanceError(SATURATED_MSG)
-    if mean.min() < 0.002:
+    if min(point) < CLICK_DARK_CODE:
         raise ClickBalanceError(TOO_DARK_MSG)
-    return tuple(float(v) for v in mean[1] / mean)
+    return tuple(point)
+
+
+def click_wb_pro_slr(cfa, x, y, lens_optimization=None):
+    """Click Balance multipliers (G = 1) that neutralise the native click point at (x, y)."""
+    point = np.asarray(click_point_pro_slr(cfa, x, y, lens_optimization), np.float64)
+    return tuple(float(v) for v in point[1] / point)
 
 
 def balance_temperature(raw, settings):
@@ -1199,6 +1261,10 @@ def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False, matrix=True
         # ipApplyBalanceGainsCFA saturates balanced codes at the sensor white level; exposure is
         # applied afterwards by the exposure table.
         np.minimum(lin, 1, out=lin)
+        gain = lens_omen_gain(raw, settings.lens_optimization, lin.shape[:2])
+        if gain is not None:
+            lin[..., 2] *= gain
+            np.minimum(lin[..., 2], np.float32(4095 / (raw.white_level or 4095)), out=lin[..., 2])
     lin *= np.float32(2.0 ** settings.exposure)
     if raw.caps.pro_slr:
         if sensor_codes and getattr(raw, "white_level", None):
@@ -1219,6 +1285,35 @@ def scene_linear(raw, settings, camera_rgb=None, sensor_codes=False, matrix=True
         ev = np.log2(y / MID_GREY)
         lin *= (2.0 ** (tone_map_ev(ev, settings.tone) - ev)).astype(np.float32)[..., None]
     return np.clip(lin, 0, 1, out=lin)
+
+
+@functools.lru_cache(maxsize=8)
+def _omen_tiles(grid_bytes, shape, unit, scale, strength, baseline):
+    grid = np.frombuffer(grid_bytes, np.int64).reshape(shape)
+    return demosaic.omen_tiles(grid, unit, scale, strength, baseline).astype(np.float32) / 4096
+
+
+def lens_omen_gain(raw, strength, shape):
+    """Blue gain (HxW float32) of the native Pro SLR lens optimization for camera_rgb, or None.
+
+    ipApplyOmenCFA scales the balanced, saturated B sites of the CFA by a Q12 gain per 16-pixel
+    tile before the demosaic; here the tile gain multiplies the demosaiced blue channel at the
+    same stage, which tracks the CFA application to about 1.5 of 4095 codes RMS. The strength
+    equal to the camera's own (tag 0xa5e) leaves the image unchanged.
+    """
+    omen = getattr(raw, "lens_omen", None)
+    if omen is None or not 0 <= strength <= 99 or strength == omen["baseline"]:
+        return None
+    grid = np.ascontiguousarray(omen["grid"], np.int64)
+    tiles = _omen_tiles(grid.tobytes(), grid.shape, omen["unit"], tuple(omen["scale"]), int(strength),
+                        int(omen["baseline"]))
+    oy, ox = getattr(raw, "origin", (0, 0))
+    scale = raw.scale or 1.0
+    rows = ((oy + (np.arange(shape[0]) + 0.5) / scale) // demosaic.OMEN_TILE).astype(np.int64)
+    cols = ((ox + (np.arange(shape[1]) + 0.5) / scale) // demosaic.OMEN_TILE).astype(np.int64)
+    rows = np.clip(rows, 0, tiles.shape[0] - 1)
+    cols = np.clip(cols, 0, tiles.shape[1] - 1)
+    return tiles[rows[:, None], cols[None, :]]
 
 
 def pro_slr_erimm(raw, settings, camera_rgb=None):
@@ -1254,8 +1349,8 @@ def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="
 
     Linear mode uses white-balanced, exposed and toned camera RGB directly, without applying
     source, Look or working-space profiles. Its decoder scaling remains an approximation.
-    quality "faster" skips lens optimization, noise
-    reduction and sharpening, as Photo Desk's Faster display mode does.
+    quality "faster" skips noise reduction, sharpening and the Lab lens optimization of
+    cameras without a native lens record, as Photo Desk's Faster display mode does.
     """
     if linear:
         out = scene_linear(raw, settings, sensor_codes=True)
@@ -1263,7 +1358,7 @@ def render(raw, settings, space=DISPLAY_SPACE, profile_directory=None, quality="
         out = _rgb_render(raw, settings, space, str(profile_directory or profiles.profile_dir()))
     if quality == "better":
         out = finish(out, settings, raw.caps, raw.scale,
-                     lens_optimization_baseline=getattr(raw, "lens_optimization_baseline", None))
+                     native_lens=getattr(raw, "lens_omen", None) is not None)
     out = orient(out, raw.flip, settings.rotation)
     return apply_crop(out, settings.crop)
 
@@ -1277,22 +1372,23 @@ def render_region(raw, settings, rect, space=DISPLAY_SPACE, profile_directory=No
     h, w = raw.camera_rgb.shape[:2]
     px0, py0 = max(0, int(x0 * w) - margin), max(0, int(y0 * h) - margin)
     px1, py1 = min(w, int(np.ceil(x1 * w)) + margin), min(h, int(np.ceil(y1 * h)) + margin)
-    sub = dataclasses.replace(raw, camera_rgb=np.ascontiguousarray(raw.camera_rgb[py0:py1, px0:px1]))
+    sub = dataclasses.replace(raw, camera_rgb=np.ascontiguousarray(raw.camera_rgb[py0:py1, px0:px1]),
+                              origin=(raw.origin[0] + py0 / raw.scale, raw.origin[1] + px0 / raw.scale))
     img = render(sub, settings.copy(crop=None), space, profile_directory)
     sh, sw = py1 - py0, px1 - px0
     inner = ((x0 * w - px0) / sw, (y0 * h - py0) / sh, (x1 * w - px0) / sw, (y1 * h - py0) / sh)
     return apply_crop(img, rotate_crop(inner, turns))
 
 
-def finish(img, settings, caps=None, scale=1.0, lens_optimization_baseline=None):
+def finish(img, settings, caps=None, scale=1.0, native_lens=False):
     """Lens optimization, noise reduction and sharpening on the rendered image.
 
     scale is the render resolution relative to the full image so that radii
-    stay proportional in reduced-size previews.
+    stay proportional in reduced-size previews. ``native_lens`` marks images whose lens
+    optimization scene_linear already applied from the camera's record (lens_omen_gain).
     """
     caps = caps or camera.capabilities("")
-    if (settings.lens_optimization and caps.lens_optimization
-            and settings.lens_optimization != lens_optimization_baseline):
+    if settings.lens_optimization and caps.lens_optimization and not native_lens:
         img = lens_optimize(img, settings.lens_optimization)
     if settings.noise_type != "none":
         img = reduce_noise(img, settings, scale, caps)
