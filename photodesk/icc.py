@@ -12,11 +12,13 @@ D50 = np.array([0.9642, 1.0, 0.8249])
 class Lut16:
     """ICC lut16Type: input curves -> 3D CLUT -> output curves (matrix must be identity).
 
-    Kodak's CMS (kodakcms.dll) connects Lab PCS transforms through its uvL space (the built-in
-    CP31/CP32 Lab<->uvL PTs, ``u2labs``/``l2uabs``), so a LUT whose output is Lab is evaluated the
-    same way: its nodes are converted to uvL and interpolated tetrahedrally there. The KCMS 3-in
-    evaluation kernels (selected at 0x100112c0, e.g. 0x10017b20/0x10018610) sort the three
-    fractional parts and blend four lattice corners, i.e. tetrahedral interpolation."""
+    A LUT whose output is Lab has its nodes converted to Kodak CMS uvL (the CP31/CP32 encoding of
+    kodakcms.dll) and is interpolated tetrahedrally there. Tetrahedral interpolation is native: the
+    KCMS 3-in evaluation kernels (selected at 0x100112c0, e.g. 0x10017b20/0x10018610) sort the
+    three fractional parts and blend four lattice corners. The uvL domain is an empirical choice:
+    KCMS's own connector (PTCombine mode 7, 0x1000e610) keeps the first transform's grid and
+    evaluates later transforms at its nodes, with XYZ(8)<->Lab(9) PCS converters, but modelling
+    that measured worse against the Photo Desk references."""
 
     def __init__(self, tag, lab_output=False):
         if tag[:4] != b"mft2":
