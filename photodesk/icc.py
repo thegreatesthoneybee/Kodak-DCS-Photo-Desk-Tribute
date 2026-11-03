@@ -14,7 +14,9 @@ class Lut16:
 
     Kodak's CMS (kodakcms.dll) connects Lab PCS transforms through its uvL space (the built-in
     CP31/CP32 Lab<->uvL PTs, ``u2labs``/``l2uabs``), so a LUT whose output is Lab is evaluated the
-    same way: its nodes are converted to uvL and interpolated tetrahedrally there."""
+    same way: its nodes are converted to uvL and interpolated tetrahedrally there. The KCMS 3-in
+    evaluation kernels (selected at 0x100112c0, e.g. 0x10017b20/0x10018610) sort the three
+    fractional parts and blend four lattice corners, i.e. tetrahedral interpolation."""
 
     def __init__(self, tag, lab_output=False):
         if tag[:4] != b"mft2":
