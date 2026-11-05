@@ -66,18 +66,22 @@ def main(folder, shot):
     sw.view.setCurrentRow(0)
     sw.view.item(0).setSelected(True)
     app.processEvents()
-    assert w.controls.b[1173].currentData() == "preset"
+    assert not w.acts[32836].isEnabled()
+    iw = w.open_image(entry, sw)
+    wait(app, lambda: iw.view.image is not None, 180)
+    assert iw.isAncestorOf(iw.controls) and iw.controls.isVisible()
+    assert iw.controls.b[1173].currentData() == "preset"
     if entry.path.name.upper() == "GQ432034.DCR":
         assert entry.settings.white_point == 5000
         assert entry.settings.saved_balance_point == (2048, 2532, 1771)
-        assert "5000" in w.controls.b[1041].text()
+        assert "5000" in iw.controls.b[1041].text()
     if entry.path.name.upper() == "F5KG7096.DCR":
         from photodesk import pipeline
         from photodesk.gui.app import to_qimage
         assert entry.settings.white_point == 5200
         assert entry.settings.exposure == 0.5
         assert entry.settings.saved_balance_point == (2048, 2621, 1934)
-        assert "5200" in w.controls.b[1041].text()
+        assert "5200" in iw.controls.b[1041].text()
         expected = to_qimage(pipeline.render(entry.small, entry.settings.copy(crop=None),
                                              profile_directory=w.pdir, quality="faster"))
         wait(app, lambda: entry.thumb == expected)

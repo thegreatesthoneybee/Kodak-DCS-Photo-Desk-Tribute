@@ -1413,7 +1413,7 @@ def test_thumbnail_temperature_initialization_respects_sidecar_and_async_edits(m
     from photodesk.gui import app as gui_app
     from photodesk.gui.model import Entry
 
-    tasks, temperatures, refreshed = [], [], []
+    tasks, temperatures, refreshed, panels_refreshed = [], [], [], []
 
     class FakeTask:
         def __init__(self, token, *_args):
@@ -1430,7 +1430,8 @@ def test_thumbnail_temperature_initialization_respects_sidecar_and_async_edits(m
                         lambda _raw, settings: temperatures.append(settings) or 6200)
 
     window = SimpleNamespace(pdir="profiles", thumb_pool=SimpleNamespace(start=lambda _task: None),
-                             focused=lambda: None, refresh_thumb=lambda entry: refreshed.append(entry))
+                             focused=lambda: None, refresh_thumb=lambda entry: refreshed.append(entry),
+                             _refresh_image_controls=lambda entry: panels_refreshed.append(entry))
     sw = SimpleNamespace(view=SimpleNamespace(refresh_entry=lambda _entry: None))
 
     def complete(settings, from_sidecar=False, edit_during_decode=None):
@@ -1439,6 +1440,7 @@ def test_thumbnail_temperature_initialization_respects_sidecar_and_async_edits(m
         if edit_during_decode is not None:
             entry.settings = edit_during_decode(entry.settings)
         tasks[-1].on_done(entry, (object(), {}, "thumbnail"))
+        assert panels_refreshed[-1] is entry
         return entry
 
     computed = complete(pipeline.Settings(white_point=4800, white_point_ref=4800), from_sidecar=False)
@@ -1863,6 +1865,7 @@ def test_pro_slr_click_discards_older_async_result(monkeypatch, tmp_path):
     window.sheets = []
     window.closeups = []
     window.selection_changed = lambda: None
+    window._refresh_image_controls = lambda e: gui_app.MainWindow._refresh_image_controls(window, e)
     gui_app.MainWindow.after_edit(window, [entry])
     tasks[2].signals.done.callback(tasks[2].token, (1.1, 1.0, 1.4))
     assert len(edits) == 1

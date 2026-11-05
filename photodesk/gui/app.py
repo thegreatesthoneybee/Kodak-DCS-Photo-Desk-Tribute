@@ -15,14 +15,14 @@ from PySide6.QtCore import QEvent, QFileSystemWatcher, QItemSelectionModel, QPoi
 from PySide6.QtGui import QAction, QActionGroup, QColor, QGuiApplication, QIcon, QImage, QKeySequence, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDockWidget, QFileDialog, QInputDialog, QLabel, QMainWindow, QMdiArea, QMdiSubWindow, QMenu,
-    QMessageBox, QStyleFactory, QToolBar, QToolButton,
+    QMessageBox, QScrollArea, QStyleFactory, QToolBar, QToolButton,
 )
 
 from .. import APP_NAME, ORG_NAME, __version__, camera, export, pipeline, profiles, wbfile
 from . import dialogs as D
 from . import res as R
 from .model import PASTE_GROUPS, Sheet, is_image, paste_into
-from .panels import CROP_ITEMS, CloseUpWindow, HistogramPanel, ImageControlsPanel, ImageInfoPanel
+from .panels import CROP_ITEMS, TOOL_STRIP, CloseUpWindow, HistogramPanel, ImageControlsPanel, ImageInfoPanel
 from .views import ContactSheetView, ImageView, Task, ThumbIcons, qimage_array, to_qimage
 
 PREVIEW_EDGE = 1400            # long edge of the "faster" full-image preview
@@ -271,14 +271,43 @@ class ImageWindow(DocumentSubWindow):
         super().__init__()
         self.main, self.sheet_win, self.entry = main, sheet_win, entry
         cursors = main.cursors
+        self.content = QMainWindow(self, Qt.Widget)
+        self.content.setWindowFlags(Qt.Widget)
+        self.content.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks)
         self.view = ImageView(cursors)
         self.view.set_tool(main.tool)
-        self.setWidget(self.view)
+        self.content.setCentralWidget(self.view)
+        self.setWidget(self.content)
         self.setWindowTitle(entry.path.name)
         self.setWindowIcon(main.res.app_icon())
         self.setAttribute(Qt.WA_DeleteOnClose)
+        self.panel_actions = self._make_panel_actions()
+        self.controls = ImageControlsPanel(main.res, self.panel_actions)
+        self.controls.set_looks(main.looks)
+        self.controls.command.connect(self._run_panel_command)
+        self.controls.edit.connect(self._edit_from_controls)
+        self.controls.crop_mode.connect(self._set_crop_mode_from_controls)
+        self.controls_dock = QDockWidget(main.res.tr(
+            "Image Controls", ("Image Controls Panel", "Image Info Panel", "Histogram Panel", "View Menu")),
+            self.content)
+        self.controls_dock.setObjectName("Image Controls")
+        self.controls_visible = True
+        self._controls_host = self.content
+        self._moving_controls = False
+        self.controls_scroll = QScrollArea(self.controls_dock)
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setWidget(self.controls)
+        self.controls_scroll.setMinimumWidth(
+            self.controls.width() + 2 * self.controls_scroll.frameWidth()
+            + self.controls_scroll.verticalScrollBar().sizeHint().width())
+        self.controls_dock.setWidget(self.controls_scroll)
+        self.controls_dock.setFeatures(QDockWidget.DockWidgetClosable)
+        self.content.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
+        self.controls_dock.visibilityChanged.connect(
+            lambda visible: main._image_controls_visibility_changed(self, visible))
+        self.refresh_controls()
         self.view.clicked.connect(self._clicked)
-        self.view.crop_changed.connect(lambda c: main.set_crop([self.entry], c))
+        self.view.crop_changed.connect(self._crop_changed)
         self.view.hover.connect(main.show_pixel)
         self.view.crop_size.connect(main.show_size)
         self.view.zoom_changed.connect(lambda z: main.show_zoom(z) if main.active_image() is self else None)
@@ -288,12 +317,94 @@ class ImageWindow(DocumentSubWindow):
         self.latest = [0]               # newest render token, read by render tasks to skip stale work
         self.rgb = None
         sheet_win.images.append(self)
+        main._update_appearance_icons()
+
+    def place_controls(self, host, visible):
+        """Move the same image-bound panel between the viewer and the MDI frame."""
+        self._moving_controls = True
+        try:
+            moved = self._controls_host is not host
+            showing = visible and self.controls_dock.isHidden()
+            if moved:
+                self._controls_host.removeDockWidget(self.controls_dock)
+                self.controls_dock.setParent(host)
+                host.addDockWidget(Qt.RightDockWidgetArea, self.controls_dock)
+                if host is self.main:
+                    host.tabifyDockWidget(host.info_dock, self.controls_dock)
+                self._controls_host = host
+            self.controls_dock.setVisible(visible)
+            if visible and (moved or showing):
+                self.controls_dock.raise_()
+        finally:
+            self._moving_controls = False
+
+    def _make_panel_actions(self):
+        """Local action state lets this panel stay usable regardless of the active document."""
+        actions = {}
+        for cmd in (*TOOL_STRIP, 32807, 32803, 33131):
+            source = self.main.acts.get(cmd)
+            if source is None:
+                continue
+            action = QAction(source.text(), self)
+            action.setCheckable(cmd in TOOLS)
+            if action.isCheckable():
+                action.setChecked(source.isChecked())
+            action.triggered.connect(lambda _=False, command=cmd: self._trigger_panel_action(command))
+            actions[cmd] = action
+        return actions
+
+    def _trigger_panel_action(self, cmd):
+        action = self.main.acts.get(cmd)
+        if action is None or not self.panel_actions[cmd].isEnabled():
+            return
+        self.main._activate_image(self)
+        if action.isEnabled():
+            action.trigger()
+
+    def _run_panel_command(self, cmd):
+        self.main._activate_image(self)
+        action = self.main.acts.get(cmd)
+        if action is not None and action.isEnabled():
+            action.trigger()
+
+    def _edit_from_controls(self, kind, fields):
+        self.main._activate_image(self)
+        self.main.edit(kind, entries=[self.entry], **fields)
+
+    def _set_crop_mode_from_controls(self, key):
+        self.main._activate_image(self)
+        self.main.set_crop_mode(key)
+
+    def _crop_changed(self, crop):
+        self.main._activate_image(self)
+        self.main.set_crop([self.entry], crop)
+
+    def refresh_controls(self):
+        self.controls.set_entry(self.entry)
+        raw = self.entry.is_raw
+        for cmd, action in self.panel_actions.items():
+            if cmd in (32846, 32807):
+                enabled = raw
+            elif cmd in (32803, 33131):
+                enabled = raw and self.entry.caps.auto_scene
+            else:
+                enabled = True
+            action.setEnabled(enabled)
+        self.set_controls_tool(TOOL_CMD[self.main.tool])
+        self.controls.set_crop_mode(self.main.crop_mode, self.main.crop_other)
+
+    def set_controls_tool(self, cmd):
+        self.controls.set_tool(cmd)
+        for action_cmd, action in self.panel_actions.items():
+            if action.isCheckable():
+                action.setChecked(action_cmd == cmd)
 
     def set_entry(self, entry):
         """Show another image of the same contact sheet in this window."""
         old = self.entry
         self.entry = entry
         self.setWindowTitle(entry.path.name)
+        self.refresh_controls()
         self.rgb = None
         self.token += 1
         self.latest[0] = self.token
@@ -301,6 +412,7 @@ class ImageWindow(DocumentSubWindow):
             old.raw = None
 
     def _clicked(self, x, y):
+        self.main._activate_image(self)
         tool = self.main.tool
         if tool == "click":
             self.main.click_balance(self.entry, x, y)
@@ -323,6 +435,7 @@ class ImageWindow(DocumentSubWindow):
             if not self.main.confirm_save([self.entry]):
                 ev.ignore()
                 return
+        self.place_controls(self.content, False)
         if self in sw.images:
             sw.images.remove(self)
         if sw.viewer is self:
@@ -482,7 +595,7 @@ class MainWindow(QMainWindow):
             33109: self.preferences, 33130: self.printing_preferences,
             32824: lambda: self.sort("name"), 32825: lambda: self.sort("date"),
             33179: lambda: self.zoom_step(1), 33180: lambda: self.zoom_step(-1), 32849: self.zoom_fit,
-            32844: self.zoom_other, 32836: lambda: self.toggle_dock(self.controls_dock),
+            32844: self.zoom_other, 32836: self.toggle_image_controls,
             32857: lambda: self.toggle_dock(self.info_dock), 33104: lambda: self.toggle_dock(self.hist_dock),
             32840: self.toggle_thumb_info, 59392: lambda: self.toolbar.setVisible(not self.toolbar.isVisible()),
             59393: self.toggle_status_bar,
@@ -613,12 +726,6 @@ class MainWindow(QMainWindow):
 
     def _panels(self):
         res = self.res
-        self.controls = ImageControlsPanel(res, self.acts)
-        self.controls.set_looks(self.looks)
-        self.controls.command.connect(lambda c: self.acts[c].trigger())
-        self.controls.edit.connect(lambda kind, f: self.edit(kind, **f))
-        self.controls.crop_mode.connect(self.set_crop_mode)
-        self.controls.set_crop_mode(self.crop_mode, self.crop_other)
         self.info = ImageInfoPanel(res)
         self.info.command.connect(lambda c: self.acts[c].trigger())
         self.info.annotation.connect(lambda e, t: self.edit("annotation", entries=[e], annotation=t))
@@ -627,13 +734,10 @@ class MainWindow(QMainWindow):
         self.hist = HistogramPanel(res, self)
         self.hist.set_appearance(self.appearance)
         ctx = ("Image Controls Panel", "Image Info Panel", "Histogram Panel", "View Menu")
-        self.controls_dock = self._dock(res.tr("Image Controls", ctx), self.controls, Qt.RightDockWidgetArea, 32836)
         self.info_dock = self._dock(res.tr("Image Info", ctx), self.info, Qt.RightDockWidgetArea, 32857)
         self.hist_dock = self._dock(res.s(59956), self.hist, Qt.RightDockWidgetArea, 33104)
         self.hist_dock.setFloating(True)
         self.hist_dock.hide()
-        self.tabifyDockWidget(self.controls_dock, self.info_dock)
-        self.controls_dock.raise_()
 
     def _dock(self, title, widget, area, cmd):
         d = QDockWidget(title, self)
@@ -647,6 +751,9 @@ class MainWindow(QMainWindow):
 
     def _update_appearance_icons(self):
         targets = [*self.acts.values(), *self.findChildren(QToolButton)]
+        for sw in self.sheets:
+            for window in sw.images:
+                targets.extend(window.controls.findChildren(QToolButton))
         for target in targets:
             icon = target.icon()
             if icon.isNull():
@@ -725,6 +832,42 @@ class MainWindow(QMainWindow):
                 self._active_window = None
         self.selection_changed()
 
+    def _image_controls_visibility_changed(self, window, _visible):
+        if window._moving_controls:
+            return
+        window.controls_visible = not window.controls_dock.isHidden()
+        if self.active_image() is window:
+            self.acts[32836].setChecked(window.controls_visible)
+
+    def _place_image_controls(self):
+        if getattr(self, "_placing_image_controls", False):
+            return
+        self._placing_image_controls = True
+        try:
+            active = self.active_image()
+            for sheet in self.sheets:
+                for window in sheet.images:
+                    in_frame = not window.floating and window is active
+                    host = self if in_frame else window.content
+                    visible = window.controls_visible and (window.floating or in_frame)
+                    window.place_controls(host, visible)
+        finally:
+            self._placing_image_controls = False
+
+    def toggle_image_controls(self):
+        window = self.active_image()
+        if window is None:
+            return
+        window.controls_visible = not window.controls_visible
+        self._place_image_controls()
+        self.acts[32836].setChecked(window.controls_visible)
+
+    def _refresh_image_controls(self, entry):
+        for sw in self.sheets:
+            for window in sw.images:
+                if window.entry is entry:
+                    window.refresh_controls()
+
     def set_window_floating(self, window, floating):
         if window is None or window.floating == floating:
             return
@@ -766,8 +909,8 @@ class MainWindow(QMainWindow):
         return sw.view.focused_entry() if sw else None
 
     def selection_changed(self):
+        self._place_image_controls()
         e = self.focused()
-        self.controls.set_entry(e)
         self.info.set_entry(e)
         sw = self.active_sheet()
         if sw:
@@ -778,6 +921,7 @@ class MainWindow(QMainWindow):
             self.st_count.setText("")
         iw = self.active_image()
         if iw:
+            iw.refresh_controls()
             self.show_size(None)
             self.show_zoom(iw.view.zoom)
         elif sw:
@@ -791,6 +935,7 @@ class MainWindow(QMainWindow):
         has = bool(sel)
         raw = has and all(e.is_raw for e in sel)
         sheet = self.active_sheet() is not None
+        image_window = self.active_image()
         focus = self.focused()
         enable = {
             32868: has, 57602: self.active_document() is not None, 57603: has, 57604: has, 32861: has,
@@ -798,7 +943,7 @@ class MainWindow(QMainWindow):
             57634: focus is not None, 32865: focus is not None, 32866: has and self.clipboard is not None,
             33196: has and self.clipboard is not None, 57642: sheet, 32858: sheet, 32859: sheet, 32860: sheet,
             32824: sheet, 32825: sheet, 33188: has, 32838: has, 32837: has, 32855: has, 32856: has, 32854: has,
-            32848: has, 32846: raw, 33178: has, 32806: raw, 33187: raw,
+            32836: image_window is not None, 32848: has, 32846: raw, 33178: has, 32806: raw, 33187: raw,
             33152: raw and all(e.caps.white_point for e in sel), 33183: raw, 33150: raw,
             33149: raw, 32807: raw, 32812: raw, 32816: raw and any(e.settings.click_wb != (1.0, 1.0, 1.0) for e in sel),
             32814: raw and all("custom" in e.caps.balances for e in sel),
@@ -811,13 +956,14 @@ class MainWindow(QMainWindow):
         }
         for cmd in list(LIGHTING_CMD) + [32812]:
             enable[cmd] = raw
-        image = self.active_image() is not None
+        image = image_window is not None
         for cmd, z in ZOOMS.items():
             enable[cmd] = image or (sheet and z in SHEET_ZOOMS)
         for cmd, on in enable.items():
             act = self.acts.get(cmd)
             if act is not None and act.data() != "unimplemented":
                 act.setEnabled(bool(on))
+        self.acts[32836].setChecked(image_window is not None and not image_window.controls_dock.isHidden())
         active_window = self.active_document()
         self.float_window_action.setEnabled(active_window is not None and not active_window.floating)
         self.reattach_window_action.setEnabled(active_window is not None and active_window.floating)
@@ -931,9 +1077,9 @@ class MainWindow(QMainWindow):
             elif entry.settings is not settings:
                 self.refresh_thumb(entry)
             sw.view.refresh_entry(entry)
+            self._refresh_image_controls(entry)
             if entry is self.focused():
                 self.info.set_entry(entry)
-                self.controls.set_entry(entry)
                 self._update_histogram()
         task.signals.done.connect(done)
         task.signals.failed.connect(lambda entry, msg: self.statusBar().showMessage(
@@ -1562,6 +1708,7 @@ class MainWindow(QMainWindow):
             self._click_balance_generation = getattr(self, "_click_balance_generation", 0) + 1
         for e in changed:
             self.refresh_thumb(e)
+            self._refresh_image_controls(e)
             for sw in self.sheets:
                 for w in sw.images:
                     if w.entry is e:
@@ -1710,7 +1857,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == D.QDialog.Accepted:
             self.q.setValue("Contact Sheet Printing Size", dlg.size)
             self.q.setValue("Allow Docking", dlg.docking)
-            for d in (self.controls_dock, self.info_dock, self.hist_dock):
+            for d in (self.info_dock, self.hist_dock):
                 d.setAllowedAreas(Qt.AllDockWidgetAreas if dlg.docking else Qt.NoDockWidgetArea)
                 if not dlg.docking:
                     d.setFloating(True)
@@ -1801,7 +1948,7 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
-        for d in (self.controls_dock, self.info_dock, self.hist_dock):
+        for d in (self.info_dock, self.hist_dock):
             self._place_floating(d)
 
     def toggle_thumb_info(self):
@@ -1862,7 +2009,9 @@ class MainWindow(QMainWindow):
     def set_tool(self, tool):
         self.tool = tool
         self.acts[TOOL_CMD[tool]].setChecked(True)
-        self.controls.set_tool(TOOL_CMD[tool])
+        for sw in self.sheets:
+            for w in sw.images:
+                w.set_controls_tool(TOOL_CMD[tool])
         for sw in self.sheets:
             sw.view.viewport().setCursor(self.cursors.get(tool, Qt.ArrowCursor) if tool in ("click", "closeup", "hand")
                                          else Qt.ArrowCursor)
@@ -1880,9 +2029,9 @@ class MainWindow(QMainWindow):
         self.q.setValue("Crop Mode", key)
         if key in CROP_ITEMS:
             self.acts[{v: k for k, v in CROP_CMD.items()}[key]].setChecked(True)
-        self.controls.set_crop_mode(key, self.crop_other)
         for sw in self.sheets:
             for w in sw.images:
+                w.controls.set_crop_mode(key, self.crop_other)
                 w.view.ratio = self._crop_ratio()
         self.set_tool("crop")
 

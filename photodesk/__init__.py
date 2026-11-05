@@ -1,4 +1,4 @@
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 APP_NAME = "PhotoDesk (Tribute)"
 ORG_NAME = "PhotoDesk"  # settings scope: HKCU\Software\PhotoDesk on Windows, ~/Library/Preferences on macOS
