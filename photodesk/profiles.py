@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from . import installshield, mscab
+from .working_space_profiles import builtin_profile_paths
 
 PROFILE_GROUPS = ("Standard ICC Profiles", "Custom Looks ICC Profiles")
 # Original UI resources: PhotoDsk.exe is parsed (never executed) for its dialog

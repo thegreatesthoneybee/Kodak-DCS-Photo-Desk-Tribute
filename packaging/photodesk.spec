@@ -18,7 +18,8 @@ version_tuple = tuple(int(part) for part in __version__.split(".")) + (0,) * (4 
 
 block_cipher = None
 
-datas = []
+datas = [(str(repo_root / "photodesk" / "data" / "working-spaces"),
+          "photodesk/data/working-spaces")]
 app_icon = None
 
 # Bundle the user's installed Kodak profiles, the official translation table and the interface

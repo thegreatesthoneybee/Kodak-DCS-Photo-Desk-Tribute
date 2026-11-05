@@ -29,6 +29,9 @@ photodesk = "photodesk.__main__:main"
 [tool.setuptools.packages.find]
 include = ["photodesk*"]
 
+[tool.setuptools.package-data]
+photodesk = ["data/working-spaces/*.icc", "data/working-spaces/*.icm"]
+
 [tool.setuptools.dynamic]
 version = {attr = "photodesk.__version__"}
 

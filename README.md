@@ -24,6 +24,7 @@ Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon)에서 네이
   - 이미지 조절 패널은 독립 이미지 창에서는 해당 창 오른쪽에, 내부 이미지 창(MDI)에서는 메인 창 오른쪽에 붙습니다. 컨택트 시트만 활성화하면 메인 창의 보정 패널은 숨겨집니다. 각 패널은 해당 이미지에만 적용되며, 보기 메뉴에서 활성 이미지의 패널을 숨기거나 다시 표시할 수 있습니다.
   - 창 메뉴에서 활성 컨택트 시트나 이미지 창을 **별도 창으로 분리**해 앱 밖으로 옮길 수 있고, **앱 창에 다시 넣기**로 MDI에 복귀시킵니다. 보조 모니터에서도 사용할 수 있습니다.
   - 컨택트 시트는 50/100/200%, 이미지 창은 25/50/100/200%, 화면 맞춤, 기타(10–400%) 배율을 씁니다.
+  - 이미지 창은 트랙패드 핀치와 Ctrl+휠 확대·축소를 지원합니다. 커서 위치를 기준으로 확대하며, 일반 휠은 스크롤로 동작합니다.
   - 이름순·날짜순으로 정렬합니다.
   - 썸네일 정보 아이콘은 밸런스, 라이팅, Look, 노이즈, 샤프닝, 노출, 태그, 읽기 전용, 음성, 파일 형식을 표시합니다. 완성 파일은 파일 형식, 태그, 읽기 전용만 표시합니다.
   - 아이콘에 마우스를 올리면 원본 문구로 설정값을 보여 줍니다. 예: "Sharpening: Amount = …".
@@ -41,7 +42,7 @@ Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon)에서 네이
   - 사용자·자동 밸런스는 최초 Pro Back에서는 쓸 수 없습니다.
   - 컬러 밸런스 ±100.
   - 노출 보정 ±2EV(Pro Back은 ±1EV), 자동 노출 조정.
-  - 톤(쉐도우/중간 톤/하이라이트 EV).
+  - 톤(쉐도우/중간 톤/하이라이트 EV). 별도 저장값이 없으면 기본값은 -9.5/0.0/3.5이며, RAW와 사이드카에 저장된 톤은 유지합니다.
   - Look: 시스템 프로파일 폴더의 Custom Look도 포함합니다. DCS 3xx/5xx/6xx는 4가지, 620x는 6가지로 제한됩니다.
   - 렌즈 최적화(14nx, SLR/n, SLR/c). 자동 버튼은 사진의 무채색 영역에서 가장자리 색 번짐을 재서 강도를 정합니다(원본은 카메라 값을 되돌리기만 함). 잴 곳이 없는 사진은 카메라 값을 씁니다.
   - 노이즈 제거: 카메라별 종류(Basic/Advanced/Moiré/Expert)를 따릅니다. 원본에 없는 자동 버튼은 원본 해상도 사진의 49곳(7×7)에서 조각을 떼어, 밝기 구간별 고른 영역의 노이즈를 재서, 선택한 종류마다 노이즈를 목표 수준까지 줄이는 가장 약한 범위·강도(또는 Threshold)를 정합니다.
@@ -62,7 +63,9 @@ Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon)에서 네이
   - 휴지통으로 삭제.
 - **저장:**
   - 저장 형식: Standard TIFF, Standard JPEG, As Is.
-  - 작업 색 공간: Kodak DCS RGB, ProPhoto RGB, sRGB와 시스템 프로파일.
+  - RGB 작업 색 공간: Kodak DCS RGB, Kodak ERIMM, Kodak ProPhoto RGB, KODAK sRGB Display, sRGB IEC61966-2.1, Adobe RGB (1998), image-P3와 지원되는 시스템 RGB 프로파일. Agfa SWOP(CMYK)와 Lab to PCS는 제외합니다.
+  - 위 7개 작업 공간 ICC는 앱 내부 리소스(`photodesk/data/working-spaces`)로 포함됩니다. 별도 색 공간 설치·다운로드·사용자 폴더 생성 없이 사용하며, 내보낼 때도 내장 ICC를 첨부합니다.
+  - Adobe RGB (1998)와 image-P3는 [Adobe RGB 정의](https://www.adobe.com/digitalimag/pdfs/AdobeRGB1998.pdf) 및 [ICC Display P3 정의](https://registry.color.org/rgb-registry/displayp3)의 색도·전달함수로 생성한 독립 ICC 프로파일입니다(Adobe 배포 파일의 복제본 아님). image-P3는 P3 원색·D65·sRGB 전달함수를 사용하며, DCI-P3의 감마 2.6과 구분합니다.
   - 내보내기 크기: 퍼센트, 화면 채우기, 맞추기.
   - 해상도, 선형 모드, 8/16비트(8비트 완성 파일은 8비트 유지), 프로파일 첨부, JPEG 품질(고/중간/저), IPTC·EXIF 기록.
   - GPS 정보: TIFF 왼쪽 위에 표시(GPS 정보 렌더링), JPEG EXIF에 기록.

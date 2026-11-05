@@ -60,6 +60,7 @@ def test_folder_has_no_adjustments_and_image_owns_toggleable_panel(window, qt_ap
     qt_app.processEvents()
     assert image.isAncestorOf(image.controls)
     assert image.controls.isVisible()
+    assert image.controls.b[1214].text() == "3.5"
     assert image.controls_scroll.viewport().width() >= image.controls.width()
     assert image.controls_scroll.horizontalScrollBar().maximum() == 0
     assert image.controls_dock not in main.findChildren(QDockWidget)

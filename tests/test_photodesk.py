@@ -1036,7 +1036,25 @@ def test_tone_validation_and_mapping():
     assert pipeline.validate_tone((-1.0, 0.0, 3.4)) == "Shadow value is too high."
     assert pipeline.validate_tone((-9.5, 2.0, 3.4)) == "Midtone value is too high."
     ev = np.array([-9.5, -1.0, 3.4])
-    np.testing.assert_allclose(pipeline.tone_map_ev(ev, (-9.5, -1.0, 3.4)), [-9.5, 0.0, 3.4])
+    np.testing.assert_allclose(pipeline.tone_map_ev(ev, (-9.5, -1.0, 3.4)), [-9.5, 0.0, 3.5])
+
+
+def test_open_tone_defaults_preserve_embedded_and_saved_adjustments(tmp_path, monkeypatch):
+    path = tmp_path / "image.DCR"
+    monkeypatch.setattr(camera, "read_make_model", lambda _: ("Kodak", "DCS Pro SLR/n"))
+    monkeypatch.setattr(camera, "capture_info", lambda *_: {})
+    params = {}
+    monkeypatch.setattr(camera, "stored_process_parameters", lambda _: params)
+    monkeypatch.setattr(camera, "stored_render_parameters", lambda _: {})
+    opened = pipeline.load_settings(path)
+    assert opened.tone == (-9.5, 0.0, 3.5)
+    # Rounded opening defaults remain inside the native neutral-tone threshold.
+    assert np.all(np.abs(np.array(opened.tone) - pipeline.PRO_SLR_TONE_REFERENCE)
+                  < pipeline.PRO_SLR_TONE_THRESHOLD)
+    params["tone"] = (-9.5, -0.2, 4.0)
+    assert pipeline.load_settings(path).tone == (-9.5, -0.2, 4.0)
+    pipeline.save_settings(path, opened.copy(tone=(-9.5, 0.0, 3.4)))
+    assert pipeline.load_settings(path).tone == (-9.5, 0.0, 3.4)
 
 
 def test_pro_slr_tone_lookup_has_bounded_monotonic_curve():
@@ -2045,7 +2063,11 @@ def test_source_profile_neutral_axis(profile_dir):
 @need_installer
 def test_working_spaces(profile_dir):
     spaces = dict((desc, path) for path, desc in pipeline.working_spaces(profile_dir))
-    assert {"sRGB IEC61966-2.1", "Kodak ProPhoto RGB", "Kodak DCS RGB"} <= set(spaces)
+    assert {"sRGB IEC61966-2.1", "Kodak ProPhoto RGB", "Kodak DCS RGB",
+            "KODAK sRGB Display", "Kodak ERIMM Color Space to Scene Reference Space",
+            "Adobe RGB (1998)", "image-P3"} <= set(spaces)
+    assert "Agfa : Swop Standard" not in spaces
+    assert "Lab to PCS and back" not in spaces
     enc = icc.Profile(spaces["sRGB IEC61966-2.1"]).encoder()
     white = enc(icc.D50[None].astype(np.float32))[0]
     np.testing.assert_allclose(white, 1.0, atol=2e-3)
@@ -2053,19 +2075,20 @@ def test_working_spaces(profile_dir):
 
 def test_working_space_survives_app_move(tmp_path):
     # macOS runs a downloaded app from a new random path each launch (App Translocation): a stored
-    # bundled profile must be found again in the current profile directory.
+    # additional profile must be found again in the current profile directory.
     old, new = tmp_path / "old/profiles", tmp_path / "new/profiles"
     for d in (old, new):
         d.mkdir(parents=True)
-        (d / "KODAK_sRGB.icm").write_bytes(b"x")
+        (d / "CustomRGB.icm").write_bytes(b"x")
         (d / pipeline.DEFAULT_WORKING_SPACE).write_bytes(b"x")
-    assert pipeline.space_setting(str(new / "KODAK_sRGB.icm"), new) == "KODAK_sRGB.icm"
-    assert pipeline.resolve_space("KODAK_sRGB.icm", new) == str(new / "KODAK_sRGB.icm")
-    stale = str(tmp_path / "gone/profiles/KODAK_sRGB.icm")
-    assert pipeline.resolve_space(stale, new) == str(new / "KODAK_sRGB.icm")
+    assert pipeline.space_setting(str(new / "CustomRGB.icm"), new) == "CustomRGB.icm"
+    assert pipeline.resolve_space("CustomRGB.icm", new) == str(new / "CustomRGB.icm")
+    stale = str(tmp_path / "gone/profiles/CustomRGB.icm")
+    assert pipeline.resolve_space(stale, new) == str(new / "CustomRGB.icm")
     # a profile outside the profile directory keeps its path; an unknown one falls back to sRGB
-    assert pipeline.space_setting(str(old / "KODAK_sRGB.icm"), new) == str(old / "KODAK_sRGB.icm")
-    assert pipeline.resolve_space(str(tmp_path / "gone/Missing.icc"), new) == str(new / pipeline.DEFAULT_WORKING_SPACE)
+    assert pipeline.space_setting(str(old / "CustomRGB.icm"), new) == str(old / "CustomRGB.icm")
+    bundled_srgb = next(p for p in profiles.builtin_profile_paths() if p.name == pipeline.DEFAULT_WORKING_SPACE)
+    assert pipeline.resolve_space(str(tmp_path / "gone/Missing.icc"), new) == str(bundled_srgb)
 
 
 @need_sample

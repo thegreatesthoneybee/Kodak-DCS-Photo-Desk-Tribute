@@ -5,7 +5,8 @@ import os
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QPalette, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QTextEdit, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSlider,
+    QTextEdit, QWidget,
 )
 
 from .. import APP_NAME, AUTHOR, BASED_ON, __version__, export, iptc, pipeline
@@ -764,6 +765,12 @@ class PreferencesDialog(TemplateDialog):
     def __init__(self, res, parent, opts, send_folder, spaces, appearance="light", unlock_all=False):
         super().__init__(res, parent)
         b = self.b
+        self._radio_groups = []
+        for ids in ((1366, 1365, 1363, 1364), (1085, 1182), (1353, 1354), (1006, 1007, 1008)):
+            group = QButtonGroup(self)
+            for cid in ids:
+                group.addButton(b[cid])
+            self._radio_groups.append(group)
         self.opts = export.OutputOptions.from_json(opts.to_json())
         self.spaces = spaces
         self.appearance = appearance

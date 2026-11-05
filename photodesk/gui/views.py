@@ -1,6 +1,7 @@
 """Contact sheet, full image rendering, close-up and histogram widgets."""
+import math
 import numpy as np
-from PySide6.QtCore import QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDrag, QImage, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QListWidget, QListWidgetItem, QScrollArea, QStyle, QStyledItemDelegate,
                                QToolTip, QWidget)
@@ -397,6 +398,14 @@ class ImageCanvas(QWidget):
     def mouseReleaseEvent(self, e):
         self.view.release(e)
 
+    def event(self, e):
+        if e.type() == QEvent.Type.NativeGesture and self.view._native_zoom(e):
+            return True
+        return super().event(e)
+
+    def wheelEvent(self, e):
+        self.view.wheelEvent(e)
+
 
 class ImageView(QScrollArea):
     """A full image rendering; shows the uncropped image with the crop rectangle.
@@ -419,12 +428,17 @@ class ImageView(QScrollArea):
         self.full_size = (1, 1)        # full image size (pixels) of the oriented, uncropped image
         self.fit = True
         self.zoom = 100
+        self._zoom_value = 100.0
         self.scale = 1.0
         self.tool = "select"
         self.cursors = cursors or {}
         self.crop = None
         self.ratio = None              # (w, h) crop aspect constraint
         self._drag = None
+        self.viewport().installEventFilter(self)
+
+    MIN_ZOOM = 1
+    MAX_ZOOM = 1600
 
     # --------------------------------------------------------- image
     def set_image(self, qimage, full_size, crop):
@@ -442,12 +456,13 @@ class ImageView(QScrollArea):
         self.fit = fit
         if zoom:
             self.zoom = zoom
+        if not fit:
+            self._zoom_value = float(self.zoom)
         self._relayout()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if self.fit:
-            self._relayout()
+        self._relayout()
 
     def _relayout(self):
         fw, fh = self.full_size
@@ -455,13 +470,87 @@ class ImageView(QScrollArea):
             vp = self.viewport().size()
             self.scale = max(0.01, min(vp.width() / fw, vp.height() / fh))
             self.zoom = max(1, round(self.scale * 100))
+            self._zoom_value = self.scale * 100
         else:
-            self.scale = self.zoom / 100
+            self.zoom = round(self._zoom_value)
+            self.scale = self._zoom_value / 100
         w, h = max(1, round(fw * self.scale)), max(1, round(fh * self.scale))
         vp = self.viewport().size()
         self.canvas.resize(max(w, vp.width()), max(h, vp.height()))
         self.canvas.update()
         self.zoom_changed.emit(self.zoom)
+
+    def event(self, e):
+        if e.type() == QEvent.Type.NativeGesture and self._native_zoom(e):
+            return True
+        return super().event(e)
+
+    def viewportEvent(self, e):
+        if e.type() == QEvent.Type.NativeGesture and self._native_zoom(e):
+            return True
+        return super().viewportEvent(e)
+
+    def _native_zoom(self, e):
+        if e.gestureType() != Qt.NativeGestureType.ZoomNativeGesture:
+            return False
+        delta = e.value()
+        if not math.isfinite(delta) or delta <= -1:
+            e.accept()
+            return True
+        self._zoom_by(1 + delta, e.globalPosition())
+        e.accept()
+        return True
+
+    def _wheel_zoom(self, e):
+        if not e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            return False
+        delta = e.pixelDelta().y() or e.angleDelta().y()
+        if not delta:
+            return False
+        # Angle deltas are conventionally 120 per wheel step; pixel deltas
+        # use the same scale so high-resolution devices stay incremental.
+        delta = max(-3840, min(3840, delta))
+        self._zoom_by(1.2 ** (delta / 120), e.globalPosition())
+        e.accept()
+        return True
+
+    def _zoom_by(self, factor, global_pos):
+        if self.image is None or not math.isfinite(factor) or factor <= 0:
+            return False
+        target = max(self.MIN_ZOOM, min(self.MAX_ZOOM, self._zoom_value * factor))
+        if target == self._zoom_value:
+            return True
+
+        viewport_pos = self.viewport().mapFromGlobal(global_pos.toPoint())
+        canvas_pos = self.canvas.mapFrom(self.viewport(), viewport_pos)
+        image = self.image_rect()
+        nx = min(1.0, max(0.0, (canvas_pos.x() - image.left()) / max(1, image.width())))
+        ny = min(1.0, max(0.0, (canvas_pos.y() - image.top()) / max(1, image.height())))
+
+        self.fit = False
+        self._zoom_value = target
+        self.zoom = round(target)
+        self._relayout()
+
+        viewport_pos = self.viewport().mapFromGlobal(global_pos.toPoint())
+        image = self.image_rect()
+        x = image.left() + round(nx * image.width()) - viewport_pos.x()
+        y = image.top() + round(ny * image.height()) - viewport_pos.y()
+        self.horizontalScrollBar().setValue(x)
+        self.verticalScrollBar().setValue(y)
+        return True
+
+    def wheelEvent(self, e):
+        if self._wheel_zoom(e):
+            return
+        super().wheelEvent(e)
+
+    def eventFilter(self, watched, e):
+        if watched is self.viewport() and e.type() == QEvent.Type.Resize and self.image is not None:
+            vp = self.viewport().size()
+            if self.canvas.width() < vp.width() or self.canvas.height() < vp.height():
+                self._relayout()
+        return super().eventFilter(watched, e)
 
     def image_rect(self):
         fw, fh = self.full_size

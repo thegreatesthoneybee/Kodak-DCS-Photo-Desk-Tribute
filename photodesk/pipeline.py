@@ -49,7 +49,8 @@ NOISE_TYPES = ("none", "basic", "advanced", "moire", "expert")
 LIGHTING_CCT = {"Daylight": 5500, "Flash": 5900, "Tungsten": 3200, "Fluorescent": 4100}
 WHITE_POINT_DEFAULT = 5000
 WHITE_POINT_RANGE = (2000, 7500)
-TONE_DEFAULT = (-9.5, 0.0, 3.4)
+# One-decimal UI defaults; the native highlight reference is 3.4644 EV (3.5, not 3.4).
+TONE_DEFAULT = (-9.5, 0.0, 3.5)
 TONE_MIN_GAP = 2.0
 PRO_SLR_TONE_REFERENCE = (-9.535300254821777, 0.0, 3.464400053024292)
 PRO_SLR_TONE_THRESHOLD = float(np.float32(0.1))
@@ -1117,7 +1118,7 @@ def working_spaces(directory=None):
     """[(file path, description)] of RGB working spaces: the Kodak ones plus the system's."""
     d = Path(directory) if directory else profiles.profile_dir()
     found, seen = [], set()
-    for p in sorted(d.glob("*.ic[cm]")) + sorted(profiles.system_color_dirs_profiles()):
+    for p in profiles.builtin_profile_paths() + sorted(d.glob("*.ic[cm]")) + sorted(profiles.system_color_dirs_profiles()):
         try:
             prof = _profile(str(p))
         except (ValueError, OSError):
@@ -1134,6 +1135,8 @@ def space_setting(path, directory=None):
     the full path for a system profile."""
     p = Path(path)
     d = Path(directory) if directory else profiles.profile_dir()
+    if p.resolve() in (q.resolve() for q in profiles.builtin_profile_paths()):
+        return p.name
     return p.name if (d / p.name).is_file() and p.parent.resolve() == d.resolve() else str(p)
 
 
@@ -1145,10 +1148,12 @@ def resolve_space(space, directory=None):
     if p.is_file():
         return str(p)
     d = Path(directory) if directory else profiles.profile_dir()
-    for candidate in [d / p.name] + [q for q in profiles.system_color_dirs_profiles() if q.name == p.name]:
+    for candidate in ([q for q in profiles.builtin_profile_paths() if q.name == p.name]
+                      + [d / p.name]
+                      + [q for q in profiles.system_color_dirs_profiles() if q.name == p.name]):
         if candidate.is_file():
             return str(candidate)
-    return str(d / DEFAULT_WORKING_SPACE)
+    return str(next(q for q in profiles.builtin_profile_paths() if q.name == DEFAULT_WORKING_SPACE))
 
 
 @functools.lru_cache(maxsize=16)

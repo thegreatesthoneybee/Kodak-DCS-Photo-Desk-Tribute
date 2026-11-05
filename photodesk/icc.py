@@ -21,15 +21,7 @@ class Lut16:
     that measured worse against the Photo Desk references."""
 
     def __init__(self, tag, lab_output=False):
-        if tag[:4] != b"mft2":
-            raise ValueError(f"unsupported LUT type {tag[:4]!r}")
-        nin, nout, grid = tag[8], tag[9], tag[10]
-        if nin != 3 or nout != 3:
-            raise ValueError("only 3-in/3-out LUTs are supported")
-        matrix = struct.unpack_from(">9i", tag, 12)
-        if matrix != (65536, 0, 0, 0, 65536, 0, 0, 0, 65536):
-            raise ValueError("non-identity mft2 matrix is not supported")
-        n_in, n_out = struct.unpack_from(">HH", tag, 48)
+        nin, nout, grid, n_in, n_out = _lut16_dimensions(tag)
         p = 52
         self.in_curves = np.frombuffer(tag, ">u2", 3 * n_in, p).reshape(3, n_in).astype(np.float32) / 65535
         p += 6 * n_in
@@ -48,6 +40,29 @@ class Lut16:
             return uvl_to_lab(tetrahedral(self.uvl_nodes, x))
         y = trilinear(self.clut, x)
         return np.stack([_curve(self.out_curves[c], y[..., c]) for c in range(3)], -1)
+
+
+def _lut16_dimensions(tag):
+    """Validate an mft2 tag before reading its tables and return its dimensions."""
+    if len(tag) < 52:
+        raise ValueError("truncated mft2 header")
+    if tag[:4] != b"mft2":
+        raise ValueError(f"unsupported LUT type {tag[:4]!r}")
+    nin, nout, grid = tag[8], tag[9], tag[10]
+    if nin != 3 or nout != 3:
+        raise ValueError("only 3-in/3-out LUTs are supported")
+    if grid < 2:
+        raise ValueError("mft2 grid must contain at least two points per dimension")
+    matrix = struct.unpack_from(">9i", tag, 12)
+    if matrix != (65536, 0, 0, 0, 65536, 0, 0, 0, 65536):
+        raise ValueError("non-identity mft2 matrix is not supported")
+    n_in, n_out = struct.unpack_from(">HH", tag, 48)
+    if n_in < 2 or n_out < 2:
+        raise ValueError("mft2 input and output curves need at least two samples")
+    required = 52 + 6 * (n_in + grid ** 3 + n_out)
+    if len(tag) < required:
+        raise ValueError("truncated mft2 tables")
+    return nin, nout, grid, n_in, n_out
 
 
 def _curve(table, x):
@@ -171,9 +186,34 @@ class Profile:
 
     @property
     def is_working_space(self):
-        """True for RGB matrix/TRC display profiles usable as an RGB working space."""
-        return (self.device_class == "mntr" and self.color_space == "RGB" and self.pcs == "XYZ"
-                and all(t in self.tags for t in ("rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC")))
+        """Whether this RGB display/color-space profile has a supported reverse transform."""
+        if self.device_class not in ("mntr", "spac") or self.color_space != "RGB":
+            return False
+        if "B2A0" in self.tags:
+            if self.pcs not in ("XYZ", "Lab"):
+                return False
+            try:
+                _lut16_dimensions(self.tags["B2A0"])
+            except (ValueError, struct.error):
+                return False
+            return True
+        if self.device_class != "mntr" or self.pcs != "XYZ":
+            return False
+        try:
+            xyz_tags = [self.tags[t] for t in ("rXYZ", "gXYZ", "bXYZ")]
+            if any(len(tag) < 20 or tag[:4] != b"XYZ " for tag in xyz_tags):
+                return False
+            matrix = self.rgb_to_xyz_matrix()
+            if np.linalg.matrix_rank(matrix) != 3:
+                return False
+            for channel in "rgb":
+                x, y = self.trc(channel)
+                if (len(x) < 2 or x.shape != y.shape or not np.isfinite(y).all()
+                        or np.any(np.diff(y) < 0)):
+                    return False
+        except (KeyError, ValueError, struct.error, OverflowError, np.linalg.LinAlgError):
+            return False
+        return True
 
     def rgb_to_xyz_matrix(self):
         """Columns are the D50 XYZ of the R, G, B primaries."""
@@ -212,6 +252,18 @@ class Profile:
 
     def encoder(self):
         """Return f(XYZ D50) -> encoded RGB in [0, 1] for a working-space profile."""
+        if not self.is_working_space:
+            raise ValueError(f"{self.path} has no supported RGB working-space transform")
+        if "B2A0" in self.tags:
+            lut = self.lut("B2A0")
+            if self.pcs == "XYZ":
+                def encode(xyz):
+                    return lut(xyz_encode(xyz))
+            else:
+                def encode(xyz):
+                    return lut(lab_encode(xyz_to_lab(xyz)))
+            return encode
+
         inv = np.linalg.inv(self.rgb_to_xyz_matrix()).astype(np.float32)
         curves = [self.trc(c) for c in "rgb"]
 
