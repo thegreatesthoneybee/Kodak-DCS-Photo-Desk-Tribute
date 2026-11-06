@@ -1449,6 +1449,7 @@ def test_thumbnail_temperature_initialization_respects_sidecar_and_async_edits(m
 
     window = SimpleNamespace(pdir="profiles", thumb_pool=SimpleNamespace(start=lambda _task: None),
                              focused=lambda: None, refresh_thumb=lambda entry: refreshed.append(entry),
+                             _main_histogram_entry=lambda: None,
                              _refresh_image_controls=lambda entry: panels_refreshed.append(entry))
     sw = SimpleNamespace(view=SimpleNamespace(refresh_entry=lambda _entry: None))
 

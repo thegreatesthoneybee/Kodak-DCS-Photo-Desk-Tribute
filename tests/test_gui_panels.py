@@ -4,7 +4,9 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent
+import numpy as np
+from PySide6.QtCore import QCoreApplication, QEvent, QRect
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QDockWidget
 
 from photodesk import camera, pipeline
@@ -221,7 +223,7 @@ def test_histogram_detaches_from_tabs_at_minimum_size_but_remains_resizable(wind
         dock.show()
         dock.raise_()
         qt_app.processEvents()
-        assert dock.height() > dock.minimumSizeHint().height()
+        assert dock.height() == dock.minimumSizeHint().height()
 
         dock.setFloating(True)
         qt_app.processEvents()
@@ -241,7 +243,7 @@ def test_histogram_detaches_from_tabs_at_minimum_size_but_remains_resizable(wind
     dock.raise_()
     qt_app.processEvents()
     assert not dock.isFloating()
-    assert dock.height() > dock.minimumSizeHint().height()
+    assert dock.height() == dock.minimumSizeHint().height()
 
 
 def test_right_tabs_scroll_when_window_is_short_and_recover_when_enlarged(window, qt_app):
@@ -260,6 +262,12 @@ def test_right_tabs_scroll_when_window_is_short_and_recover_when_enlarged(window
         qt_app.processEvents()
         scroll = dock.widget()
         panel = scroll.widget()
+        if dock is main.hist_dock:
+            assert scroll.viewport().width() >= main.hist.minimumWidth()
+            assert scroll.viewport().height() >= main.hist.minimumHeight()
+            assert not scroll.horizontalScrollBar().isVisible()
+            assert not scroll.verticalScrollBar().isVisible()
+            continue
         assert scroll.verticalScrollBar().maximum() > 0
         assert scroll.verticalScrollBar().isVisible()
         scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
@@ -300,3 +308,156 @@ def test_docked_histogram_stays_visible_with_both_sidebar_tabs(window, qt_app):
     histogram.setFloating(True)
     qt_app.processEvents()
     assert histogram.size() == histogram.minimumSizeHint().expandedTo(histogram.minimumSize())
+
+
+@pytest.mark.parametrize("saved_geometry", [None, QRect(40, 40, 480, 400)])
+def test_open_from_contact_sheet_keeps_photo_visible_beside_controls(window, qt_app, saved_geometry):
+    main, folder = window
+    main.resize(800, 600)
+    if saved_geometry is not None:
+        main.q.setValue("Image Viewer Geometry", saved_geometry)
+    sheet = main.open_folder(folder)
+    image = main.open_image(sheet.sheet.entries[0], sheet)
+    pixels = QImage(80, 60, QImage.Format_RGB32)
+    pixels.fill(QColor("red"))
+    image.view.set_image(pixels, (800, 600), None)
+    qt_app.processEvents()
+    for floating in (True, False, True):
+        main.set_window_floating(image, floating)
+        qt_app.processEvents()
+        assert not image.view.visibleRegion().isEmpty()
+        assert image.view.viewport().width() >= 250
+        assert image.controls.isVisible()
+        shot = image.view.viewport().grab().toImage()
+        assert shot.pixelColor(shot.width() // 2, shot.height() // 2) == QColor("red")
+        if floating:
+            assert image.content.isAncestorOf(image.view)
+            assert image.content.isAncestorOf(image.controls)
+            assert image.width() <= image.screen().availableGeometry().width()
+
+
+def test_main_and_floating_images_keep_independent_histograms(window, qt_app):
+    main, folder = window
+    sheet = main.open_folder(folder)
+    main.hist_dock.setFloating(False)
+    main.hist_dock.show()
+    entries = sheet.sheet.entries
+    for value, entry in zip((80, 100, 120), entries):
+        thumbnail = QImage(60, 40, QImage.Format_RGB32)
+        thumbnail.fill(QColor(value, value, value))
+        entry.thumb = thumbnail
+    sheet.view.setCurrentRow(0)
+    qt_app.processEvents()
+    main._update_histogram()
+    assert main.hist_dock.parentWidget() is main
+    assert main.hist.graph.hist[0][80] > 0
+
+    first = main.open_image(entries[0], sheet)
+    first.rgb = np.full((40, 60, 3), 160, np.uint8)
+    first.update_histogram()
+    second = ImageWindow(main, sheet, entries[1])
+    second.rgb = np.full((40, 60, 3), 200, np.uint8)
+    main._float_new(second)
+    second.update_histogram()
+    qt_app.processEvents()
+    assert first.hist is not main.hist and first.hist is not second.hist
+    assert second.hist is not main.hist
+    assert main.hist_dock.parentWidget() is main
+    assert first.hist_dock.parentWidget() is first.content
+    assert second.hist_dock.parentWidget() is second.content
+    assert not main.hist_dock.isHidden()
+    assert not first.hist_dock.isHidden() and not second.hist_dock.isHidden()
+    for image in (first, second):
+        scroll = image.hist_dock.widget()
+        assert image.hist_dock.height() == image.hist_dock.minimumSizeHint().height()
+        assert image.hist_dock.geometry().bottom() < image.controls_dock.geometry().top()
+        assert scroll.viewport().width() >= image.hist.minimumWidth()
+        assert scroll.viewport().height() >= image.hist.minimumHeight()
+        assert not scroll.horizontalScrollBar().isVisible()
+        assert not scroll.verticalScrollBar().isVisible()
+    assert first.hist.graph.hist[0][160] > 0
+    assert second.hist.graph.hist[0][200] > 0
+    assert main.hist.graph.hist[0][80] > 0
+    assert main.hist.graph.hist[0][160] == 0 and main.hist.graph.hist[0][200] == 0
+
+    # The menu action follows the active floating image without hiding the main histogram
+    # or changing another image window's independent panel.
+    main._activate_image(first)
+    main.toggle_histogram()
+    assert first.hist_dock.isHidden()
+    assert not second.hist_dock.isHidden()
+    assert not main.hist_dock.isHidden()
+    main.toggle_histogram()
+    assert not first.hist_dock.isHidden()
+
+    # MDI images use the main histogram, while their local panel is hidden and restored on float.
+    main.set_window_floating(first, False)
+    qt_app.processEvents()
+    assert first.hist_dock.isHidden()
+    assert main.hist.graph.hist[0][160] > 0
+    main.set_window_floating(first, True)
+    qt_app.processEvents()
+    assert not first.hist_dock.isHidden()
+    assert main.hist_dock.parentWidget() is main
+    assert main.hist.graph.hist[0][80] > 0
+
+    # The actual MDI sheet selection remains the main histogram source while a floating viewer
+    # is active, including when that selected thumbnail finishes an asynchronous render.
+    sheet.view.setCurrentRow(1)
+    qt_app.processEvents()
+    assert main.hist.graph.hist[0][100] > 0
+    entries[1].thumb_gen += 1
+    main._thumb_rendered((entries[1], entries[1].thumb_gen, sheet),
+                         np.full((40, 60, 3), 110, np.uint8))
+    assert main.hist.graph.hist[0][110] > 0
+    assert main.hist_dock.objectName() == main.res.s(59956)
+    assert first.hist.graph.hist[0][160] > 0
+    assert second.hist.graph.hist[0][200] > 0
+
+    first.hist_dock.setFloating(True)
+    qt_app.processEvents()
+    minimum = first.hist_dock.minimumSizeHint().expandedTo(first.hist_dock.minimumSize())
+    assert first.hist_dock.size() == minimum
+    first.hist_dock.resize(minimum.width() + 120, minimum.height() + 100)
+    qt_app.processEvents()
+    assert first.hist_dock.width() > minimum.width()
+    assert first.hist_dock.height() > minimum.height()
+    assert not second.hist_dock.isFloating()
+
+    second.close()
+    qt_app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    main._activate_image(first)
+    qt_app.processEvents()
+    assert first.hist_dock.parentWidget() is first.content
+    assert first.hist.graph.hist[0][160] > 0
+    first.close()
+    qt_app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert main.hist_dock.parentWidget() is main
+    assert not main.hist_dock.isHidden()
+    assert main.hist.graph.hist[0][110] > 0
+
+
+def test_visible_histogram_restores_and_initializes_independent_image_panel(window, qt_app):
+    main, folder = window
+    main.hist_dock.setFloating(False)
+    main.hist_dock.show()
+    qt_app.processEvents()
+    main.close()
+    qt_app.processEvents()
+    restored = MainWindow(main.res)
+    try:
+        restored.show()
+        qt_app.processEvents()
+        assert not restored.hist_dock.isHidden()
+        assert not restored.hist_dock.isFloating()
+        sheet = restored.open_folder(folder)
+        image = restored.open_image(sheet.sheet.entries[0], sheet)
+        qt_app.processEvents()
+        assert not restored.hist_dock.visibleRegion().isEmpty()
+        assert not image.hist_dock.visibleRegion().isEmpty()
+        assert image.hist_dock is not restored.hist_dock
+    finally:
+        restored.close()
+        qt_app.processEvents()

@@ -275,6 +275,7 @@ class ImageWindow(DocumentSubWindow):
         self.content.setWindowFlags(Qt.Widget)
         self.content.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks)
         self.view = ImageView(cursors)
+        self.view.setMinimumSize(256, 160)
         self.view.set_tool(main.tool)
         self.content.setCentralWidget(self.view)
         self.setWidget(self.content)
@@ -306,6 +307,21 @@ class ImageWindow(DocumentSubWindow):
         self.controls_dock.visibilityChanged.connect(
             lambda visible: main._image_controls_visibility_changed(self, visible))
         self.refresh_controls()
+        self.histogram_visible = main._histogram_visible
+        self._setting_histogram_visibility = False
+        self.hist = HistogramPanel(main.res, self)
+        self.hist.set_appearance(main.appearance)
+        self.hist_dock = main._histogram_dock(self.content, self.hist)
+        self.content.splitDockWidget(self.hist_dock, self.controls_dock, Qt.Vertical)
+        self._histogram_layout_pending = False
+        self.hist_dock.visibilityChanged.connect(self._histogram_visibility_changed)
+        self.hist_dock.topLevelChanged.connect(self._histogram_floating_changed)
+        self.hist_dock.dockLocationChanged.connect(lambda _: self._schedule_histogram_layout())
+        self.content.tabifiedDockWidgetActivated.connect(lambda _: self._schedule_histogram_layout())
+        self._histogram_layout_running = False
+        self._histogram_layout_force = False
+        self.hist_dock.setMaximumHeight(self.hist_dock.minimumSizeHint().height())
+        self._schedule_histogram_layout()
         self.view.clicked.connect(self._clicked)
         self.view.crop_changed.connect(self._crop_changed)
         self.view.hover.connect(main.show_pixel)
@@ -337,6 +353,70 @@ class ImageWindow(DocumentSubWindow):
                 self.controls_dock.raise_()
         finally:
             self._moving_controls = False
+
+    def set_histogram_dock_visible(self, visible):
+        self._setting_histogram_visibility = True
+        try:
+            self.hist_dock.setVisible(visible)
+        finally:
+            self._setting_histogram_visibility = False
+
+    def _histogram_visibility_changed(self, _visible):
+        if self._setting_histogram_visibility:
+            return
+        self.histogram_visible = not self.hist_dock.isHidden()
+        self.main._histogram_visible = self.histogram_visible
+        self.main._sync_histogram_action()
+
+    def _schedule_histogram_layout(self, force=False):
+        self._histogram_layout_force |= force
+        if not self._histogram_layout_pending and not self._histogram_layout_running:
+            self._histogram_layout_pending = True
+            QTimer.singleShot(0, self._keep_histogram_above_controls)
+
+    def _keep_histogram_above_controls(self):
+        self._histogram_layout_pending = False
+        if self.hist_dock.isFloating() or self._controls_host is not self.content:
+            return
+        force = self._histogram_layout_force
+        self._histogram_layout_force = False
+        self._histogram_layout_running = True
+        try:
+            self.hist_dock.setMaximumHeight(self.hist_dock.minimumSizeHint().height())
+            needs_split = (force or self.hist_dock in self.content.tabifiedDockWidgets(self.controls_dock)
+                           or self.content.dockWidgetArea(self.hist_dock)
+                           != self.content.dockWidgetArea(self.controls_dock)
+                           or (not self.hist_dock.isHidden()
+                               and self.hist_dock.geometry().top() >= self.controls_dock.geometry().top()))
+            if not needs_split:
+                return
+            visible = not self.hist_dock.isHidden()
+            area = self.content.dockWidgetArea(self.controls_dock)
+            self.content.removeDockWidget(self.hist_dock)
+            self.content.addDockWidget(area, self.hist_dock)
+            self.content.splitDockWidget(self.hist_dock, self.controls_dock, Qt.Vertical)
+            self.set_histogram_dock_visible(visible)
+            self.content.resizeDocks([self.hist_dock], [self.hist_dock.minimumSizeHint().height()], Qt.Vertical)
+        finally:
+            self._histogram_layout_running = False
+
+    def _histogram_floating_changed(self, floating):
+        if floating:
+            self.hist_dock.setMaximumHeight(16777215)
+            QTimer.singleShot(0, self._resize_floating_histogram)
+        else:
+            self.hist_dock.setMaximumHeight(self.hist_dock.minimumSizeHint().height())
+            self._schedule_histogram_layout(force=True)
+
+    def _resize_floating_histogram(self):
+        if self.hist_dock.isFloating():
+            self.hist_dock.resize(self.hist_dock.minimumSizeHint().expandedTo(self.hist_dock.minimumSize()))
+
+    def update_histogram(self):
+        img = self.rgb
+        if img is not None and self.entry.settings.crop:
+            img = pipeline.apply_crop(img, self.entry.settings.crop)
+        self.hist.set_image(img)
 
     def _make_panel_actions(self):
         """Local action state lets this panel stay usable regardless of the active document."""
@@ -408,6 +488,7 @@ class ImageWindow(DocumentSubWindow):
         self.rgb = None
         self.token += 1
         self.latest[0] = self.token
+        self.update_histogram()
         if not any(w.entry is old for w in self.sheet_win.images):
             old.raw = None
 
@@ -508,6 +589,8 @@ class MainWindow(QMainWindow):
         self.update_commands()
         self.restoreGeometry(self.q.value("MainFrame Position", b""))
         self.restoreState(self.q.value("ControlBar States", b""))
+        self._histogram_visible = not self.hist_dock.isHidden()
+        self._sync_histogram_action()
         histogram_size = self.q.value("Histogram Dock Size", QSize(), QSize)
         if histogram_size.isValid():
             self.hist_dock.resize(max(histogram_size.width(), self.hist_dock.minimumWidth()),
@@ -596,7 +679,7 @@ class MainWindow(QMainWindow):
             32824: lambda: self.sort("name"), 32825: lambda: self.sort("date"),
             33179: lambda: self.zoom_step(1), 33180: lambda: self.zoom_step(-1), 32849: self.zoom_fit,
             32844: self.zoom_other, 32836: self.toggle_image_controls,
-            32857: lambda: self.toggle_dock(self.info_dock), 33104: lambda: self.toggle_dock(self.hist_dock),
+            32857: lambda: self.toggle_dock(self.info_dock), 33104: self.toggle_histogram,
             32840: self.toggle_thumb_info, 59392: lambda: self.toolbar.setVisible(not self.toolbar.isVisible()),
             59393: self.toggle_status_bar,
             33188: self.review, 33129: lambda: self.set_quality("faster"), 33128: lambda: self.set_quality("better"),
@@ -735,20 +818,64 @@ class MainWindow(QMainWindow):
         self.hist.set_appearance(self.appearance)
         ctx = ("Image Controls Panel", "Image Info Panel", "Histogram Panel", "View Menu")
         self.info_dock = self._dock(res.tr("Image Info", ctx), self.info, Qt.RightDockWidgetArea, 32857)
-        self.hist_dock = self._dock(res.s(59956), self.hist, Qt.RightDockWidgetArea, 33104)
+        self.hist_dock = self._histogram_dock(self, self.hist)
         self.hist_dock.setFloating(True)
         self.hist_dock.hide()
-        scroll = self.hist_dock.widget()
-        border = 2 * scroll.frameWidth()
-        scroll.setMinimumSize(self.hist.minimumSize() + QSize(border, border))
-        self.hist_dock.topLevelChanged.connect(self._histogram_floating_changed)
+        self.hist_dock.visibilityChanged.connect(self._main_histogram_visibility_changed)
+        self.hist_dock.topLevelChanged.connect(self._main_histogram_floating_changed)
         self._histogram_layout_pending = False
+        self._histogram_layout_running = False
+        self._histogram_layout_force = False
         self.hist_dock.dockLocationChanged.connect(lambda _: self._schedule_histogram_layout())
         self.tabifiedDockWidgetActivated.connect(lambda _: self._schedule_histogram_layout())
+        self._histogram_visible = not self.hist_dock.isHidden()
         self._schedule_histogram_layout()
 
-    def _schedule_histogram_layout(self):
-        if not self._histogram_layout_pending:
+    def _histogram_dock(self, owner, panel):
+        title = self.res.s(59956)
+        dock = QDockWidget(title, owner)
+        dock.setObjectName(title)
+        scroll = QScrollArea(dock)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(panel)
+        border = 2 * scroll.frameWidth()
+        scroll.setMinimumSize(panel.minimumSize() + QSize(border, border))
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        dock.setWidget(scroll)
+        dock.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable
+                         | QDockWidget.DockWidgetFloatable)
+        owner.addDockWidget(Qt.RightDockWidgetArea, dock)
+        return dock
+
+    def _main_histogram_visibility_changed(self, _visible):
+        self._histogram_visible = not self.hist_dock.isHidden()
+        self._sync_histogram_action()
+
+    def _sync_histogram_action(self):
+        image = self.active_image()
+        dock = image.hist_dock if image is not None and image.floating else self.hist_dock
+        self.acts[33104].setChecked(not dock.isHidden())
+
+    def toggle_histogram(self):
+        image = self.active_image()
+        dock = image.hist_dock if image is not None and image.floating else self.hist_dock
+        visible = dock.isHidden()
+        if image is not None and image.floating:
+            image.histogram_visible = visible
+            image.set_histogram_dock_visible(visible)
+            self._histogram_visible = visible
+            image.update_histogram()
+        else:
+            dock.setVisible(visible)
+            self._histogram_visible = visible
+            if visible:
+                self._update_histogram()
+        self._sync_histogram_action()
+
+    def _schedule_histogram_layout(self, force=False):
+        self._histogram_layout_force |= force
+        if not self._histogram_layout_pending and not self._histogram_layout_running:
             self._histogram_layout_pending = True
             QTimer.singleShot(0, self._keep_histogram_visible_with_tabs)
 
@@ -756,37 +883,41 @@ class MainWindow(QMainWindow):
         self._histogram_layout_pending = False
         if self.hist_dock.isFloating():
             return
-        tabs = self.tabifiedDockWidgets(self.hist_dock)
-        if not tabs:
-            return
-        # A shared dock above the tab stack stays visible when either tab is selected.
-        visible = not self.hist_dock.isHidden()
-        anchor = self.info_dock if self.info_dock in tabs else tabs[0]
-        area = self.dockWidgetArea(anchor)
-        self.removeDockWidget(self.hist_dock)
-        self.addDockWidget(area, self.hist_dock)
-        self.splitDockWidget(self.hist_dock, anchor, Qt.Vertical)
-        for dock in tabs:
-            if dock is not anchor:
-                self.tabifyDockWidget(anchor, dock)
-        self.hist_dock.setVisible(visible)
-        active = self.active_image()
-        if active and active.controls_dock in tabs:
-            active.controls_dock.raise_()
-        else:
-            anchor.raise_()
-        self.resizeDocks([self.hist_dock], [self.hist.minimumHeight()], Qt.Vertical)
-        self._update_histogram()
+        force = self._histogram_layout_force
+        self._histogram_layout_force = False
+        self._histogram_layout_running = True
+        try:
+            self.hist_dock.setMaximumHeight(self.hist_dock.minimumSizeHint().height())
+            tabs = [dock for dock in self.tabifiedDockWidgets(self.info_dock) if dock is not self.hist_dock]
+            needs_split = (force or self.hist_dock in self.tabifiedDockWidgets(self.info_dock)
+                           or self.dockWidgetArea(self.hist_dock) != self.dockWidgetArea(self.info_dock)
+                           or (not self.hist_dock.isHidden()
+                               and self.hist_dock.geometry().top() >= self.info_dock.geometry().top()))
+            if not needs_split:
+                return
+            visible = not self.hist_dock.isHidden()
+            area = self.dockWidgetArea(self.info_dock)
+            self.removeDockWidget(self.hist_dock)
+            self.addDockWidget(area, self.hist_dock)
+            self.splitDockWidget(self.hist_dock, self.info_dock, Qt.Vertical)
+            for dock in tabs:
+                self.tabifyDockWidget(self.info_dock, dock)
+            self.hist_dock.setVisible(visible)
+            self.resizeDocks([self.hist_dock], [self.hist_dock.minimumSizeHint().height()], Qt.Vertical)
+            self._update_histogram()
+        finally:
+            self._histogram_layout_running = False
 
-    def _histogram_floating_changed(self, floating):
-        scroll = self.hist_dock.widget()
-        border = 2 * scroll.frameWidth()
-        scroll.setMinimumSize(self.hist.minimumSize() + QSize(border, border) if floating else QSize(0, 0))
+    def _main_histogram_floating_changed(self, floating):
         if floating:
+            self.hist_dock.setMaximumHeight(16777215)  # QWidget's unrestricted maximum.
             # Qt finishes applying the docked geometry after topLevelChanged.
-            QTimer.singleShot(0, self._resize_floating_histogram)
+            QTimer.singleShot(0, self._resize_main_floating_histogram)
+        else:
+            self.hist_dock.setMaximumHeight(self.hist_dock.minimumSizeHint().height())
+            self._schedule_histogram_layout(force=True)
 
-    def _resize_floating_histogram(self):
+    def _resize_main_floating_histogram(self):
         if self.hist_dock.isFloating():
             self.hist_dock.resize(self.hist_dock.minimumSizeHint().expandedTo(self.hist_dock.minimumSize()))
 
@@ -824,6 +955,9 @@ class MainWindow(QMainWindow):
         self.q.setValue("Appearance", self.appearance)
         apply_appearance(QApplication.instance(), self.appearance)
         self.hist.set_appearance(self.appearance)
+        for sheet in self.sheets:
+            for window in sheet.images:
+                window.hist.set_appearance(self.appearance)
         self.mdi.setBackground(self.palette().color(QPalette.ColorRole.Dark))
         self._update_appearance_icons()
 
@@ -903,6 +1037,7 @@ class MainWindow(QMainWindow):
             active = self.active_image()
             for sheet in self.sheets:
                 for window in sheet.images:
+                    window.set_histogram_dock_visible(window.floating and window.histogram_visible)
                     in_frame = not window.floating and window is active
                     host = self if in_frame else window.content
                     visible = window.controls_visible and (window.floating or in_frame)
@@ -948,6 +1083,8 @@ class MainWindow(QMainWindow):
         if not floating:
             self.mdi.setActiveSubWindow(window)
         self.selection_changed()
+        if floating and isinstance(window, ImageWindow):
+            self._fit_floating_viewer(window)
 
     def selection(self):
         """Selected entries: the image window's entry, or the contact sheet selection."""
@@ -984,6 +1121,7 @@ class MainWindow(QMainWindow):
             self.st_size.setText("")
             self.show_zoom(sw.view.zoom)
         self._update_histogram()
+        self._sync_histogram_action()
         self.update_commands()
 
     def update_commands(self):
@@ -1136,6 +1274,7 @@ class MainWindow(QMainWindow):
             self._refresh_image_controls(entry)
             if entry is self.focused():
                 self.info.set_entry(entry)
+            if entry is self._main_histogram_entry():
                 self._update_histogram()
         task.signals.done.connect(done)
         task.signals.failed.connect(lambda entry, msg: self.statusBar().showMessage(
@@ -1165,7 +1304,7 @@ class MainWindow(QMainWindow):
         entry.thumb = to_qimage(img)
         if sw in self.sheets:
             sw.view.refresh_entry(entry)
-        if entry is self.focused():
+        if entry is self._main_histogram_entry():
             self._update_histogram()
 
     def open_selected(self):
@@ -1188,6 +1327,20 @@ class MainWindow(QMainWindow):
         else:
             self.mdi.setActiveSubWindow(w)
 
+    def _fit_floating_viewer(self, window):
+        """Keep both the photograph and controls usable, including old narrow geometries."""
+        available = window.screen().availableGeometry()
+        scroll = window.controls_scroll
+        panel_width = (window.controls.width() + 2 * scroll.frameWidth()
+                       + scroll.verticalScrollBar().sizeHint().width())
+        scroll.setMinimumWidth(min(panel_width, max(96, available.width() - window.view.minimumWidth() - 40)))
+        window.content.layout().activate()
+        minimum = window.minimumSizeHint().expandedTo(window.minimumSize())
+        size = window.size().expandedTo(minimum).boundedTo(available.size() - QSize(32, 48))
+        window.resize(size)
+        window.move(max(available.left(), min(window.x(), available.right() - window.width() - 16)),
+                    max(available.top() + 24, min(window.y(), available.bottom() - window.height() - 24)))
+
     def _float_new(self, w, offset=0):
         """Show a new image window as a floating top-level window that can leave the main frame."""
         w.floating = True
@@ -1199,11 +1352,15 @@ class MainWindow(QMainWindow):
         else:
             top_left = self.mdi.mapToGlobal(QPoint(0, 0))
             w.setGeometry(QRect(top_left + QPoint(40 + offset, 40 + offset),
-                                QSize(max(480, self.mdi.width() * 2 // 3), max(360, self.mdi.height() * 2 // 3))))
+                                QSize(max(480, self.mdi.width() * 2 // 3) + w.controls_scroll.minimumWidth(),
+                                      max(360, self.mdi.height() * 2 // 3))))
         w.show()
+        self._fit_floating_viewer(w)
         self._active_window = w
+        w.set_histogram_dock_visible(w.histogram_visible)
         w.raise_()
         w.activateWindow()
+        self._sync_histogram_action()
 
     def _show_in_viewer(self, sheet_win, entry):
         """Show ``entry`` in the contact sheet's floating image window (reused for every image)."""
@@ -1299,6 +1456,7 @@ class MainWindow(QMainWindow):
         w.view.set_image(to_qimage(img), (fw, fh), e.settings.crop)
         w.view.ratio = self._crop_ratio()
         w.rgb = w.view.array
+        w.update_histogram()
         self.statusBar().clearMessage()
         self.selection_changed()
 
@@ -1768,6 +1926,7 @@ class MainWindow(QMainWindow):
             for sw in self.sheets:
                 for w in sw.images:
                     if w.entry is e:
+                        w.update_histogram()
                         self.render_window(w)
             for cu in self.closeups:
                 if cu.entry is e:
@@ -2047,19 +2206,32 @@ class MainWindow(QMainWindow):
                              lambda e, on: self.edit("tag" if on else "untag", [e], tagged=on), self.quality)
         dlg.exec()
 
+    def _main_histogram_entry(self):
+        window = self.mdi.activeSubWindow()
+        if isinstance(window, ImageWindow):
+            return window.entry
+        if isinstance(window, SheetWindow):
+            return window.view.focused_entry()
+        return None
+
     def _update_histogram(self):
         if not self.hist_dock.isVisible():
             return
-        iw = self.active_image()
-        if iw and iw.rgb is not None:
-            img = iw.rgb
-            c = iw.entry.settings.crop
-            if c:
-                img = pipeline.apply_crop(img, c)
-            self.hist.set_image(img)
-            return
-        e = self.focused()
-        self.hist.set_image(qimage_array(e.thumb) if e is not None and e.thumb is not None else None)
+        window = self.mdi.activeSubWindow()
+        if isinstance(window, ImageWindow):
+            if window.rgb is not None:
+                img = window.rgb
+                crop = window.entry.settings.crop
+                if crop:
+                    img = pipeline.apply_crop(img, crop)
+            else:
+                img = qimage_array(window.entry.thumb) if window.entry.thumb is not None else None
+        elif isinstance(window, SheetWindow):
+            entry = window.view.focused_entry()
+            img = qimage_array(entry.thumb) if entry is not None and entry.thumb is not None else None
+        else:
+            img = None
+        self.hist.set_image(img)
 
     # ---------------------------------------------------------- tools
     def set_tool(self, tool):
