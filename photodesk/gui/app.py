@@ -742,6 +742,41 @@ class MainWindow(QMainWindow):
         border = 2 * scroll.frameWidth()
         scroll.setMinimumSize(self.hist.minimumSize() + QSize(border, border))
         self.hist_dock.topLevelChanged.connect(self._histogram_floating_changed)
+        self._histogram_layout_pending = False
+        self.hist_dock.dockLocationChanged.connect(lambda _: self._schedule_histogram_layout())
+        self.tabifiedDockWidgetActivated.connect(lambda _: self._schedule_histogram_layout())
+        self._schedule_histogram_layout()
+
+    def _schedule_histogram_layout(self):
+        if not self._histogram_layout_pending:
+            self._histogram_layout_pending = True
+            QTimer.singleShot(0, self._keep_histogram_visible_with_tabs)
+
+    def _keep_histogram_visible_with_tabs(self):
+        self._histogram_layout_pending = False
+        if self.hist_dock.isFloating():
+            return
+        tabs = self.tabifiedDockWidgets(self.hist_dock)
+        if not tabs:
+            return
+        # A shared dock above the tab stack stays visible when either tab is selected.
+        visible = not self.hist_dock.isHidden()
+        anchor = self.info_dock if self.info_dock in tabs else tabs[0]
+        area = self.dockWidgetArea(anchor)
+        self.removeDockWidget(self.hist_dock)
+        self.addDockWidget(area, self.hist_dock)
+        self.splitDockWidget(self.hist_dock, anchor, Qt.Vertical)
+        for dock in tabs:
+            if dock is not anchor:
+                self.tabifyDockWidget(anchor, dock)
+        self.hist_dock.setVisible(visible)
+        active = self.active_image()
+        if active and active.controls_dock in tabs:
+            active.controls_dock.raise_()
+        else:
+            anchor.raise_()
+        self.resizeDocks([self.hist_dock], [self.hist.minimumHeight()], Qt.Vertical)
+        self._update_histogram()
 
     def _histogram_floating_changed(self, floating):
         scroll = self.hist_dock.widget()

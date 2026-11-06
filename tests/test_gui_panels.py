@@ -274,3 +274,29 @@ def test_right_tabs_scroll_when_window_is_short_and_recover_when_enlarged(window
         qt_app.processEvents()
         assert dock.widget().verticalScrollBar().maximum() == 0
         assert not dock.widget().verticalScrollBar().isVisible()
+
+
+def test_docked_histogram_stays_visible_with_both_sidebar_tabs(window, qt_app):
+    main, folder = window
+    sheet = main.open_folder(folder)
+    image = main.open_image(sheet.sheet.entries[0], sheet)
+    main.set_window_floating(image, False)
+    histogram = main.hist_dock
+    histogram.setFloating(False)
+    main.tabifyDockWidget(main.info_dock, histogram)
+    histogram.show()
+    histogram.raise_()
+    qt_app.processEvents()
+    qt_app.processEvents()
+    assert not main.tabifiedDockWidgets(histogram)
+    assert image.controls_dock in main.tabifiedDockWidgets(main.info_dock)
+    for dock in (main.info_dock, image.controls_dock, main.info_dock):
+        dock.raise_()
+        qt_app.processEvents()
+        assert not histogram.isFloating()
+        assert not histogram.visibleRegion().isEmpty()
+        assert not dock.visibleRegion().isEmpty()
+        assert histogram.geometry().bottom() < dock.geometry().top()
+    histogram.setFloating(True)
+    qt_app.processEvents()
+    assert histogram.size() == histogram.minimumSizeHint().expandedTo(histogram.minimumSize())
