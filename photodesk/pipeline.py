@@ -488,6 +488,7 @@ def decode(path, half_size=False):
             "aperture": o.aperture, "focal_length": o.focal_length,
             "timestamp": o.timestamp.isoformat() if o.timestamp else None, "artist": o.artist,
         }
+    metadata.update(camera.read_capture_metadata(path))
     metadata["width"], metadata["height"] = full_w, full_h
     gps = camera.read_gps(path)
     if gps:

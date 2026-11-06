@@ -1,4 +1,6 @@
 """Image Controls, Image Info and Output Histogram panels and the Close-Up window."""
+from datetime import datetime
+
 from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QComboBox, QPushButton, QSlider, QTextEdit, QToolButton, QWidget
@@ -280,7 +282,7 @@ class ImageInfoPanel(QWidget):
             return
         s = res.s
         try:
-            size_mb = entry.path.stat().st_size / 1e6
+            size_mb = entry.path.stat().st_size / (1024 * 1024)
         except OSError:
             size_mb = 0
         if not entry.is_raw:
@@ -288,28 +290,38 @@ class ImageInfoPanel(QWidget):
             lst.addItem(s(50012) if entry.file_type == "T" else s(50013))
         meta = entry.meta or {}
         if entry.model:
-            lst.addItem(s(50000) + f"{entry.make} {entry.model}".strip())
-        ts = meta.get("timestamp")
+            lst.addItem(s(50000) + entry.model)
+        for key, cid in (("serial", 50001), ("firmware", 50002), ("image_number", 50003)):
+            value = meta.get(key)
+            if value is not None and value != "":
+                lst.addItem(s(cid) + str(value))
+        ts = meta.get("capture_timestamp") or meta.get("timestamp")
         if ts:
-            lst.addItem(s(50004) + ts[:10])
-            lst.addItem(s(50005) + ts[11:19])
+            try:
+                captured = datetime.fromisoformat(ts[:10].replace(":", "-") + ts[10:])
+            except ValueError:
+                captured = None
+            if captured is not None:
+                lst.addItem(s(50004) + captured.strftime("%m/%d/%Y"))
+                lst.addItem(s(50005) + captured.strftime("%H:%M:%S"))
         w, h = meta.get("width"), meta.get("height")
         if w and h:
             lst.addItem(s(50006) + str(w))
             lst.addItem(s(50007) + str(h))
             lst.addItem(s(50010).replace("%.1f", f"{w * h / 1e6:.1f}"))
-        if entry.is_raw:
-            lst.addItem(s(50011))
         lst.addItem(s(50009).replace("%.1f", f"{size_mb:.1f}"))
+        if meta.get("camera_settings"):
+            lst.addItems(meta["camera_settings"])
+            return
         if meta.get("iso"):
-            lst.addItem(f"ISO:  {meta['iso']:.0f}")
+            lst.addItem(f"ISO Speed:  {meta['iso']:.0f}")
+        if meta.get("aperture"):
+            lst.addItem(f"Aperture:  f{meta['aperture']:g}")
         if meta.get("shutter"):
             sh = meta["shutter"]
-            lst.addItem(f"Shutter:  {'1/%d' % round(1 / sh) if sh < 1 else '%g' % sh} s")
-        if meta.get("aperture"):
-            lst.addItem(f"Aperture:  f/{meta['aperture']:.1f}")
+            lst.addItem(f"Shutter:  {'1/%d' % round(1 / sh) if sh < 1 else '%g' % sh}")
         if meta.get("focal_length"):
-            lst.addItem(f"Focal Length:  {meta['focal_length']:.0f} mm")
+            lst.addItem(f"Focal Length:  {meta['focal_length']:g}")
 
 
 class HistogramPanel(QWidget):

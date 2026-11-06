@@ -147,25 +147,88 @@ def read_serial(path):
     return _ifd0_strings(path, (0x827D,)).get(0x827D, "")
 
 
+def _tiff_header(f):
+    """Return byte order and first-IFD offset for a classic TIFF, or None otherwise."""
+    f.seek(0)
+    head = f.read(8)
+    if len(head) != 8 or head[:4] not in (b"MM\x00*", b"II*\x00"):
+        return None
+    byteorder = ">" if head[:2] == b"MM" else "<"
+    return byteorder, struct.unpack(byteorder + "I", head[4:])[0]
+
+
+def _tiff_entries(f, byteorder, offset):
+    """Read complete 12-byte entries from one bounded classic-TIFF IFD."""
+    if offset < 8:
+        return []
+    f.seek(offset)
+    raw_count = f.read(2)
+    if len(raw_count) != 2:
+        return []
+    count, = struct.unpack(byteorder + "H", raw_count)
+    raw_entries = f.read(12 * count)
+    return [struct.unpack_from(byteorder + "HHI4s", raw_entries, 12 * i)
+            for i in range(len(raw_entries) // 12)]
+
+
+def _ifd0_tags(path, tags):
+    """Read requested ASCII or scalar integer tags from the first TIFF IFD only."""
+    ascii_limit = 1 << 16
+    integer_types = {1: "B", 3: "H", 4: "I", 6: "b", 8: "h", 9: "i"}
+    try:
+        with open(path, "rb") as f:
+            header = _tiff_header(f)
+            if header is None:
+                return {}
+            byteorder, ifd0 = header
+            values = {}
+            for tag, typ, count, field in _tiff_entries(f, byteorder, ifd0):
+                if tag not in tags:
+                    continue
+                if typ == 2 and 0 < count <= ascii_limit:
+                    if count <= 4:
+                        raw = field[:count]
+                    else:
+                        f.seek(struct.unpack(byteorder + "I", field)[0])
+                        raw = f.read(count)
+                    if len(raw) == count:
+                        values[tag] = (typ, raw)
+                    continue
+                code = integer_types.get(typ)
+                if code is None or count != 1:
+                    continue
+                size = struct.calcsize(code)
+                if size <= 4:
+                    raw = field[:size]
+                else:
+                    f.seek(struct.unpack(byteorder + "I", field)[0])
+                    raw = f.read(size)
+                if len(raw) == size:
+                    values[tag] = (typ, struct.unpack(byteorder + code, raw)[0])
+            return values
+    except FileNotFoundError:
+        return {}
+
+
+def _ascii_value(field):
+    if field is None or field[0] != 2:
+        return None
+    value = field[1]
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    if not isinstance(value, str):
+        return None
+    return value.split("\x00", 1)[0]
+
+
 def _ifd0_strings(path, tags):
-    with open(path, "rb") as f:
-        head = f.read(1 << 16)
-    if head[:4] not in (b"MM\x00*", b"II*\x00"):
-        return {}
-    bo = ">" if head[:2] == b"MM" else "<"
-    off, = struct.unpack_from(bo + "I", head, 4)
-    if off + 2 > len(head):
-        return {}
-    n, = struct.unpack_from(bo + "H", head, off)
     vals = {}
-    for i in range(n):
-        p = off + 2 + 12 * i
-        if p + 12 > len(head):
-            break
-        tag, typ, cnt, val = struct.unpack_from(bo + "HHII", head, p)
-        if tag in tags and typ == 2:
-            raw = head[val:val + cnt] if cnt > 4 else head[p + 8:p + 8 + cnt]
-            vals[tag] = raw.split(b"\x00")[0].decode("latin1").strip()
+    for tag, field in _ifd0_tags(path, tags).items():
+        if field[0] == 2:
+            vals[tag] = field[1].split(b"\x00", 1)[0].decode("latin1").strip()
     return vals
 
 
@@ -187,28 +250,33 @@ WB_SETTINGS = ("Daylight", "Tungsten", "Fluorescent", "Flash", "custom", "camera
 def read_kodak_tags(path, tags, expected_types=None, max_count=64):
     """Integer values of the given Kodak IFD (tag 0x8290) tags as {tag: tuple}; reads only the
     IFD entries and those values, not the whole file. ``expected_types`` optionally maps tag IDs
-    to required TIFF type codes; tags with more than ``max_count`` values are skipped."""
+    to required TIFF type codes; tags with more than ``max_count`` values are skipped. ASCII tags
+    are returned as tuples of byte values only when their type 2 is explicitly requested in
+    ``expected_types``."""
     out = {}
     with open(path, "rb") as f:
-        head = f.read(8)
-        if head[:4] not in (b"MM\x00*", b"II*\x00"):
+        header = _tiff_header(f)
+        if header is None:
             return out
-        bo = ">" if head[:2] == b"MM" else "<"
+        bo, ifd0 = header
 
-        def entries(off):
-            f.seek(off)
-            raw = f.read(2)
-            if len(raw) < 2:
-                return []
-            n, = struct.unpack(bo + "H", raw)
-            data = f.read(12 * n)
-            return [struct.unpack_from(bo + "HHI4s", data, 12 * i) for i in range(len(data) // 12)]
-
-        kodak = next((v for t, typ, _, v in entries(struct.unpack(bo + "I", head[4:])[0])
+        kodak = next((v for t, typ, _, v in _tiff_entries(f, bo, ifd0)
                       if t == KODAK_IFD and typ in (4, 13)), None)
         if kodak is None:
             return out
-        for tag, typ, cnt, val in entries(struct.unpack(bo + "I", kodak)[0]):
+        for tag, typ, cnt, val in _tiff_entries(f, bo, struct.unpack(bo + "I", kodak)[0]):
+            if (tag in tags and typ == 2 and expected_types is not None
+                    and expected_types.get(tag) == 2):
+                if cnt == 0 or cnt > max_count:
+                    continue
+                if cnt <= 4:
+                    raw = val[:cnt]
+                else:
+                    f.seek(struct.unpack(bo + "I", val)[0])
+                    raw = f.read(cnt)
+                if len(raw) == cnt:
+                    out[tag] = tuple(raw)
+                continue
             code = _TIFF_INTS.get(typ)
             if (tag not in tags or code is None
                     or (expected_types is not None and typ != expected_types.get(tag, typ))
@@ -240,6 +308,46 @@ def read_kodak_tags(path, tags, expected_types=None, max_count=64):
                     v = tuple(n / d for n, d in zip(v[::2], v[1::2]))
                 out[tag] = v
     return out
+
+
+def read_capture_metadata(path):
+    """Return camera-recorded capture metadata fields present in a DCS TIFF/RAW file."""
+    standard = _ifd0_tags(path, (0x827D, 0x131, 0x9211, 0x9003, 0x132))
+    metadata = {}
+    for tag, key in ((0x827D, "serial"), (0x131, "firmware")):
+        value = _ascii_value(standard.get(tag))
+        if value is not None:
+            metadata[key] = value
+
+    image_number = standard.get(0x9211)
+    if image_number is not None and image_number[0] in (1, 3, 4, 6, 8, 9, 16, 17):
+        value = image_number[1]
+        if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
+            metadata["image_number"] = int(value)
+        elif (isinstance(value, (tuple, list)) and len(value) == 1
+              and isinstance(value[0], (int, np.integer)) and not isinstance(value[0], (bool, np.bool_))):
+            metadata["image_number"] = int(value[0])
+
+    for tag in (0x9003, 0x132):
+        value = _ascii_value(standard.get(tag))
+        if value is not None:
+            metadata["capture_timestamp"] = value
+            break
+
+    # Kodak IFD tag 1009 is the native CameraSettingString. Camera screenshots verify these are
+    # the exact displayed setting rows, so preserve the row text rather than mapping or normalizing it.
+    try:
+        settings = read_kodak_tags(path, (1009,), expected_types={1009: 2}, max_count=65536).get(1009)
+    except FileNotFoundError:
+        return metadata
+    if settings is not None:
+        try:
+            text = bytes(settings).decode("ascii").split("\x00", 1)[0]
+        except UnicodeDecodeError:
+            pass
+        else:
+            metadata["camera_settings"] = tuple(text.splitlines())
+    return metadata
 
 
 def stored_render_parameters(path):
