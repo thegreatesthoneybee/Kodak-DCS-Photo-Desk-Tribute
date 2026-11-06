@@ -210,3 +210,67 @@ def test_panel_edit_and_undo_stay_in_own_contact_sheet(window, qt_app):
     main.set_tool("crop")
     main.set_tool("select")
     main.update_commands()
+
+
+def test_histogram_detaches_from_tabs_at_minimum_size_but_remains_resizable(window, qt_app):
+    main, _ = window
+    dock = main.hist_dock
+    for _ in range(2):
+        dock.setFloating(False)
+        main.tabifyDockWidget(main.info_dock, dock)
+        dock.show()
+        dock.raise_()
+        qt_app.processEvents()
+        assert dock.height() > dock.minimumSizeHint().height()
+
+        dock.setFloating(True)
+        qt_app.processEvents()
+        minimum = dock.minimumSizeHint().expandedTo(dock.minimumSize())
+        assert dock.size() == minimum
+        assert main.hist.isVisible()
+        dock.resize(minimum.width() + 120, minimum.height() + 100)
+        qt_app.processEvents()
+        assert dock.width() > minimum.width()
+        assert dock.height() > minimum.height()
+
+    # A rapid re-dock must not apply the queued floating-size reset to the tab.
+    dock.setFloating(False)
+    dock.setFloating(True)
+    dock.setFloating(False)
+    main.tabifyDockWidget(main.info_dock, dock)
+    dock.raise_()
+    qt_app.processEvents()
+    assert not dock.isFloating()
+    assert dock.height() > dock.minimumSizeHint().height()
+
+
+def test_right_tabs_scroll_when_window_is_short_and_recover_when_enlarged(window, qt_app):
+    main, folder = window
+    sheet = main.open_folder(folder)
+    image = main.open_image(sheet.sheet.entries[0], sheet)
+    main.set_window_floating(image, False)
+    main.hist_dock.setFloating(False)
+    main.tabifyDockWidget(main.info_dock, main.hist_dock)
+    docks = (image.controls_dock, main.info_dock, main.hist_dock)
+    main.resize(1000, 240)
+    qt_app.processEvents()
+    for dock in docks:
+        dock.show()
+        dock.raise_()
+        qt_app.processEvents()
+        scroll = dock.widget()
+        panel = scroll.widget()
+        assert scroll.verticalScrollBar().maximum() > 0
+        assert scroll.verticalScrollBar().isVisible()
+        scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+        qt_app.processEvents()
+        bottom = panel.mapTo(scroll.viewport(), panel.rect().bottomLeft())
+        assert bottom.y() <= scroll.viewport().height()
+
+    main.resize(1500, 1200)
+    qt_app.processEvents()
+    for dock in docks:
+        dock.raise_()
+        qt_app.processEvents()
+        assert dock.widget().verticalScrollBar().maximum() == 0
+        assert not dock.widget().verticalScrollBar().isVisible()

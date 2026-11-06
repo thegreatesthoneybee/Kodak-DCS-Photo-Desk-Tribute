@@ -738,11 +738,32 @@ class MainWindow(QMainWindow):
         self.hist_dock = self._dock(res.s(59956), self.hist, Qt.RightDockWidgetArea, 33104)
         self.hist_dock.setFloating(True)
         self.hist_dock.hide()
+        scroll = self.hist_dock.widget()
+        border = 2 * scroll.frameWidth()
+        scroll.setMinimumSize(self.hist.minimumSize() + QSize(border, border))
+        self.hist_dock.topLevelChanged.connect(self._histogram_floating_changed)
+
+    def _histogram_floating_changed(self, floating):
+        scroll = self.hist_dock.widget()
+        border = 2 * scroll.frameWidth()
+        scroll.setMinimumSize(self.hist.minimumSize() + QSize(border, border) if floating else QSize(0, 0))
+        if floating:
+            # Qt finishes applying the docked geometry after topLevelChanged.
+            QTimer.singleShot(0, self._resize_floating_histogram)
+
+    def _resize_floating_histogram(self):
+        if self.hist_dock.isFloating():
+            self.hist_dock.resize(self.hist_dock.minimumSizeHint().expandedTo(self.hist_dock.minimumSize()))
 
     def _dock(self, title, widget, area, cmd):
         d = QDockWidget(title, self)
         d.setObjectName(title)
-        d.setWidget(widget)
+        scroll = QScrollArea(d)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(widget)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        d.setWidget(scroll)
         d.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.addDockWidget(area, d)
         d.visibilityChanged.connect(lambda v: self.acts[cmd].setChecked(d.isVisible()))
