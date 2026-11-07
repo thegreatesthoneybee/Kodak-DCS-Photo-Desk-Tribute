@@ -81,9 +81,10 @@ a = Analysis(
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+onefile = sys.platform == "win32"
 exe = EXE(
-    pyz, a.scripts, [],
-    exclude_binaries=True,
+    pyz, a.scripts, a.binaries if onefile else [], a.datas if onefile else [], [],
+    exclude_binaries=not onefile,
     name="PhotoDesk",
     console=False,
     icon=str(app_icon) if app_icon and sys.platform == "win32" else None,
@@ -92,7 +93,8 @@ exe = EXE(
 )
 # Per-platform folder: the repository is often shared (e.g. Synology Drive) between a Windows PC and a
 # Mac, and a common dist/PhotoDesk would let one platform's build wipe the other's.
-coll = COLLECT(exe, a.binaries, a.datas, name="PhotoDesk-macOS" if sys.platform == "darwin" else "PhotoDesk-Windows")
+if not onefile:
+    coll = COLLECT(exe, a.binaries, a.datas, name="PhotoDesk-macOS")
 
 if sys.platform == "darwin":
     app = BUNDLE(

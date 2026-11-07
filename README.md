@@ -123,7 +123,7 @@ pyinstaller --noconfirm packaging/photodesk.spec
 ```
 
 빌드할 때 위 위치에 설치된 프로파일을 찾으면 프로파일·번역표·화면 리소스 묶음을 앱에 넣습니다(원본 exe와 도움말은 넣지 않음). 없으면 프로파일 없이 빌드되고, 앱이 처음 실행될 때 설치 파일을 묻습니다.
-빌드 결과는 Windows가 `dist/PhotoDesk-Windows/PhotoDesk.exe`, macOS가 `dist/PhotoDesk.app`입니다. 폴더가 플랫폼별로 나뉘어 있어, 저장소를 Windows와 Mac이 함께 쓰더라도(시놀로지 등) 한쪽 빌드가 다른 쪽 결과를 지우지 않습니다.
+빌드 결과는 Windows가 단일 실행 파일 `dist/PhotoDesk.exe`, macOS가 `dist/PhotoDesk.app`입니다. Windows에서는 EXE만 복사해 실행할 수 있으며 `_internal` 폴더나 Python 설치가 필요 없습니다. 필요한 라이브러리와 내장 리소스는 실행 시 Windows 임시 폴더에 자동으로 풀리고 정상 종료 시 정리됩니다(첫 실행은 폴더형 배포보다 느릴 수 있음). 두 플랫폼의 출력 경로가 달라 서로의 결과를 덮어쓰지 않습니다.
 
 ### 성능
 
