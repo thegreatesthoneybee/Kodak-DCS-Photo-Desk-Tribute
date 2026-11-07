@@ -1,6 +1,7 @@
 # PyInstaller spec: builds PhotoDesk.exe (Windows x64) or PhotoDesk.app (macOS arm64).
 # Run from the repository root:  pyinstaller packaging/photodesk.spec
 import os
+import platform
 import shutil
 import sys
 from io import BytesIO
@@ -89,7 +90,7 @@ exe = EXE(
     console=False,
     icon=str(app_icon) if app_icon and sys.platform == "win32" else None,
     version=win_version if sys.platform == "win32" else None,
-    target_arch="arm64" if sys.platform == "darwin" else None,
+    target_arch=platform.machine() if sys.platform == "darwin" else None,
 )
 # Per-platform folder: the repository is often shared (e.g. Synology Drive) between a Windows PC and a
 # Mac, and a common dist/PhotoDesk would let one platform's build wipe the other's.

@@ -1,19 +1,19 @@
-# macOS (Apple Silicon) 빌드 가이드
+# macOS (Apple Silicon / Intel) 빌드 가이드
 
-M1/M2/M3 Mac에서 `PhotoDesk.app`(arm64)을 만드는 절차입니다.
-같은 과정이 `.github/workflows/build.yml`의 `macos-14` 작업에도 들어 있습니다.
+Apple Silicon에서는 arm64 Python으로, Intel Mac에서는 x86_64 Python으로 `PhotoDesk.app`을 빌드합니다. 빌드 프로세스의 아키텍처를 사용하며 두 배포 파일은 별개입니다.
+Apple Silicon Mac에서도 Rosetta가 설치되어 있으면 x86_64 Python과 x86_64 의존성으로 Intel용 앱을 빌드하고 실행 검증할 수 있습니다. `.github/workflows/build.yml`의 `macos-14` 작업은 Apple Silicon용입니다.
 
 ## 1. 준비물
 
 | 항목 | 내용 |
 |---|---|
-| macOS | 11 Big Sur 이상, Apple Silicon |
-| Python | 3.10 이상, **arm64 빌드**(python.org 설치본 또는 Homebrew `/opt/homebrew/bin/python3`) |
+| macOS | 앱에 포함되는 Python·Qt 등 의존성의 최소 OS 요구사항을 충족해야 함 |
+| Python | 3.10 이상, 배포 대상에 맞는 **arm64 또는 x86_64 빌드** |
 | Xcode 명령행 도구 | `xcode-select --install` (codesign, ditto 사용) |
 | 원본 설치 파일 | `Photo_Desk_V_4_3_0.exe` (프로파일·UI·도움말 설치용, 앱에 포함하지 않음) |
 | 테스트용 RAW | 선택 사항. `raw/*.DCR` |
 
-Python이 arm64인지 먼저 확인합니다. `arm64`가 나와야 합니다. `x86_64`가 나오면 Rosetta용 Python이므로 다른 Python을 쓰세요.
+Python 아키텍처를 먼저 확인합니다. Apple Silicon용은 `arm64`, Intel용은 `x86_64`가 나와야 합니다. Rosetta에서 Intel용을 빌드할 때도 전체 의존성을 별도 x86_64 가상환경에 설치해야 합니다.
 
 ```bash
 python3 -c "import platform; print(platform.machine())"
@@ -78,12 +78,12 @@ Custom Look 프로파일은 `/Library/ColorSync/Profiles` 또는 `~/Library/Colo
 pyinstaller --noconfirm packaging/photodesk.spec
 ```
 
-결과물은 `dist/PhotoDesk.app`입니다. spec 파일이 macOS에서 `target_arch="arm64"`로 빌드하고 `BUNDLE`로 .app을 만듭니다. 번들 ID는 `org.photodesk.PhotoDesk`, 최소 OS는 11.0입니다.
+결과물은 `dist/PhotoDesk.app`입니다. spec 파일은 실행 중인 Python의 아키텍처로 빌드하고 `BUNDLE`로 .app을 만듭니다. 번들 ID는 `org.photodesk.PhotoDesk`입니다. 다른 아키텍처의 기존 결과를 보존하려면 `--distpath dist/macos-x86_64 --workpath build/macos-x86_64`처럼 별도 경로를 사용하세요. Info.plist의 기본 OS 표기만으로 호환성을 판단하지 말고, 포함된 Mach-O 라이브러리들의 최소 OS 요구사항도 확인해야 합니다.
 
 빌드 확인:
 
 ```bash
-file dist/PhotoDesk.app/Contents/MacOS/PhotoDesk        # "arm64"가 보여야 함
+file dist/PhotoDesk.app/Contents/MacOS/PhotoDesk        # 대상에 따라 "arm64" 또는 "x86_64"
 # 프로파일이 없으면 convert는 코드 2로 끝나야 함(충돌하지 않음)
 dist/PhotoDesk.app/Contents/MacOS/PhotoDesk convert nonexistent.DCR -o out; echo $?
 ```
@@ -134,14 +134,16 @@ Mac이 없어도 저장소를 GitHub에 올리면 `build` 워크플로가 `macos
 
 - **단축키:** 메뉴 단축키는 원본 Windows 키를 그대로 씁니다. Qt가 macOS에서 `Ctrl`을 `⌘`로 바꿔 표시합니다.
 - **외부 프로그램:** 이미지 편집기와 Camera Manager로 `.app`을 지정하면 `open -a`로 실행합니다.
-- **검증 상태:** Windows에서는 실제 실행까지 확인했습니다. macOS 빌드는 GitHub Actions 러너에서 빌드·CLI 점검만 하도록 되어 있고, 실제 Mac에서 GUI를 확인한 적은 없습니다. 대화상자 글자 잘림 등이 보이면 알려 주세요.
+- **검증 상태:** Windows 실행 및 M2 Pro의 arm64 빌드·서명·CLI를 확인했습니다. v0.5.5 Intel용은 M2 Pro의 Rosetta에서 x86_64 Python/LibRaw를 사용해 테스트·RAW 변환·GUI 기동·압축 해제 후 서명과 CLI를 검증했습니다. 물리적인 Intel Mac에서의 실행은 확인하지 않았습니다.
+- **Intel v0.5.5 배포 요구사항:** 포함된 Mach-O 의존성의 최소 OS 요구사항을 검사해 macOS 15.0 이상으로 표시했습니다. Python 3.13.18 x86_64, rawpy 0.27.0/LibRaw 0.22.1 소스 빌드, PySide6 6.10.2를 사용합니다. `PhotoDesk-Tribute-0.5.5-macos-x86_64.zip`을 선택하세요.
 
 ## 문제 해결
 
 | 증상 | 원인과 해결 |
 |---|---|
-| `file`에 `x86_64`가 나옴 | Rosetta Python으로 빌드함. arm64 Python으로 가상 환경을 다시 만듦 |
-| `pip install`이 rawpy를 소스로 빌드하려 함 | Python 버전에 맞는 휠이 없음. Python 3.10–3.13 사용 |
+| `file`의 아키텍처가 배포 대상과 다름 | 대상과 같은 아키텍처의 Python으로 별도 가상환경을 구성하고 재빌드 |
+| Intel용 rawpy 0.27 휠을 찾지 못함 | 공식 rawpy v0.27.0 소스와 해당 Git 하위 모듈의 LibRaw를 x86_64로 빌드해야 함. 기능 요구사항 때문에 구버전으로 낮추지 않음 |
+| Rosetta 빌드에서 libxcrun의 x86_64 아키텍처가 없다는 오류 | 최신 Command Line Tools는 arm64 전용일 수 있음. 실제 CLT clang/make 경로를 사용하고 CMake의 `CMAKE_OSX_ARCHITECTURES=x86_64`와 명시적 SDK 경로로 크로스 컴파일 |
 | 앱이 바로 꺼짐 | 터미널에서 `dist/PhotoDesk.app/Contents/MacOS/PhotoDesk`를 직접 실행해 오류 확인 |
 | "Kodak profiles not installed" | 4절의 `install-profiles` 실행 후 다시 빌드 |
 | 앱이 "손상되었습니다"로 열리지 않음 | 격리 속성 문제. 7절의 `xattr -dr com.apple.quarantine` 실행 |

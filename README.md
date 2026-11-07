@@ -1,6 +1,6 @@
 # PhotoDesk (Tribute)
 
-Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon)에서 네이티브로 다시 구현한 프로그램입니다.
+Kodak DCS Photo Desk 4.3을 Windows 11(x64)과 macOS(Apple Silicon / Intel)에서 실행하도록 다시 구현한 프로그램입니다. Mac 배포 파일은 arm64와 x86_64로 구분합니다.
 만든 사람: GO BANGWON (Korea). 버전은 `photodesk/__init__.py`의 `__version__` 한 곳에서 관리합니다.
 원본과 같은 화면과 같은 동작을 목표로 합니다.
 
