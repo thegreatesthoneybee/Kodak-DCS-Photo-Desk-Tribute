@@ -1193,6 +1193,39 @@ class YesToAllDialog(TemplateDialog):
             pass
 
 
+class SaveChangesDialog(YesToAllDialog):
+    """Save/discard/cancel are distinct; Yes to All is only for a multi-image batch."""
+    YES = OK
+    NO = 7
+    CANCEL = 2
+
+    def __init__(self, res, parent, text, multiple=False):
+        super().__init__(res, parent, text)
+        yes, all_yes, no = self.b[OK], self.b[self.YES_ALL], self.b[CANCEL]
+        no_geometry = no.geometry()
+        no.clicked.disconnect()
+        no.clicked.connect(lambda: self.done(self.NO))
+        self.cancel_button = QPushButton(res.tr("Cancel", ("Common", "Common Strings")) + "(&C)", self)
+        self.cancel_button.clicked.connect(self.reject)
+        self.buttons = {self.YES: yes, self.NO: no, self.CANCEL: self.cancel_button}
+        if multiple:
+            step = no.x() - all_yes.x()
+            self.setFixedSize(self.width() + step, self.height())
+            self.cancel_button.setGeometry(no_geometry.translated(step, 0))
+            self.buttons[self.YES_ALL] = all_yes
+        else:
+            no.setGeometry(all_yes.geometry())
+            all_yes.hide()
+            self.cancel_button.setGeometry(no_geometry)
+        for button in (yes, all_yes, no):
+            button.setDefault(False)
+        self.cancel_button.setDefault(True)
+        self.cancel_button.setFocus()
+
+    def reject(self):
+        self.done(self.CANCEL)
+
+
 class ProgressDialog(TemplateDialog):
     rid = 102
 

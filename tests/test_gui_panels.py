@@ -142,19 +142,18 @@ def test_mdi_controls_follow_active_image_and_preserve_hidden_state(window, qt_a
     assert first.controls.isVisible()
 
 
-def test_each_image_panel_targets_its_owner_and_viewer_reuse_refreshes(window, qt_app):
+def test_each_open_image_keeps_its_own_window_and_adjustment_panel(window, qt_app):
     main, folder = window
     sheet = main.open_folder(folder)
     first, second, finished = sheet.sheet.entries
     first.settings.exposure = 0.4
     second.settings.exposure = -0.6
-    viewer = main.open_image(first, sheet)
+    other = main.open_image(first, sheet)
     qt_app.processEvents()
-    assert viewer.controls.ev.value() == 4
-    assert main.open_image(second, sheet) is viewer
+    assert other.controls.ev.value() == 4
+    viewer = main.open_image(second, sheet)
+    assert viewer is not other
     assert viewer.controls.ev.value() == -6
-    other = ImageWindow(main, sheet, first)
-    main._float_new(other)
     qt_app.processEvents()
     assert other.controls is not viewer.controls
 
@@ -168,10 +167,12 @@ def test_each_image_panel_targets_its_owner_and_viewer_reuse_refreshes(window, q
     assert first.settings.rotation == 1
     assert second.settings.rotation == 0
 
-    main.open_image(finished, sheet)
+    finished_window = main.open_image(finished, sheet)
     qt_app.processEvents()
-    assert viewer.entry is finished
-    assert not viewer.controls.ev.isEnabled()
+    assert len(sheet.images) == 3
+    assert viewer.entry is second
+    assert finished_window.entry is finished
+    assert not finished_window.controls.ev.isEnabled()
     assert other.controls.ev.isEnabled()
     other.controls.tools[32838].click()
     assert first.settings.rotation == 2
@@ -180,6 +181,26 @@ def test_each_image_panel_targets_its_owner_and_viewer_reuse_refreshes(window, q
     qt_app.processEvents()
     assert viewer in sheet.images
     assert viewer.controls.isVisible()
+
+
+def test_open_selected_creates_multiple_windows_without_duplicate_views(window, qt_app):
+    main, folder = window
+    sheet = main.open_folder(folder)
+    for i in range(sheet.view.count()):
+        sheet.view.item(i).setSelected(True)
+    main._document_activated(sheet)
+    main.open_selected()
+    qt_app.processEvents()
+    assert len(sheet.images) == 3
+    assert {id(w.entry) for w in sheet.images} == {id(e) for e in sheet.sheet.entries}
+    assert all(w.isVisible() and w.floating for w in sheet.images)
+    existing = sheet.images[0]
+    existing.showMinimized()
+    qt_app.processEvents()
+    assert main.open_image(existing.entry, sheet) is existing
+    qt_app.processEvents()
+    assert not existing.isMinimized()
+    assert len(sheet.images) == 3
 
 
 def test_panel_edit_and_undo_stay_in_own_contact_sheet(window, qt_app):

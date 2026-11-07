@@ -186,7 +186,6 @@ class SheetWindow(DocumentSubWindow):
         self.view.currentItemChanged.connect(lambda *_: main.selection_changed())
         # Double-clicking a thumbnail shows it in the sheet's floating image window.
         self.view.itemDoubleClicked.connect(lambda it: main.open_image(it.data(Qt.UserRole), self))
-        self.viewer = None
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(
             lambda pos: main.context_menu(194, self.view.viewport().mapToGlobal(pos)))
@@ -253,11 +252,23 @@ class SheetWindow(DocumentSubWindow):
         return False
 
     def closeEvent(self, ev):
-        if not self.main._closing_documents and not self.main.confirm_save(self.sheet.dirty()):
-            ev.ignore()
-            return
-        for w in list(self.images):
-            w.close()
+        if not self.main._closing_documents:
+            if self.main._close_transaction_active:
+                ev.ignore()
+                return
+            if not self.main.confirm_save(self.sheet.dirty()):
+                ev.ignore()
+                return
+        old_closing = self.main._closing_documents
+        old_transaction = self.main._close_transaction_active
+        self.main._closing_documents = True
+        self.main._close_transaction_active = True
+        try:
+            for w in list(self.images):
+                w.close()
+        finally:
+            self.main._closing_documents = old_closing
+            self.main._close_transaction_active = old_transaction
         if self in self.main.sheets:
             self.main.sheets.remove(self)
         self.main._document_closed(self)
@@ -479,19 +490,6 @@ class ImageWindow(DocumentSubWindow):
             if action.isCheckable():
                 action.setChecked(action_cmd == cmd)
 
-    def set_entry(self, entry):
-        """Show another image of the same contact sheet in this window."""
-        old = self.entry
-        self.entry = entry
-        self.setWindowTitle(entry.path.name)
-        self.refresh_controls()
-        self.rgb = None
-        self.token += 1
-        self.latest[0] = self.token
-        self.update_histogram()
-        if not any(w.entry is old for w in self.sheet_win.images):
-            old.raw = None
-
     def _clicked(self, x, y):
         self.main._activate_image(self)
         tool = self.main.tool
@@ -502,28 +500,32 @@ class ImageWindow(DocumentSubWindow):
 
     def closeEvent(self, ev):
         sw = self.sheet_win
-        if sw.standalone and not self.main._closing_documents:
-            # No contact sheet behind this image: ask to save its changes here.
-            if not self.main.confirm_save(sw.sheet.dirty()):
-                ev.ignore()
-                return
-            if sw in self.main.sheets:
-                self.main.sheets.remove(sw)
-            sw.deleteLater()
-        elif (not self.main._closing_documents and self.entry.dirty
-              and not any(w is not self and w.entry is self.entry for w in sw.images)):
-            # Full image rendering opened from a contact sheet: ask to save this image's changes.
+        if not self.main._closing_documents and self.main._close_transaction_active:
+            ev.ignore()
+            return
+        last_view = not any(w is not self and w.entry is self.entry for w in sw.images)
+        if not self.main._closing_documents and last_view and self.entry.dirty:
+            # Closing an image concerns this entry only, including images in standalone sheets.
+            old_settings = self.entry.settings
             if not self.main.confirm_save([self.entry]):
                 ev.ignore()
                 return
+            discarded = self.entry.settings is not old_settings
+        else:
+            discarded = False
         self.place_controls(self.content, False)
         if self in sw.images:
             sw.images.remove(self)
-        if sw.viewer is self:
-            sw.viewer = None
+        if self.floating:
             self.main.q.setValue("Image Viewer Geometry", self.geometry())
         if not any(w.entry is self.entry for w in sw.images):
             self.entry.raw = None
+        if sw.standalone and not sw.images:
+            if sw in self.main.sheets:
+                self.main.sheets.remove(sw)
+            sw.deleteLater()
+        elif discarded and sw in self.main.sheets and not self.main._closing_documents:
+            self.main.refresh_thumb(self.entry)
         self.main._document_closed(self)
         super().closeEvent(ev)
 
@@ -571,6 +573,7 @@ class MainWindow(QMainWindow):
         self.closeups = []
         self._active_window = None
         self._closing_documents = False
+        self._close_transaction_active = False
         self.player = None
         self.looks = pipeline.available_looks(self.pdir) if profiles.is_installed() else []
         self.icons.look_labels = {name: pipeline.look_label(desc) for name, desc in self.looks}
@@ -1309,15 +1312,9 @@ class MainWindow(QMainWindow):
 
     def open_selected(self):
         sw = self.active_sheet()
-        sel = self.selection()
-        for i, e in enumerate(sel):
-            if i == 0 or sw.standalone:
-                self.open_image(e, sw)
-            elif not any(w.entry is e for w in sw.images):
-                # More than one image: the others get floating windows of their own.
-                w = ImageWindow(self, sw, e)
-                self._float_new(w, offset=24 * i)
-                self._load_render(w)
+        if sw:
+            for entry in self.selection():
+                self.open_image(entry, sw)
 
     def _activate_image(self, w):
         if w.floating:
@@ -1362,41 +1359,23 @@ class MainWindow(QMainWindow):
         w.activateWindow()
         self._sync_histogram_action()
 
-    def _show_in_viewer(self, sheet_win, entry):
-        """Show ``entry`` in the contact sheet's floating image window (reused for every image)."""
-        w = sheet_win.viewer
-        if w is not None and w not in sheet_win.images:
-            w = sheet_win.viewer = None
-        if w is None:
-            w = sheet_win.viewer = ImageWindow(self, sheet_win, entry)
-            self._float_new(w)
-        else:
-            if w.entry is not entry:
-                if (w.entry.dirty and not any(o is not w and o.entry is w.entry for o in sheet_win.images)
-                        and not self.confirm_save([w.entry])):
-                    return w
-                w.set_entry(entry)
-            if w.isMinimized():
-                w.showNormal()
-            self._activate_image(w)
-            if w.rgb is not None:
-                return w
-        self._load_render(w)
-        self.selection_changed()
-        return w
-
     def open_image(self, entry, sheet_win):
+        """Open an independent view per entry, or activate its existing window."""
         for w in sheet_win.images:
             if w.entry is entry:
+                if w.isMinimized():
+                    w.showNormal()
                 self._activate_image(w)
                 return w
-        if not sheet_win.standalone:
-            return self._show_in_viewer(sheet_win, entry)
         w = ImageWindow(self, sheet_win, entry)
-        self.mdi.addSubWindow(w)
-        w.resize(self.mdi.width() * 2 // 3, self.mdi.height() * 2 // 3)
-        w.show()
+        if sheet_win.standalone:
+            self.mdi.addSubWindow(w)
+            w.resize(self.mdi.width() * 2 // 3, self.mdi.height() * 2 // 3)
+            w.show()
+        else:
+            self._float_new(w, offset=24 * (len(sheet_win.images) - 1))
         self._load_render(w)
+        self.selection_changed()
         return w
 
     def _load_render(self, w):
@@ -1408,7 +1387,7 @@ class MainWindow(QMainWindow):
                 e.meta = raw.metadata
                 shown = [iw for iw in w.sheet_win.images if iw.entry is e]
                 if not shown:
-                    return              # the viewer moved on to another image meanwhile
+                    return              # all views closed before decoding finished
                 e.raw = raw
                 for iw in shown:
                     self.render_window(iw)
@@ -1466,26 +1445,82 @@ class MainWindow(QMainWindow):
             w.close()
 
     def confirm_save(self, entries):
-        """Ask to save changed settings before closing (Yes / Yes to All / No); False cancels."""
-        save_all = False
-        read_only = []
+        """Resolve the whole close batch before saving, discarding, or clearing dirty flags."""
+        if self._close_transaction_active:
+            return False
+        unique, seen = [], set()
         for e in entries:
-            if not save_all:
-                dlg = D.YesToAllDialog(self.res, self, self.res.s(62151).replace("%s", e.path.name))
-                r = dlg.exec()
-                if r == D.YesToAllDialog.YES_ALL:
-                    save_all = True
-                elif r != D.OK:
-                    e.dirty = False
+            if e.dirty and id(e) not in seen:
+                unique.append(e)
+                seen.add(id(e))
+        if not unique:
+            return True
+
+        self._close_transaction_active = True
+        try:
+            decisions = []
+            yes_all = False
+            multiple = len(unique) > 1
+            for e in unique:
+                if yes_all:
+                    decisions.append((e, True))
                     continue
-            if e.is_raw and e.read_only:
-                read_only.append(e)
-            elif e.is_raw:
-                pipeline.save_settings(e.path, e.settings)
-            e.dirty = False                 # finished files: changes are dropped (Save As keeps them)
-        if read_only:                       # e.g. on a CD: the Save As dialog box appears
-            self._save_as_entries(read_only, True)
-        return True
+                text = self.res.s(62151).replace("%s", e.path.name)
+                result = D.SaveChangesDialog(self.res, self, text, multiple=multiple).exec()
+                if result == D.SaveChangesDialog.YES_ALL:
+                    decisions.append((e, True))
+                    yes_all = True
+                elif result == D.SaveChangesDialog.YES:
+                    decisions.append((e, True))
+                elif result == D.SaveChangesDialog.NO:
+                    decisions.append((e, False))
+                else:                       # Cancel, Escape, window close, or an unknown result.
+                    return False
+
+            save_as = []
+            saved_in_place = set()
+            for e, save in decisions:
+                if not save:
+                    continue
+                if e.is_raw and not e.read_only:
+                    try:
+                        pipeline.save_settings(e.path, e.settings)
+                    except Exception as exc:
+                        sidecar = pipeline.sidecar_path(e.path)
+                        message = (self.res.s(60006).replace("%s", e.path.name, 1)
+                                   .replace("%s", str(sidecar), 1) + f"\n{exc}")
+                        D.message(self, self.res, message)
+                        return False
+                    saved_in_place.add(id(e))
+                else:
+                    # Read-only RAWs and finished images can only preserve changes through Save As.
+                    save_as.append(e)
+            if save_as and not self._save_as_entries(save_as, True, close_context=True):
+                return False
+
+            restored = []
+            for e, save in decisions:
+                if save:
+                    continue
+                try:
+                    settings = pipeline.load_settings(e.path)
+                    has_sidecar = pipeline.has_saved_settings(e.path)
+                except Exception as exc:
+                    D.message(self, self.res, f"{e.path.name}\n{exc}")
+                    return False
+                restored.append((e, settings, has_sidecar))
+
+            # Commit only after every requested save and every discard restoration succeeded.
+            for e, settings, has_sidecar in restored:
+                e.settings = settings
+                e.settings_from_sidecar = has_sidecar
+            for e, _ in decisions:
+                if id(e) in saved_in_place:
+                    e.settings_from_sidecar = True
+                e.dirty = False
+            return True
+        finally:
+            self._close_transaction_active = False
 
     def save(self):
         sw = self.active_sheet()
@@ -1500,7 +1535,7 @@ class MainWindow(QMainWindow):
         if entries:
             self._save_as_entries(entries, selected)
 
-    def _save_as_entries(self, entries, selected):
+    def _save_as_entries(self, entries, selected, close_context=False):
         res = self.res
         title = res.s(62014 if selected or len(entries) > 1 else 62013)
         types = res.s(62008).split("|")
@@ -1544,16 +1579,18 @@ class MainWindow(QMainWindow):
         b[1375].clicked.connect(self.preferences)
         dlg.layout().addWidget(setup, dlg.layout().rowCount(), 0, 1, -1)
         if dlg.exec() != QFileDialog.Accepted:
-            return
+            return False if close_context else None
         kind = filters.index(dlg.selectedNameFilter()) if dlg.selectedNameFilter() in filters else 0
         file_type = ("tiff", "jpeg", "asis")[kind]
-        self.q.setValue("Save As File Type", kind)
+        q_updates = {"Save As File Type": kind}
+        if not close_context:
+            self.q.setValue("Save As File Type", kind)
         if in_folder:
             target = in_folder[0]
         elif dlg.selectedFiles():
             target = Path(dlg.selectedFiles()[0])
         else:
-            return
+            return False if close_context else None
         if multi:
             out_dir = target if target.is_dir() else target.parent
             if b[1063].isChecked():
@@ -1561,21 +1598,34 @@ class MainWindow(QMainWindow):
                     digits, start = int(b[1065].text()), int(b[1066].text())
                 except ValueError:
                     D.message(self, res, res.s(60018))
-                    return
+                    return False if close_context else None
                 names = export.sequence_names(b[1064].text().strip() or "image", digits, start, len(entries))
-                self.q.setValue("Save As Basename", b[1064].text().strip())
-                self.q.setValue("Save As Num Digits", digits)
-                self.q.setValue("Save As Start From", start)
+                q_updates["Save As Basename"] = b[1064].text().strip()
+                q_updates["Save As Num Digits"] = digits
+                q_updates["Save As Start From"] = start
+                if not close_context:
+                    self.q.setValue("Save As Basename", b[1064].text().strip())
+                    self.q.setValue("Save As Num Digits", digits)
+                    self.q.setValue("Save As Start From", start)
             else:
                 names = [e.path.stem for e in entries]
             dests = [export.output_path(e.path, out_dir, file_type, n) for e, n in zip(entries, names)]
         else:
             out_dir = target.parent
             dests = [export.output_path(entries[0].path, out_dir, file_type, target.stem)]
-        self.q.setValue("LastFileSaveAsDialogPath", str(out_dir))
-        self._export(entries, dests, file_type, open_with=editor if b[1088].isChecked() else None)
+        q_updates["LastFileSaveAsDialogPath"] = str(out_dir)
+        if not close_context:
+            self.q.setValue("LastFileSaveAsDialogPath", str(out_dir))
+        result = self._export(entries, dests, file_type, open_with=editor if b[1088].isChecked() else None,
+                              close_context=close_context)
+        if close_context:
+            if result:
+                for key, value in q_updates.items():
+                    self.q.setValue(key, value)
+            return result
+        return None
 
-    def _export(self, entries, dests, file_type, open_with=None):
+    def _export(self, entries, dests, file_type, open_with=None, close_context=False):
         res = self.res
         replace_all = False
         jobs = []
@@ -1585,13 +1635,17 @@ class MainWindow(QMainWindow):
                 if r == D.YesToAllDialog.YES_ALL:
                     replace_all = True
                 elif r != D.OK:
+                    if close_context:
+                        return False
                     continue
             jobs.append((e, d))
         if not jobs:
-            return []
+            return False if close_context else []
         if file_type == "tiff" and self.opts.tiff_linear and not all(e.is_raw for e, _ in jobs):
             D.message(self, res, res.s(59521), "info")
         progress = D.ProgressDialog(res, self, res.s(59513) if file_type == "tiff" else res.s(62013), len(jobs))
+        if close_context:
+            progress.setWindowModality(Qt.ApplicationModal)
         progress.show()
         state = {"done": 0, "errors": [], "paths": []}
         pool = QThreadPool(self)
@@ -1621,12 +1675,16 @@ class MainWindow(QMainWindow):
         progress.close()
         if state["errors"]:
             D.message(self, res, "\n\n".join(state["errors"]))
-        for sw in self.sheets:
-            if any(Path(p).parent == sw.sheet.folder for p in state["paths"]):
-                sw.reload()
+        if not close_context:
+            for sw in self.sheets:
+                if any(Path(p).parent == sw.sheet.folder for p in state["paths"]):
+                    sw.reload()
         if open_with:
             for p in state["paths"]:
                 launch(open_with, p)
+        if close_context:
+            return (not progress.canceled and not state["errors"] and
+                    len(state["paths"]) == len(jobs) == len(entries))
         return state["paths"]
 
     def choose_editor(self):
@@ -1721,7 +1779,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QFile
         for w in list(sw.images):
             if w.entry in entries:
-                w.close()
+                if not w.close():
+                    return
         gone = sw.sheet.delete(entries, lambda p: QFile.moveToTrash(str(p)))
         if len(gone) < len(entries):
             D.message(self, self.res, self.res.s(60038).replace("%s", str(sw.sheet.folder)))
@@ -2713,22 +2772,37 @@ class MainWindow(QMainWindow):
                 menu.addAction(handlers[it[1]])
 
     def closeEvent(self, ev):
-        for sw in list(self.sheets):
-            if not self.confirm_save(sw.sheet.dirty()):
-                ev.ignore()
-                return
+        if self._close_transaction_active:
+            ev.ignore()
+            return
+        entries, seen = [], set()
+        for sw in self.sheets:
+            for e in sw.sheet.dirty():
+                if id(e) not in seen:
+                    entries.append(e)
+                    seen.add(id(e))
+        if not self.confirm_save(entries):
+            ev.ignore()
+            return
+
+        old_closing = self._closing_documents
         self._closing_documents = True
-        for sw in list(self.sheets):
-            sw.close()
-        self.mdi.subWindowActivated.disconnect()
-        if self.hist_dock.isFloating():
-            self.q.setValue("Histogram Dock Size", self.hist_dock.size())
-        self.q.setValue("MainFrame Position", self.saveGeometry())
-        self.q.setValue("ControlBar States", self.saveState())
-        for cu in list(self.closeups):
-            cu.close()
-        self.q.sync()
-        super().closeEvent(ev)
+        self._close_transaction_active = True
+        try:
+            for sw in list(self.sheets):
+                sw.close()
+            self.mdi.subWindowActivated.disconnect()
+            if self.hist_dock.isFloating():
+                self.q.setValue("Histogram Dock Size", self.hist_dock.size())
+            self.q.setValue("MainFrame Position", self.saveGeometry())
+            self.q.setValue("ControlBar States", self.saveState())
+            for cu in list(self.closeups):
+                cu.close()
+            self.q.sync()
+            super().closeEvent(ev)
+        finally:
+            self._closing_documents = old_closing
+            self._close_transaction_active = False
 
 
 TOOL_CMD = {v: k for k, v in TOOLS.items()}
@@ -2843,6 +2917,7 @@ def main():
             return 1
         profiles.install_from_installer(installer)
         res = R.Resources.load()
+    app.setWindowIcon(res.app_icon())
     install_qt_translation(app, res.language)
     splash = D.Splash(res)
     splash.show()
